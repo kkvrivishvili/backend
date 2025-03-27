@@ -312,7 +312,37 @@ async def ingest_file(
     
     # Leer contenido del archivo
     content = await file.read()
-    file_text = content.decode("utf-8")
+    
+    # Verificar el tamaño del archivo
+    max_file_size = 10 * 1024 * 1024  # 10 MB
+    if len(content) > max_file_size:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File size exceeds maximum allowed size of {max_file_size/1024/1024} MB"
+        )
+    
+    # Detectar tipo de archivo y manejar según su tipo
+    file_extension = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
+    supported_extensions = ['txt', 'md', 'html', 'json', 'csv']
+    
+    if file_extension not in supported_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type. Supported types: {', '.join(supported_extensions)}"
+        )
+    
+    # Intentar decodificar como UTF-8, con manejo de errores
+    try:
+        file_text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        # Intentar con otras codificaciones comunes
+        try:
+            file_text = content.decode("latin-1")  # Alternativa común
+        except:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not decode file. Please ensure it's a text file with UTF-8 or Latin-1 encoding."
+            )
     
     # Crear metadatos
     metadata = DocumentMetadata(

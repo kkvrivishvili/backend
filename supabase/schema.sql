@@ -79,11 +79,41 @@ ON ai.chat_feedback(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_chat_feedback_tenant
 ON ai.chat_feedback(tenant_id);
 
+-- Esquema para colecciones en Supabase
+
+-- Tabla de colecciones
+CREATE TABLE IF NOT EXISTS ai.collections (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    description TEXT,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    UNIQUE(tenant_id, name)
+);
+
+-- Índices
+CREATE INDEX IF NOT EXISTS idx_collections_tenant
+ON ai.collections(tenant_id);
+
+CREATE INDEX IF NOT EXISTS idx_collections_tenant_active
+ON ai.collections(tenant_id, is_active);
+
+-- Actualizar tablas existentes con campos para colecciones
+ALTER TABLE IF EXISTS ai.document_chunks
+ADD COLUMN IF NOT EXISTS collection_id UUID REFERENCES ai.collections(id);
+
+CREATE INDEX IF NOT EXISTS idx_document_chunks_collection
+ON ai.document_chunks(collection_id);
+
 -- Políticas de seguridad RLS
 ALTER TABLE ai.agent_configs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ai.chat_history ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ai.agent_collections ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ai.chat_feedback ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai.collections ENABLE ROW LEVEL SECURITY;
 
 -- Crear políticas
 CREATE POLICY tenant_isolation_agent_configs ON ai.agent_configs
@@ -99,6 +129,10 @@ CREATE POLICY tenant_isolation_agent_collections ON ai.agent_collections
     USING (tenant_id = auth.uid()::uuid);
 
 CREATE POLICY tenant_isolation_chat_feedback ON ai.chat_feedback
+    FOR ALL
+    USING (tenant_id = auth.uid()::uuid);
+
+CREATE POLICY tenant_isolation_collections ON ai.collections
     FOR ALL
     USING (tenant_id = auth.uid()::uuid);
 
@@ -163,5 +197,56 @@ BEGIN
     FROM ai.chat_history
     WHERE conversation_id = p_conversation_id AND tenant_id = p_tenant_id
     ORDER BY created_at;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Función para ejecutar consultas SQL desde RPC
+-- (útil para consultas complejas sobre colecciones)
+CREATE OR REPLACE FUNCTION run_query(query TEXT, params JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER 
+SET search_path = public
+AS $$
+DECLARE
+    result JSONB;
+BEGIN
+    EXECUTE query
+    INTO result
+    USING params;
+    
+    RETURN result;
+END;
+$$;
+
+-- Función para obtener estadísticas de colección
+CREATE OR REPLACE FUNCTION get_collection_stats(
+    p_collection_id UUID,
+    p_tenant_id UUID
+) RETURNS JSONB AS $$
+DECLARE
+    result JSONB;
+    collection_name TEXT;
+BEGIN
+    -- Obtener nombre de colección
+    SELECT name INTO collection_name
+    FROM ai.collections
+    WHERE id = p_collection_id AND tenant_id = p_tenant_id;
+    
+    IF collection_name IS NULL THEN
+        RETURN jsonb_build_object('error', 'Collection not found');
+    END IF;
+    
+    -- Construir estadísticas
+    SELECT jsonb_build_object(
+        'document_count', COUNT(DISTINCT metadata->>'document_id'),
+        'chunk_count', COUNT(*),
+        'avg_chunk_size', AVG(LENGTH(content)),
+        'last_updated', MAX(created_at)
+    ) INTO result
+    FROM ai.document_chunks
+    WHERE tenant_id = p_tenant_id AND metadata->>'collection' = collection_name;
+    
+    RETURN result;
 END;
 $$ LANGUAGE plpgsql;

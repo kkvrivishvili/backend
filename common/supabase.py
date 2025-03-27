@@ -144,127 +144,32 @@ def get_tenant_collections(tenant_id: str) -> List[Dict[str, Any]]:
     """
     supabase = get_supabase_client()
     
-    # Query para obtener colecciones
-    query = supabase.table("document_chunks").select("metadata->collection")
-    query = query.eq("tenant_id", tenant_id)
-    result = query.execute()
+    # Intentar obtener colecciones
+    try:
+        collection_result = supabase.table("ai.collections").select("*") \
+            .eq("tenant_id", tenant_id) \
+            .execute()
+        
+        collections = collection_result.data
+        
+        # Añadir estadísticas a cada colección
+        for collection in collections:
+            try:
+                stats_result = supabase.rpc("get_collection_stats", {
+                    "p_collection_id": collection["id"],
+                    "p_tenant_id": tenant_id
+                }).execute()
+                
+                if stats_result.data:
+                    collection["stats"] = stats_result.data
+                else:
+                    collection["stats"] = {"document_count": 0, "chunk_count": 0}
+            except Exception as e:
+                logger.error(f"Error getting stats for collection {collection['id']}: {str(e)}")
+                collection["stats"] = {"document_count": 0, "chunk_count": 0}
+        
+        return collections
     
-    if not result.data:
+    except Exception as e:
+        logger.error(f"Error fetching collections for tenant {tenant_id}: {str(e)}")
         return []
-    
-    # Extraer nombres de colección únicos
-    collections = set()
-    for row in result.data:
-        collection = row.get("collection")
-        if collection:
-            collections.add(collection)
-    
-    # Obtener estadísticas para cada colección
-    collection_stats = []
-    for collection in collections:
-        # Contar documentos en esta colección
-        count_query = supabase.table("document_chunks").select("metadata->document_id", "count")
-        count_query = count_query.eq("tenant_id", tenant_id)
-        count_query = count_query.filter("metadata->collection", "eq", collection)
-        count_result = count_query.execute()
-        
-        document_count = 0
-        if count_result.data and count_result.data[0].get("count"):
-            document_count = count_result.data[0]["count"]
-        
-        collection_stats.append({
-            "name": collection,
-            "document_count": document_count
-        })
-    
-    return collection_stats
-
-# hace falta agregar este codigo:
-
--- Esquema para colecciones en Supabase
-
--- Tabla de colecciones
-CREATE TABLE IF NOT EXISTS ai.collections (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    tenant_id UUID NOT NULL REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
-    name TEXT NOT NULL,
-    description TEXT,
-    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-    metadata JSONB DEFAULT '{}'::jsonb,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
-    UNIQUE(tenant_id, name)
-);
-
--- Índices
-CREATE INDEX IF NOT EXISTS idx_collections_tenant
-ON ai.collections(tenant_id);
-
-CREATE INDEX IF NOT EXISTS idx_collections_tenant_active
-ON ai.collections(tenant_id, is_active);
-
--- Actualizar tablas existentes con campos para colecciones
-ALTER TABLE ai.document_chunks
-ADD COLUMN IF NOT EXISTS collection_id UUID REFERENCES ai.collections(id);
-
-CREATE INDEX IF NOT EXISTS idx_document_chunks_collection
-ON ai.document_chunks(collection_id);
-
--- Función para ejecutar consultas SQL desde RPC
--- (útil para consultas complejas sobre colecciones)
-CREATE OR REPLACE FUNCTION run_query(query TEXT, params JSONB)
-RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER 
-SET search_path = public
-AS $$
-DECLARE
-    result JSONB;
-BEGIN
-    EXECUTE query
-    INTO result
-    USING params;
-    
-    RETURN result;
-END;
-$$;
-
--- Función para obtener estadísticas de colección
-CREATE OR REPLACE FUNCTION get_collection_stats(
-    p_collection_id UUID,
-    p_tenant_id UUID
-) RETURNS JSONB AS $$
-DECLARE
-    result JSONB;
-    collection_name TEXT;
-BEGIN
-    -- Obtener nombre de colección
-    SELECT name INTO collection_name
-    FROM ai.collections
-    WHERE id = p_collection_id AND tenant_id = p_tenant_id;
-    
-    IF collection_name IS NULL THEN
-        RETURN jsonb_build_object('error', 'Collection not found');
-    END IF;
-    
-    -- Construir estadísticas
-    SELECT jsonb_build_object(
-        'document_count', COUNT(DISTINCT metadata->>'document_id'),
-        'chunk_count', COUNT(*),
-        'avg_chunk_size', AVG(LENGTH(content)),
-        'last_updated', MAX(created_at)
-    ) INTO result
-    FROM ai.document_chunks
-    WHERE tenant_id = p_tenant_id AND metadata->>'collection' = collection_name;
-    
-    RETURN result;
-END;
-$$ LANGUAGE plpgsql;
-
--- RLS Políticas
-ALTER TABLE ai.collections ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY tenant_isolation_collections ON ai.collections
-    FOR ALL
-    USING (tenant_id = auth.uid()::uuid);
-

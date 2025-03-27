@@ -156,6 +156,12 @@ async def create_query_engine(
     Returns:
         RetrieverQueryEngine: Motor de consulta configurado
     """
+    # Validar response_mode
+    valid_response_modes = ["compact", "refine", "tree_summarize", "simple_summarize"]
+    if response_mode not in valid_response_modes:
+        logger.warning(f"Invalid response_mode '{response_mode}', defaulting to 'compact'")
+        response_mode = "compact"
+    
     # Obtener vector store
     vector_store = get_tenant_vector_store(tenant_info.tenant_id, collection_name)
     
@@ -253,10 +259,10 @@ async def process_query(
                     )
                 )
         
-        # Estimar uso de tokens (muy aproximado)
+        # Estimar uso de tokens (usado mismo factor 1.3 para consistencia con otros servicios)
         query_tokens = len(request.query.split()) * 1.3
         response_tokens = len(str(response).split()) * 1.3
-        context_tokens = sum([len(node.text.split()) for node in source_nodes]) * 0.5  # Solo contar fracción para embeddings
+        context_tokens = sum([len(node.text.split()) for node in source_nodes]) * 1.3  # Usar el mismo factor que otros servicios
         total_tokens = int(query_tokens + response_tokens + context_tokens)
         
         # Obtener modelo LLM usado
@@ -722,7 +728,6 @@ async def get_collection_stats(
             detail="You can only view statistics for your own collections"
         )
     
-    # Obtener estadísticas
     collection_name = collection_result.data[0]["name"]
     
     # Contar documentos (chunks)
@@ -827,4 +832,3 @@ async def get_collection_tool(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8002)
-

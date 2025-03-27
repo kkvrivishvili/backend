@@ -1,4 +1,4 @@
-# backend/server-llama/embedding-service/embeddings_service.py
+# backend/server-llama/embedding-service/embedding_service.py
 """
 Servicio de embeddings para la plataforma Linktree AI con multitenancy.
 """
@@ -94,8 +94,8 @@ class CachedOpenAIEmbedding(BaseEmbedding):
             if cached_embedding:
                 return cached_embedding
         
-        # Get from OpenAI if not in cache
-        embedding = self.openai_embed._get_text_embedding(text)
+        # Get from OpenAI if not in cache - use async method
+        embedding = await self.openai_embed._aget_text_embedding(text)
         
         # Store in cache if tenant_id provided
         if self.tenant_id and redis_client:
@@ -135,7 +135,7 @@ class CachedOpenAIEmbedding(BaseEmbedding):
             return [cache_hits[i] for i in range(len(texts))]
         
         # Get embeddings for non-cached texts
-        embeddings = self.openai_embed._get_text_embedding_batch(non_empty_texts)
+        embeddings = await self.openai_embed._aget_text_embedding_batch(non_empty_texts)
         
         # Store new embeddings in cache
         if self.tenant_id and redis_client:

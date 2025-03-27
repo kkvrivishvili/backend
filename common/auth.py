@@ -4,7 +4,7 @@ Funciones para verificación de tenant y permisos.
 """
 
 from typing import Dict, Any, Optional
-from fastapi import HTTPException, Depends
+from fastapi import HTTPException, Depends, Request
 import logging
 
 from .models import TenantInfo
@@ -14,12 +14,13 @@ from .config import get_tier_limits
 logger = logging.getLogger(__name__)
 
 
-async def verify_tenant(tenant_id: str) -> TenantInfo:
+async def verify_tenant(tenant_id: str = None, request: Request = None) -> TenantInfo:
     """
     Verifica que un tenant exista y tenga una suscripción activa.
     
     Args:
-        tenant_id: ID del tenant a verificar
+        tenant_id: ID del tenant a verificar (puede venir como parámetro o en el body)
+        request: Request para obtener el tenant_id del body cuando no se proporciona como parámetro
         
     Returns:
         TenantInfo: Información del tenant
@@ -28,6 +29,27 @@ async def verify_tenant(tenant_id: str) -> TenantInfo:
         HTTPException: Si el tenant no existe o no tiene suscripción activa
     """
     supabase = get_supabase_client()
+    
+    # Obtener tenant_id del body de la request si no viene como parámetro
+    if not tenant_id and request:
+        try:
+            # Intentar obtener del body como JSON
+            body = await request.json()
+            tenant_id = body.get('tenant_id')
+        except:
+            # Si no es JSON, intentar form data
+            try:
+                form_data = await request.form()
+                tenant_id = form_data.get('tenant_id')
+            except:
+                # Si no hay form data, intentar query params
+                query_params = request.query_params
+                tenant_id = query_params.get('tenant_id')
+    
+    # Verificar que se ha proporcionado tenant_id
+    if not tenant_id:
+        logger.warning("No se ha proporcionado tenant_id")
+        raise HTTPException(status_code=400, detail="tenant_id is required")
     
     # Verificar que el tenant existe
     tenant_data = supabase.table("tenants").select("*").eq("tenant_id", tenant_id).execute()

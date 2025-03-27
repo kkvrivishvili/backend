@@ -11,7 +11,7 @@ import json
 import httpx
 from typing import List, Dict, Any, Optional
 
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -25,11 +25,7 @@ from langchain.callbacks.base import BaseCallbackHandler
 from langchain.schema import AgentAction, AgentFinish, LLMResult
 
 # Importar nuestra biblioteca común
-from common.models import TenantInfo, HealthResponse
-from common.agent_models import (
-    AgentConfig, AgentRequest, AgentResponse, 
-    AgentTool, ChatMessage, ChatRequest, ChatResponse
-)
+from common.models import TenantInfo, HealthResponse, AgentConfig, AgentRequest, AgentResponse, AgentTool, ChatMessage, ChatRequest, ChatResponse
 from common.auth import verify_tenant, check_tenant_quotas, validate_model_access
 from common.config import get_settings
 from common.errors import setup_error_handling, handle_service_error, ServiceError
@@ -127,7 +123,7 @@ async def create_rag_tool(tool_config: AgentTool, tenant_id: str) -> BaseTool:
             payload = {
                 "tenant_id": tenant_id,
                 "query": query,
-                "collection_name": tool_config.collection_id,
+                "collection_name": tool_config.collection_id,  # Mantenemos este nombre para compatibilidad
                 "similarity_top_k": tool_config.parameters.get("top_k", 3)
             }
             
@@ -138,7 +134,8 @@ async def create_rag_tool(tool_config: AgentTool, tenant_id: str) -> BaseTool:
             )
             
             if response.status_code != 200:
-                return f"Error searching collection: {response.text}"
+                logger.error(f"Error searching collection: {response.text}")
+                return f"No se encontraron resultados relevantes para esta consulta."
             
             result = response.json()
             
@@ -740,9 +737,10 @@ async def chat_with_agent(
 @app.post("/public_chat")
 @handle_service_error()
 async def public_chat(
-    tenant_slug: str,
-    message: str,
-    conversation_id: Optional[str] = None
+    tenant_slug: str = None,
+    message: str = None,
+    conversation_id: Optional[str] = None,
+    request: Request = None
 ):
     """
     Endpoint público para chat con agente predeterminado de un tenant.
@@ -752,11 +750,31 @@ async def public_chat(
         tenant_slug: Slug público del tenant
         message: Mensaje del usuario
         conversation_id: ID de conversación opcional
+        request: Request object para obtener datos JSON
         
     Returns:
         dict: Respuesta del agente
     """
     start_time = time.time()
+    
+    # Permitir recibir datos como query params o en el body
+    if request and not (tenant_slug and message):
+        try:
+            body = await request.json()
+            tenant_slug = tenant_slug or body.get('tenant_slug')
+            message = message or body.get('message')
+            conversation_id = conversation_id or body.get('conversation_id')
+        except:
+            # Si no es JSON, intentar form data
+            form_data = await request.form()
+            tenant_slug = tenant_slug or form_data.get('tenant_slug')
+            message = message or form_data.get('message')
+            conversation_id = conversation_id or form_data.get('conversation_id')
+    
+    # Validar que se han proporcionado los parámetros necesarios
+    if not tenant_slug or not message:
+        raise HTTPException(status_code=400, 
+                           detail="Faltan parámetros requeridos (tenant_slug, message)")
     
     # Obtener tenant por slug
     supabase = get_supabase_client()

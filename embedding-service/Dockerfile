@@ -19,4 +19,4 @@ WORKDIR /app/embedding-service
 EXPOSE 8001
 
 # Comando para iniciar el servicio
-CMD ["uvicorn", "embeddings_service:app", "--host", "0.0.0.0", "--port", "8001"]
+CMD ["python", "embedding_service.py"]
