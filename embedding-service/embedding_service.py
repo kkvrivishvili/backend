@@ -13,8 +13,14 @@ from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 # LlamaIndex imports
-from llama_index.embeddings.openai import OpenAIEmbedding
-from llama_index.embeddings.base import BaseEmbedding
+try:
+    # Nuevas importaciones (LlamaIndex >= 0.8.0)
+    from llama_index_embeddings_openai import OpenAIEmbedding
+    from llama_index_core.embeddings import BaseEmbedding
+except ImportError:
+    # Importaciones antiguas
+    from llama_index.embeddings.openai import OpenAIEmbedding
+    from llama_index.embeddings.base import BaseEmbedding
 
 # Importar nuestra biblioteca común
 from common.models import (

@@ -52,14 +52,14 @@ async def verify_tenant(tenant_id: str = None, request: Request = None) -> Tenan
         raise HTTPException(status_code=400, detail="tenant_id is required")
     
     # Verificar que el tenant existe
-    tenant_data = supabase.table("tenants").select("*").eq("tenant_id", tenant_id).execute()
+    tenant_data = supabase.table("ai.tenants").select("*").eq("tenant_id", tenant_id).execute()
     
     if not tenant_data.data:
         logger.warning(f"Tenant no encontrado: {tenant_id}")
         raise HTTPException(status_code=404, detail=f"Tenant {tenant_id} not found")
     
     # Verificar que tiene una suscripción activa
-    subscription_data = supabase.table("tenant_subscriptions").select("*") \
+    subscription_data = supabase.table("ai.tenant_subscriptions").select("*") \
         .eq("tenant_id", tenant_id) \
         .eq("is_active", True) \
         .execute()
@@ -92,7 +92,7 @@ async def check_tenant_quotas(tenant_info: TenantInfo) -> bool:
     supabase = get_supabase_client()
     
     # Obtener estadísticas de uso actual
-    usage_data = supabase.table("tenant_stats").select("*") \
+    usage_data = supabase.table("ai.tenant_stats").select("*") \
         .eq("tenant_id", tenant_info.tenant_id) \
         .execute()
     

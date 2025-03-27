@@ -200,7 +200,7 @@ async def index_documents_task(
         # Añadir cada nodo al vector store
         for i, node_data in enumerate(node_data_list):
             # Añadir chunk de documento a Supabase
-            supabase.table("document_chunks").insert({
+            supabase.table("ai.document_chunks").insert({
                 "id": node_data["id"],
                 "tenant_id": tenant_id,
                 "content": node_data["text"],
@@ -424,7 +424,7 @@ async def delete_document(
     supabase = get_supabase_client()
     
     # Eliminar chunks de documento
-    result = supabase.table("document_chunks").delete() \
+    result = supabase.table("ai.document_chunks").delete() \
         .eq("tenant_id", tenant_id) \
         .eq("metadata->>document_id", document_id) \
         .execute()
@@ -470,7 +470,7 @@ async def delete_collection(
     supabase = get_supabase_client()
     
     # Eliminar chunks de documento para esta colección
-    result = supabase.table("document_chunks").delete() \
+    result = supabase.table("ai.document_chunks").delete() \
         .eq("tenant_id", tenant_id) \
         .eq("metadata->>collection", collection_name) \
         .execute()

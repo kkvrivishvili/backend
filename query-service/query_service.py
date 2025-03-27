@@ -14,13 +14,24 @@ from fastapi import FastAPI, HTTPException, Depends, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 # LlamaIndex imports
-from llama_index.core import VectorStoreIndex
-from llama_index.core.retrievers import VectorIndexRetriever
-from llama_index.llms.openai import OpenAI
-from llama_index.core.response_synthesizers import ResponseSynthesizer
-from llama_index.core.query_engine import RetrieverQueryEngine
-from llama_index.core.postprocessor import SimilarityPostprocessor
-from llama_index.core.callbacks import CallbackManager, LlamaDebugHandler
+try:
+    # Nuevas importaciones (LlamaIndex >= 0.8.0)
+    from llama_index_core import VectorStoreIndex
+    from llama_index_core.retrievers import VectorIndexRetriever
+    from llama_index_llms_openai import OpenAI
+    from llama_index_core.response_synthesizers import ResponseSynthesizer
+    from llama_index_core.query_engine import RetrieverQueryEngine
+    from llama_index_core.postprocessor import SimilarityPostprocessor
+    from llama_index_core.callbacks import CallbackManager, LlamaDebugHandler
+except ImportError:
+    # Importaciones antiguas
+    from llama_index.core import VectorStoreIndex
+    from llama_index.core.retrievers import VectorIndexRetriever
+    from llama_index.llms.openai import OpenAI
+    from llama_index.core.response_synthesizers import ResponseSynthesizer
+    from llama_index.core.query_engine import RetrieverQueryEngine
+    from llama_index.core.postprocessor import SimilarityPostprocessor
+    from llama_index.core.callbacks import CallbackManager, LlamaDebugHandler
 
 # Importar nuestra biblioteca común
 from common.models import (
@@ -464,7 +475,7 @@ async def get_tenant_stats(
     
     try:
         # Obtener estadísticas del tenant
-        stats_query = supabase.table("tenant_stats").select("*").eq("tenant_id", tenant_id).execute()
+        stats_query = supabase.table("ai.tenant_stats").select("*").eq("tenant_id", tenant_id).execute()
         
         if not stats_query.data:
             return {
@@ -477,7 +488,7 @@ async def get_tenant_stats(
         stats = stats_query.data[0]
         
         # Obtener logs de consultas para actividad reciente
-        logs_query = supabase.table("query_logs").select("*") \
+        logs_query = supabase.table("ai.query_logs").select("*") \
             .eq("tenant_id", tenant_id) \
             .order("created_at", desc=True) \
             .limit(5) \
@@ -486,7 +497,7 @@ async def get_tenant_stats(
         recent_queries = logs_query.data if logs_query.data else []
         
         # Obtener información de suscripción
-        sub_query = supabase.table("tenant_subscriptions").select("*") \
+        sub_query = supabase.table("ai.tenant_subscriptions").select("*") \
             .eq("tenant_id", tenant_id) \
             .eq("is_active", True) \
             .execute()
@@ -601,7 +612,7 @@ async def create_collection(
     
     # Verificar que la colección no existe ya
     supabase = get_supabase_client()
-    collection_result = supabase.table("collections").select("*") \
+    collection_result = supabase.table("ai.collections").select("*") \
         .eq("tenant_id", tenant_id) \
         .eq("name", name) \
         .execute()
@@ -613,7 +624,7 @@ async def create_collection(
         )
     
     # Crear colección
-    result = supabase.table("collections").insert({
+    result = supabase.table("ai.collections").insert({
         "tenant_id": tenant_id,
         "name": name,
         "description": description,
@@ -659,7 +670,7 @@ async def update_collection(
     
     # Verificar que la colección existe
     supabase = get_supabase_client()
-    collection_result = supabase.table("collections").select("*") \
+    collection_result = supabase.table("ai.collections").select("*") \
         .eq("id", collection_id) \
         .execute()
     
@@ -674,7 +685,7 @@ async def update_collection(
         )
     
     # Actualizar colección
-    result = supabase.table("collections").update({
+    result = supabase.table("ai.collections").update({
         "name": name,
         "description": description,
         "is_active": is_active,
@@ -714,7 +725,7 @@ async def get_collection_stats(
     
     # Verificar que la colección existe
     supabase = get_supabase_client()
-    collection_result = supabase.table("collections").select("*") \
+    collection_result = supabase.table("ai.collections").select("*") \
         .eq("id", collection_id) \
         .execute()
     
@@ -755,7 +766,7 @@ async def get_collection_stats(
         unique_docs_count = unique_docs_result.data[0]["unique_docs"]
     
     # Contar consultas
-    queries_result = supabase.table("query_logs").select("count") \
+    queries_result = supabase.table("ai.query_logs").select("count") \
         .eq("tenant_id", tenant_id) \
         .eq("collection", collection_name) \
         .execute()
@@ -801,7 +812,7 @@ async def get_collection_tool(
     
     # Verificar que la colección existe
     supabase = get_supabase_client()
-    collection_result = supabase.table("collections").select("*") \
+    collection_result = supabase.table("ai.collections").select("*") \
         .eq("id", collection_id) \
         .execute()
     

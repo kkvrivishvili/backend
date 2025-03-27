@@ -40,7 +40,12 @@ def get_tenant_vector_store(tenant_id: str, collection_name: Optional[str] = Non
     Returns:
         Any: SupabaseVectorStore configurado para el tenant
     """
-    from llama_index.vector_stores.supabase import SupabaseVectorStore
+    try:
+        # Intentar importación moderna primero (LlamaIndex >= 0.8.0)
+        from llama_index_vector_stores_supabase import SupabaseVectorStore
+    except ImportError:
+        # Fallback a la importación antigua
+        from llama_index.vector_stores.supabase import SupabaseVectorStore
     
     supabase = get_supabase_client()
     
@@ -52,7 +57,7 @@ def get_tenant_vector_store(tenant_id: str, collection_name: Optional[str] = Non
     # Crear vector store
     vector_store = SupabaseVectorStore(
         client=supabase,
-        table_name="document_chunks",
+        table_name="ai.document_chunks",
         content_field="content",
         embedding_field="embedding",
         metadata_field="metadata",
@@ -83,7 +88,7 @@ def get_tenant_documents(
     supabase = get_supabase_client()
     
     # Query base
-    query = supabase.table("document_chunks").select("metadata")
+    query = supabase.table("ai.document_chunks").select("metadata")
     
     # Añadir filtros
     query = query.eq("tenant_id", tenant_id)

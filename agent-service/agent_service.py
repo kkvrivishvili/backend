@@ -305,7 +305,7 @@ async def create_agent(
     # Guardar en Supabase
     supabase = get_supabase_client()
     try:
-        result = supabase.table("agent_configs").insert({
+        result = supabase.table("ai.agent_configs").insert({
             "agent_id": agent_id,
             "tenant_id": request.tenant_id,
             "name": request.name,
@@ -371,7 +371,7 @@ async def get_agent(
     supabase = get_supabase_client()
     
     # Obtener agente
-    result = supabase.table("agent_configs").select("*") \
+    result = supabase.table("ai.agent_configs").select("*") \
         .eq("agent_id", agent_id) \
         .execute()
     
@@ -436,7 +436,7 @@ async def list_agents(
     supabase = get_supabase_client()
     
     # Obtener agentes
-    result = supabase.table("agent_configs").select("*") \
+    result = supabase.table("ai.agent_configs").select("*") \
         .eq("tenant_id", tenant_id) \
         .order("created_at", desc=True) \
         .execute()
@@ -498,7 +498,7 @@ async def update_agent(
     
     # Verificar que el agente existe
     supabase = get_supabase_client()
-    result = supabase.table("agent_configs").select("*") \
+    result = supabase.table("ai.agent_configs").select("*") \
         .eq("agent_id", agent_id) \
         .execute()
     
@@ -533,7 +533,7 @@ async def update_agent(
         "updated_at": "now()"
     }
     
-    result = supabase.table("agent_configs").update(update_data) \
+    result = supabase.table("ai.agent_configs").update(update_data) \
         .eq("agent_id", agent_id) \
         .execute()
     
@@ -583,7 +583,7 @@ async def delete_agent(
     """
     # Verificar que el agente existe
     supabase = get_supabase_client()
-    result = supabase.table("agent_configs").select("*") \
+    result = supabase.table("ai.agent_configs").select("*") \
         .eq("agent_id", agent_id) \
         .execute()
     
@@ -598,7 +598,7 @@ async def delete_agent(
         )
     
     # Eliminar agente
-    result = supabase.table("agent_configs").delete() \
+    result = supabase.table("ai.agent_configs").delete() \
         .eq("agent_id", agent_id) \
         .execute()
     
@@ -638,7 +638,7 @@ async def chat_with_agent(
     
     # Obtener configuración del agente
     supabase = get_supabase_client()
-    result = supabase.table("agent_configs").select("*") \
+    result = supabase.table("ai.agent_configs").select("*") \
         .eq("agent_id", request.agent_id) \
         .execute()
     
@@ -711,7 +711,7 @@ async def chat_with_agent(
         
         # Registrar conversación solo si memory_enabled está activado
         if agent_config.memory_enabled:
-            supabase.table("chat_history").insert({
+            supabase.table("ai.chat_history").insert({
                 "conversation_id": conversation_id,
                 "tenant_id": request.tenant_id,
                 "agent_id": request.agent_id,
@@ -804,7 +804,7 @@ async def public_chat(
     tenant_id = tenant_result.data[0]["tenant_id"]
     
     # Obtener agente público predeterminado del tenant
-    agent_result = supabase.table("agent_configs").select("*") \
+    agent_result = supabase.table("ai.agent_configs").select("*") \
         .eq("tenant_id", tenant_id) \
         .eq("is_active", True) \
         .eq("metadata->is_public", True) \
@@ -865,7 +865,7 @@ async def get_service_status():
         supabase_status = "available"
         try:
             supabase = get_supabase_client()
-            supabase.table("agent_configs").select("agent_id").limit(1).execute()
+            supabase.table("ai.agent_configs").select("agent_id").limit(1).execute()
         except Exception:
             supabase_status = "unavailable"
         
