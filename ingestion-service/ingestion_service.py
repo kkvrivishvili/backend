@@ -133,10 +133,22 @@ def process_document(
         }
     )
     
-    # Parsear documento en nodos
+    # Parsear documento en nodos con tamaño adaptado al tipo de documento
+    chunk_size = 512  # Valor predeterminado
+    chunk_overlap = 50
+    
+    # Ajustar tamaño según el tipo de documento
+    doc_type = metadata.document_type.lower() if metadata.document_type else "text"
+    if doc_type == "article" or doc_type == "blog":
+        chunk_size = 750  # Mayor para textos cohesivos
+    elif doc_type == "code" or doc_type == "technical":
+        chunk_size = 350  # Menor para contenido técnico más denso
+    elif doc_type == "faq" or doc_type == "qa":
+        chunk_size = 256  # Aún menor para preguntas/respuestas
+        
     parser = SimpleNodeParser.from_defaults(
-        chunk_size=512,
-        chunk_overlap=50
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap
     )
     
     nodes = parser.get_nodes_from_documents([document])

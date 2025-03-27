@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # LangChain imports
-from langchain.agents import AgentType, initialize_agent, Tool
+from langchain.agents import AgentType, AgentExecutor, Tool, create_react_agent, create_structured_chat_agent, create_conversational_react_agent
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
@@ -156,8 +156,8 @@ async def create_rag_tool(tool_config: AgentTool, tenant_id: str) -> BaseTool:
     return Tool(
         name=tool_config.name,
         description=tool_config.description,
-        func=search_function,
-        coroutine=search_function  # Para soporte asíncrono
+        func=None,  # No usar func para funciones asíncronas
+        coroutine=search_function  # Sólo proporcionar la función asíncrona como coroutine
     )
 
 
@@ -217,10 +217,24 @@ async def initialize_agent_with_tools(
     
     # Inicializar agente
     callbacks = [callback_handler] if callback_handler else None
-    agent = initialize_agent(
+    
+    # Crear el objeto agent primero
+    from langchain.agents import create_react_agent, create_structured_chat_agent, create_conversational_react_agent
+    
+    # Seleccionar la función de creación adecuada según el tipo
+    if agent_config.agent_type == "react":
+        agent = create_react_agent(llm, tools, callbacks=callbacks)
+    elif agent_config.agent_type == "structured_chat":
+        agent = create_structured_chat_agent(llm, tools, callbacks=callbacks)
+    else:  # default: conversational
+        agent = create_conversational_react_agent(llm, tools, callbacks=callbacks)
+    
+    # Usar LangChain's AgentExecutor con el agente creado
+    from langchain.agents import AgentExecutor
+    
+    agent_executor = AgentExecutor.from_agent_and_tools(
+        agent=agent,
         tools=tools,
-        llm=llm,
-        agent=agent_type,
         memory=memory,
         verbose=True,
         callbacks=callbacks,
@@ -229,11 +243,11 @@ async def initialize_agent_with_tools(
     
     # Configurar prompt del sistema si está especificado
     if agent_config.system_prompt:
-        agent.agent.prompt = PromptTemplate.from_template(
+        agent_executor.agent.prompt = PromptTemplate.from_template(
             agent_config.system_prompt
         )
     
-    return agent
+    return agent_executor
 
 
 @app.post("/agents", response_model=AgentResponse)
@@ -695,17 +709,18 @@ async def chat_with_agent(
         response = await agent.acall({"input": request.message})
         assistant_message = response.get("output", "I don't know how to respond to that.")
         
-        # Registrar conversación
-        supabase.table("chat_history").insert({
-            "conversation_id": conversation_id,
-            "tenant_id": request.tenant_id,
-            "agent_id": request.agent_id,
-            "user_message": request.message,
-            "assistant_message": assistant_message,
-            "thinking": tracking_handler.get_thinking(),
-            "tools_used": tracking_handler.get_tools_used(),
-            "processing_time": tracking_handler.get_elapsed_time()
-        }).execute()
+        # Registrar conversación solo si memory_enabled está activado
+        if agent_config.memory_enabled:
+            supabase.table("chat_history").insert({
+                "conversation_id": conversation_id,
+                "tenant_id": request.tenant_id,
+                "agent_id": request.agent_id,
+                "user_message": request.message,
+                "assistant_message": assistant_message,
+                "thinking": tracking_handler.get_thinking(),
+                "tools_used": tracking_handler.get_tools_used(),
+                "processing_time": tracking_handler.get_elapsed_time()
+            }).execute()
         
         # Track token usage
         await track_token_usage(
