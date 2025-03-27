@@ -1,0 +1,12 @@
+# backend/server-llama/agent-service/requirements.txt
+fastapi>=0.95.0
+uvicorn>=0.22.0
+python-multipart>=0.0.6
+httpx>=0.24.0
+langchain>=0.1.0
+langchain-openai>=0.0.3
+openai>=1.1.0
+python-dotenv>=1.0.0
+tenacity>=8.2.2
+supabase>=1.0.3
+redis>=4.5.4

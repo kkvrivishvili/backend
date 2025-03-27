@@ -1,0 +1,15 @@
+# backend/server-llama/query-service/requirements.txt
+fastapi>=0.95.0
+uvicorn>=0.22.0
+python-multipart>=0.0.6
+httpx>=0.24.0
+llama-index>=0.8.0
+llama-index-llms-openai>=0.1.3
+llama-index-vector-stores-supabase>=0.1.1
+openai>=1.1.0
+python-dotenv>=1.0.0
+tenacity>=8.2.2
+pytest>=7.0.0
+
+# Shared library (referencia local al directorio común)
+-e ../common
