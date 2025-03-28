@@ -18,11 +18,17 @@ COPY common/ ./common/
 # Instalar curl para health checks
 RUN apt-get update && apt-get install -y curl && apt-get clean
 
-# Variables de entorno
+# Variables de entorno para modo de prueba
 ENV PYTHONPATH=/app
 ENV SKIP_SUPABASE=true
 ENV TESTING_MODE=true
+ENV MOCK_OPENAI=true
 ENV LOG_LEVEL=INFO
+ENV OPENAI_API_KEY=sk-dummy-key-for-testing
+ENV REDIS_URL=redis://redis:6379/0
+ENV EMBEDDING_MODEL=text-embedding-3-small
+ENV SUPABASE_URL=https://example.supabase.co
+ENV SUPABASE_KEY=dummy-key-for-testing
 
 # Puerto en el que se ejecutará el servicio
 EXPOSE 8001
@@ -33,5 +39,5 @@ WORKDIR /app/embedding-service
 # Health check para K8s
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD curl -f http://localhost:8001/status || exit 1
 
-# Comando para iniciar el servicio
+# Comando para ejecutar el servicio con modo de prueba
 CMD ["uvicorn", "embedding_service:app", "--host", "0.0.0.0", "--port", "8001"]
