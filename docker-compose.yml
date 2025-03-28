@@ -70,7 +70,7 @@ services:
       context: .
       dockerfile: docker/services/Dockerfile.agent
     ports:
-      - "8003:8003"
+      - "8004:8004"
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - REDIS_URL=redis://redis:6379/0
