@@ -6,12 +6,14 @@ Manejo de errores centralizado para todos los servicios.
 import logging
 import traceback
 import sys
+import re
 from typing import Callable, Dict, Any, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
+from functools import wraps
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +118,8 @@ def setup_error_handling(app: FastAPI) -> None:
 def handle_service_error(
     max_attempts: int = 3,
     min_wait_seconds: int = 1,
-    max_wait_seconds: int = 10
+    max_wait_seconds: int = 10,
+    on_error_response=None
 ):
     """
     Decorator para manejar errores en funciones de servicio con reintentos.
@@ -125,6 +128,7 @@ def handle_service_error(
         max_attempts: Número máximo de intentos
         min_wait_seconds: Tiempo mínimo de espera entre intentos
         max_wait_seconds: Tiempo máximo de espera entre intentos
+        on_error_response: Respuesta a devolver en caso de error
     """
     def decorator(func):
         @retry(
@@ -132,6 +136,7 @@ def handle_service_error(
             wait=wait_exponential(multiplier=1, min=min_wait_seconds, max=max_wait_seconds),
             retry=retry_if_exception_type((ConnectionError, TimeoutError))
         )
+        @wraps(func)
         async def wrapper(*args, **kwargs):
             try:
                 return await func(*args, **kwargs)
@@ -142,12 +147,95 @@ def handle_service_error(
             except Exception as e:
                 logger.error(f"Error in {func.__name__}: {str(e)}")
                 logger.error(traceback.format_exc())
+                
+                # Si es un ServiceError, dejarlo pasar
+                if isinstance(e, ServiceError):
+                    if on_error_response:
+                        return on_error_response
+                    raise
+                
                 # Convertir a ServiceError para manejo consistente
-                raise ServiceError(
+                error = ServiceError(
                     message=f"Error in service operation: {str(e)}",
                     status_code=500,
                     error_code="service_operation_failed",
                     details={"operation": func.__name__}
                 )
+                
+                if on_error_response:
+                    return on_error_response
+                raise error
         return wrapper
     return decorator
+
+
+# Versión simple sin reintentos, para compatibilidad con código existente
+def handle_service_error_simple(on_error_response=None):
+    """
+    Decorador simple para manejar errores del servicio de manera consistente, sin reintentos.
+    
+    Args:
+        on_error_response: Respuesta a devolver en caso de error
+        
+    Returns:
+        Decorador configurado
+    """
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            try:
+                return await func(*args, **kwargs)
+            except Exception as e:
+                logger.error(f"Error en {func.__name__}: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                # Si es un ServiceError, dejarlo pasar
+                if isinstance(e, ServiceError):
+                    if on_error_response:
+                        return on_error_response
+                    raise
+                
+                # Convertir otras excepciones a ServiceError
+                error = ServiceError(
+                    message=f"Error en operación del servicio: {str(e)}",
+                    status_code=500,
+                    error_code="service_operation_failed",
+                    details={"operation": func.__name__}
+                )
+                
+                if on_error_response:
+                    return on_error_response
+                raise error
+        return wrapper
+    return decorator
+
+
+def sanitize_content(content: str) -> str:
+    """
+    Sanitiza contenido para eliminar caracteres problemáticos
+    y datos potencialmente sensibles.
+    
+    Args:
+        content: Contenido a sanitizar
+        
+    Returns:
+        str: Contenido sanitizado
+    """
+    if not content:
+        return ""
+    
+    # Remover posibles tokens de API o credenciales
+    # Buscar patrones comunes de API keys y tokens
+    content = re.sub(r'(api[_-]?key|token|password|secret)["\']?\s*[:=]\s*["\']?([a-zA-Z0-9_\-\.]{10,})["\']?', 
+                    r'\1: [REDACTED]', 
+                    content, 
+                    flags=re.IGNORECASE)
+    
+    # Eliminar caracteres de control excepto saltos de línea y tabs
+    content = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', content)
+    
+    # Truncar si es demasiado largo (más de 100,000 caracteres)
+    if len(content) > 100000:
+        content = content[:100000] + "... [contenido truncado]"
+    
+    return content

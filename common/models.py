@@ -203,3 +203,12 @@ class ChatResponse(BaseModel):
     thinking: Optional[str] = None
     processing_time: float
     tools_used: Optional[List[str]] = None
+
+
+class RAGConfig(BaseModel):
+    """Configuración para consultas RAG."""
+    collection_name: str = "default"
+    similarity_top_k: int = 4
+    llm_model: Optional[str] = None
+    response_mode: str = "compact"
+    additional_metadata_filter: Optional[Dict[str, Any]] = None

@@ -3,22 +3,18 @@
 fastapi==0.115.12
 uvicorn==0.34.0
 pydantic==2.10.6
+pydantic-settings==2.8.1  # Necesario para BaseSettings en Pydantic v2
 python-multipart==0.0.20
 httpx==0.28.1
 openai==1.69.0
 tiktoken==0.9.0
-# Componentes modulares de LlamaIndex
-llama-index-core==0.12.26
-llama-index-embeddings-openai==0.3.1
-llama-index-llms-openai==0.3.1
+# Versión completa y moderna de llama-index
+llama-index==0.12.26
 redis==5.2.1
 python-dotenv==1.0.1
 tenacity==9.0.0
 pytest==8.3.5
 supabase==2.15.0
-# Componentes de langchain compatibles con Pydantic v2
-langchain==0.3.21
-langchain-openai==0.3.11
 
 # Nota: La biblioteca común se instalará usando PYTHONPATH
 # NO usar -e ../common aquí

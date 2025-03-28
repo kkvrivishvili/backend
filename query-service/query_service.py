@@ -13,42 +13,29 @@ from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, Depends, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-# LlamaIndex imports - actualizado para paquetes modulares 2025
-try:
-    # Importaciones específicas para cada módulo (recomendado para 0.12.26)
-    from llama_index_core.indices import VectorStoreIndex
-    from llama_index_core.retrievers import VectorIndexRetriever
-    from llama_index_llms_openai import OpenAI
-    from llama_index_core.response_synthesizers import CompactAndRefine, Refine, TreeSummarize, SimpleSummarize
-    from llama_index_core.query_engine import RetrieverQueryEngine
-    from llama_index_core.postprocessor import SimilarityPostprocessor
-    from llama_index_core.callbacks import CallbackManager, LlamaDebugHandler
+# LlamaIndex imports - versión monolítica
+from llama_index.core.indices import VectorStoreIndex
+from llama_index.core.retrievers import VectorIndexRetriever
+from llama_index.llms.openai import OpenAI
+from llama_index.core.response_synthesizers import CompactAndRefine, Refine, TreeSummarize, SimpleSummarize
+from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index.core.postprocessor import SimilarityPostprocessor
+from llama_index.core.callbacks import CallbackManager, LlamaDebugHandler
 
-    # Definiendo ResponseSynthesizer.from_args para mantener compatibilidad con código existente
-    class ResponseSynthesizer:
-        @classmethod
-        def from_args(cls, response_mode="compact", llm=None, callback_manager=None, **kwargs):
-            if response_mode == "compact":
-                return CompactAndRefine(llm=llm, callback_manager=callback_manager, **kwargs)
-            elif response_mode == "refine":
-                return Refine(llm=llm, callback_manager=callback_manager, **kwargs)
-            elif response_mode == "tree_summarize":
-                return TreeSummarize(llm=llm, callback_manager=callback_manager, **kwargs)
-            elif response_mode == "simple_summarize":
-                return SimpleSummarize(llm=llm, callback_manager=callback_manager, **kwargs)
-            else:
-                return CompactAndRefine(llm=llm, callback_manager=callback_manager, **kwargs)
-            
-except ImportError as e:
-    print(f"Error importando módulos LlamaIndex modulares: {e}")
-    # Fallback a importaciones monolíticas (menos recomendado)
-    from llama_index.core.indices import VectorStoreIndex
-    from llama_index.core.retrievers import VectorIndexRetriever
-    from llama_index.llms.openai import OpenAI
-    from llama_index.core.response_synthesizers import ResponseSynthesizer
-    from llama_index.core.query_engine import RetrieverQueryEngine
-    from llama_index.core.postprocessor import SimilarityPostprocessor
-    from llama_index.core.callbacks import CallbackManager, LlamaDebugHandler
+# Clase auxiliar para mantener compatibilidad con el código existente
+class ResponseSynthesizer:
+    @classmethod
+    def from_args(cls, response_mode="compact", llm=None, callback_manager=None, **kwargs):
+        if response_mode == "compact":
+            return CompactAndRefine(llm=llm, callback_manager=callback_manager, **kwargs)
+        elif response_mode == "refine":
+            return Refine(llm=llm, callback_manager=callback_manager, **kwargs)
+        elif response_mode == "tree_summarize":
+            return TreeSummarize(llm=llm, callback_manager=callback_manager, **kwargs)
+        elif response_mode == "simple_summarize":
+            return SimpleSummarize(llm=llm, callback_manager=callback_manager, **kwargs)
+        else:
+            return CompactAndRefine(llm=llm, callback_manager=callback_manager, **kwargs)
 
 # Importar nuestra biblioteca común
 from common.models import (

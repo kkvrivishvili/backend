@@ -25,6 +25,23 @@ def get_supabase_client() -> Client:
     return create_client(settings.supabase_url, settings.supabase_key)
 
 
+def init_supabase():
+    """
+    Inicializa el cliente Supabase.
+    Esta función se usa principalmente para garantizar que el cliente
+    está disponible durante la inicialización de la aplicación.
+    
+    Returns:
+        None
+    """
+    try:
+        client = get_supabase_client()
+        logger.info("Supabase inicializado correctamente")
+    except Exception as e:
+        logger.error(f"Error al inicializar Supabase: {str(e)}")
+        raise
+
+
 def get_tenant_vector_store(tenant_id: str, collection_name: Optional[str] = None) -> Any:
     """
     Obtiene un vector store para un tenant específico.
@@ -179,11 +196,10 @@ def get_tenant_collections(tenant_id: str) -> List[Dict[str, Any]]:
     
     return collection_stats
 
-# hace falta agregar este codigo:
+"""
+Esquema para colecciones en Supabase
 
--- Esquema para colecciones en Supabase
-
--- Tabla de colecciones
+Tabla de colecciones
 CREATE TABLE IF NOT EXISTS ai.collections (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
@@ -196,22 +212,22 @@ CREATE TABLE IF NOT EXISTS ai.collections (
     UNIQUE(tenant_id, name)
 );
 
--- Índices
+Índices
 CREATE INDEX IF NOT EXISTS idx_collections_tenant
 ON ai.collections(tenant_id);
 
 CREATE INDEX IF NOT EXISTS idx_collections_tenant_active
 ON ai.collections(tenant_id, is_active);
 
--- Actualizar tablas existentes con campos para colecciones
+Actualizar tablas existentes con campos para colecciones
 ALTER TABLE ai.document_chunks
 ADD COLUMN IF NOT EXISTS collection_id UUID REFERENCES ai.collections(id);
 
 CREATE INDEX IF NOT EXISTS idx_document_chunks_collection
 ON ai.document_chunks(collection_id);
 
--- Función para ejecutar consultas SQL desde RPC
--- (útil para consultas complejas sobre colecciones)
+Función para ejecutar consultas SQL desde RPC
+(útil para consultas complejas sobre colecciones)
 CREATE OR REPLACE FUNCTION run_query(query TEXT, params JSONB)
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -229,7 +245,7 @@ BEGIN
 END;
 $$;
 
--- Función para obtener estadísticas de colección
+Función para obtener estadísticas de colección
 CREATE OR REPLACE FUNCTION get_collection_stats(
     p_collection_id UUID,
     p_tenant_id UUID
@@ -261,10 +277,10 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- RLS Políticas
+RLS Políticas
 ALTER TABLE ai.collections ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY tenant_isolation_collections ON ai.collections
     FOR ALL
     USING (tenant_id = auth.uid()::uuid);
-
+"""

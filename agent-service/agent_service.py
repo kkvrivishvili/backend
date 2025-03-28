@@ -6,6 +6,7 @@ import time
 import uuid
 import asyncio
 from typing import Dict, List, Optional, Any
+from contextlib import asynccontextmanager
 
 import httpx
 import redis
@@ -32,20 +33,46 @@ from common.models import (
 )
 from common.auth import verify_tenant, check_tenant_quotas, validate_model_access
 from common.supabase import get_supabase_client, init_supabase
-from common.settings import Settings
+from common.config import Settings, get_settings
 from common.utils import handle_service_error, track_usage, sanitize_content
 from common.logging import init_logging
 
 # Configuración
-settings = Settings()
+settings = get_settings()
 init_logging(settings.log_level)
 logger = logging.getLogger("agent_service")
+
+# Cliente HTTP compartido
+http_client = httpx.AsyncClient()
+
+# Definir el contexto de lifespan para la aplicación
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Gestiona el ciclo de vida de la aplicación, reemplazando los eventos on_startup y on_shutdown.
+    """
+    # Código ejecutado durante el inicio
+    try:
+        # Inicializar Supabase
+        logger.info(f"Inicializando servicio con URL: {settings.supabase_url}")
+        init_supabase()
+        logger.info("Servicio de agente inicializado correctamente")
+        yield
+    except Exception as e:
+        logger.error(f"Error al inicializar el servicio de agente: {str(e)}")
+        # Aún permitimos que la aplicación se inicie, pero con funcionalidad limitada
+        yield
+    finally:
+        # Código ejecutado durante el cierre
+        await http_client.aclose()
+        logger.info("Servicio de agente detenido correctamente")
 
 # Inicializar la aplicación FastAPI
 app = FastAPI(
     title="Agent Service API",
     description="API para crear y utilizar agentes de IA para Linktree",
-    version=settings.service_version
+    version=settings.service_version,
+    lifespan=lifespan
 )
 
 # Configurar CORS
@@ -56,9 +83,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Cliente HTTP
-http_client = httpx.AsyncClient(timeout=60.0)
 
 # Cliente Redis
 redis_client = None
@@ -1098,24 +1122,3 @@ async def get_tenant_info(tenant_id: str) -> Optional[TenantInfo]:
     except Exception as e:
         logging.error(f"Error al obtener información del inquilino {tenant_id}: {e}")
         return None
-
-
-# Al iniciar la aplicación
-@app.on_event("startup")
-async def startup_event():
-    """Inicializa componentes al iniciar la aplicación."""
-    try:
-        # Inicializar Supabase
-        init_supabase(settings.supabase_url, settings.supabase_key)
-        logger.info("Servicio de agente inicializado correctamente")
-    except Exception as e:
-        logger.error(f"Error al inicializar el servicio de agente: {str(e)}")
-
-
-# Al detener la aplicación
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cierra conexiones al detener la aplicación."""
-    # Cerrar cliente HTTP
-    await http_client.aclose()
-    logger.info("Servicio de agente detenido correctamente")

@@ -12,16 +12,9 @@ from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-# LlamaIndex imports - actualizado para paquetes modulares 2025
-try:
-    # Importaciones específicas para cada módulo (recomendado para 0.12.26)
-    from llama_index_embeddings_openai import OpenAIEmbedding
-    from llama_index_core.embeddings import BaseEmbedding
-except ImportError as e:
-    print(f"Error importando módulos LlamaIndex modulares: {e}")
-    # Fallback a importaciones monolíticas (menos recomendado)
-    from llama_index.embeddings.openai import OpenAIEmbedding
-    from llama_index.embeddings.base import BaseEmbedding
+# LlamaIndex imports - versión monolítica (actualizada para 0.12.26)
+from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.core.embeddings import BaseEmbedding
 
 # Importar nuestra biblioteca común
 from common.models import (
