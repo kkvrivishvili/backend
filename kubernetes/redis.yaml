@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        resources:
+          limits:
+            cpu: "300m"
+            memory: "512Mi"
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+        readinessProbe:
+          tcpSocket:
+            port: 6379
+          initialDelaySeconds: 5
+          periodSeconds: 10
+      volumes:
+      - name: redis-data
+        emptyDir: {}  # Para entorno de desarrollo/pruebas (usar PVC para producción)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+  type: ClusterIP

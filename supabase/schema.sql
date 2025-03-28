@@ -1,4 +1,66 @@
--- Schema para el servicio de agentes LangChain
+-- Esquema SQL Completo para Linktree AI
+-- Este script configura todas las tablas, funciones, índices y políticas de seguridad
+-- necesarias para el sistema Linktree AI en Supabase.
+
+-- Crear el esquema AI si no existe
+CREATE SCHEMA IF NOT EXISTS ai;
+
+-- Asegurarse de que pgvector esté instalado para embeddings
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- Tabla base de tenants (esquema público)
+CREATE TABLE IF NOT EXISTS public.tenants (
+    tenant_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name TEXT NOT NULL,
+    slug TEXT UNIQUE NOT NULL,
+    subscription_tier TEXT DEFAULT 'free',
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+-- Tabla de suscripciones de tenant
+CREATE TABLE IF NOT EXISTS ai.tenant_subscriptions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
+    subscription_tier TEXT NOT NULL DEFAULT 'free',
+    is_active BOOLEAN DEFAULT TRUE,
+    started_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    expires_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+-- Tabla de estadísticas de tenant
+CREATE TABLE IF NOT EXISTS ai.tenant_stats (
+    tenant_id UUID PRIMARY KEY REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
+    document_count INTEGER DEFAULT 0,
+    tokens_used BIGINT DEFAULT 0,
+    last_activity TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+-- Tabla de colecciones
+CREATE TABLE IF NOT EXISTS ai.collections (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    description TEXT,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    UNIQUE(tenant_id, name)
+);
+
+-- Tabla de chunks de documento
+CREATE TABLE IF NOT EXISTS ai.document_chunks (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    metadata JSONB NOT NULL,
+    embedding VECTOR(1536),
+    collection_id UUID REFERENCES ai.collections(id),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
 
 -- Configuración de agentes
 CREATE TABLE IF NOT EXISTS ai.agent_configs (
@@ -33,19 +95,6 @@ CREATE TABLE IF NOT EXISTS ai.chat_history (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
 
--- Índices
-CREATE INDEX IF NOT EXISTS idx_agent_configs_tenant
-ON ai.agent_configs(tenant_id);
-
-CREATE INDEX IF NOT EXISTS idx_agent_configs_tenant_active
-ON ai.agent_configs(tenant_id, is_active);
-
-CREATE INDEX IF NOT EXISTS idx_chat_history_conversation
-ON ai.chat_history(conversation_id);
-
-CREATE INDEX IF NOT EXISTS idx_chat_history_tenant_agent
-ON ai.chat_history(tenant_id, agent_id);
-
 -- Relación entre colecciones y agentes (para herramientas RAG)
 CREATE TABLE IF NOT EXISTS ai.agent_collections (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -55,12 +104,6 @@ CREATE TABLE IF NOT EXISTS ai.agent_collections (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
     UNIQUE(agent_id, collection_name)
 );
-
-CREATE INDEX IF NOT EXISTS idx_agent_collections_agent
-ON ai.agent_collections(agent_id);
-
-CREATE INDEX IF NOT EXISTS idx_agent_collections_tenant
-ON ai.agent_collections(tenant_id);
 
 -- Feedback de usuarios
 CREATE TABLE IF NOT EXISTS ai.chat_feedback (
@@ -73,70 +116,85 @@ CREATE TABLE IF NOT EXISTS ai.chat_feedback (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
 
+-- Tabla de logs de consultas
+CREATE TABLE IF NOT EXISTS ai.query_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
+    query TEXT NOT NULL,
+    collection TEXT,
+    llm_model TEXT,
+    tokens_estimated INTEGER,
+    response_time_ms INTEGER,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+-- Tabla de métricas de embeddings
+CREATE TABLE IF NOT EXISTS ai.embedding_metrics (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
+    date_bucket DATE NOT NULL,
+    model TEXT NOT NULL,
+    total_requests INTEGER NOT NULL,
+    cache_hits INTEGER NOT NULL,
+    tokens_processed INTEGER NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+-- ÍNDICES ------------------------------------------------------------------
+
+-- Índices para agent_configs
+CREATE INDEX IF NOT EXISTS idx_agent_configs_tenant
+ON ai.agent_configs(tenant_id);
+
+CREATE INDEX IF NOT EXISTS idx_agent_configs_tenant_active
+ON ai.agent_configs(tenant_id, is_active);
+
+-- Índices para chat_history
+CREATE INDEX IF NOT EXISTS idx_chat_history_conversation
+ON ai.chat_history(conversation_id);
+
+CREATE INDEX IF NOT EXISTS idx_chat_history_tenant_agent
+ON ai.chat_history(tenant_id, agent_id);
+
+-- Índices para agent_collections
+CREATE INDEX IF NOT EXISTS idx_agent_collections_agent
+ON ai.agent_collections(agent_id);
+
+CREATE INDEX IF NOT EXISTS idx_agent_collections_tenant
+ON ai.agent_collections(tenant_id);
+
+-- Índices para chat_feedback
 CREATE INDEX IF NOT EXISTS idx_chat_feedback_conversation
 ON ai.chat_feedback(conversation_id);
 
 CREATE INDEX IF NOT EXISTS idx_chat_feedback_tenant
 ON ai.chat_feedback(tenant_id);
 
--- Esquema para colecciones en Supabase
-
--- Tabla de colecciones
-CREATE TABLE IF NOT EXISTS ai.collections (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    tenant_id UUID NOT NULL REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
-    name TEXT NOT NULL,
-    description TEXT,
-    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-    metadata JSONB DEFAULT '{}'::jsonb,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
-    UNIQUE(tenant_id, name)
-);
-
--- Índices
+-- Índices para collections
 CREATE INDEX IF NOT EXISTS idx_collections_tenant
 ON ai.collections(tenant_id);
 
 CREATE INDEX IF NOT EXISTS idx_collections_tenant_active
 ON ai.collections(tenant_id, is_active);
 
--- Actualizar tablas existentes con campos para colecciones
-ALTER TABLE IF EXISTS ai.document_chunks
-ADD COLUMN IF NOT EXISTS collection_id UUID REFERENCES ai.collections(id);
-
+-- Índices para document_chunks
 CREATE INDEX IF NOT EXISTS idx_document_chunks_collection
 ON ai.document_chunks(collection_id);
 
--- Políticas de seguridad RLS
-ALTER TABLE ai.agent_configs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE ai.chat_history ENABLE ROW LEVEL SECURITY;
-ALTER TABLE ai.agent_collections ENABLE ROW LEVEL SECURITY;
-ALTER TABLE ai.chat_feedback ENABLE ROW LEVEL SECURITY;
-ALTER TABLE ai.collections ENABLE ROW LEVEL SECURITY;
+CREATE INDEX IF NOT EXISTS idx_document_chunks_tenant
+ON ai.document_chunks(tenant_id);
 
--- Crear políticas
-CREATE POLICY tenant_isolation_agent_configs ON ai.agent_configs
-    FOR ALL
-    USING (tenant_id = auth.uid()::uuid);
+CREATE INDEX IF NOT EXISTS idx_document_chunks_metadata
+ON ai.document_chunks USING GIN(metadata);
 
-CREATE POLICY tenant_isolation_chat_history ON ai.chat_history
-    FOR ALL
-    USING (tenant_id = auth.uid()::uuid);
+-- Índice para búsquedas vectoriales (ajustar según capacidades de Supabase)
+CREATE INDEX IF NOT EXISTS idx_document_chunks_embedding ON ai.document_chunks 
+USING ivfflat (embedding vector_cosine_ops)
+WITH (lists = 100);
 
-CREATE POLICY tenant_isolation_agent_collections ON ai.agent_collections
-    FOR ALL
-    USING (tenant_id = auth.uid()::uuid);
+-- FUNCIONES ----------------------------------------------------------------
 
-CREATE POLICY tenant_isolation_chat_feedback ON ai.chat_feedback
-    FOR ALL
-    USING (tenant_id = auth.uid()::uuid);
-
-CREATE POLICY tenant_isolation_collections ON ai.collections
-    FOR ALL
-    USING (tenant_id = auth.uid()::uuid);
-
--- Funciones para estadísticas
+-- Función para obtener estadísticas de agente
 CREATE OR REPLACE FUNCTION get_agent_stats(
     p_tenant_id UUID,
     p_agent_id UUID
@@ -201,7 +259,6 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Función para ejecutar consultas SQL desde RPC
--- (útil para consultas complejas sobre colecciones)
 CREATE OR REPLACE FUNCTION run_query(query TEXT, params JSONB)
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -250,3 +307,101 @@ BEGIN
     RETURN result;
 END;
 $$ LANGUAGE plpgsql;
+
+-- Función para incrementar uso de tokens
+CREATE OR REPLACE FUNCTION increment_token_usage(
+    p_tenant_id UUID,
+    p_tokens INTEGER
+) RETURNS VOID AS $$
+BEGIN
+    INSERT INTO ai.tenant_stats (tenant_id, tokens_used, last_activity)
+    VALUES (p_tenant_id, p_tokens, now())
+    ON CONFLICT (tenant_id)
+    DO UPDATE SET
+        tokens_used = ai.tenant_stats.tokens_used + p_tokens,
+        last_activity = now();
+END;
+$$ LANGUAGE plpgsql;
+
+-- Función para incrementar contador de documentos
+CREATE OR REPLACE FUNCTION increment_document_count(
+    p_tenant_id UUID,
+    p_count INTEGER
+) RETURNS VOID AS $$
+BEGIN
+    INSERT INTO ai.tenant_stats (tenant_id, document_count, last_activity)
+    VALUES (p_tenant_id, p_count, now())
+    ON CONFLICT (tenant_id)
+    DO UPDATE SET
+        document_count = ai.tenant_stats.document_count + p_count,
+        last_activity = now();
+END;
+$$ LANGUAGE plpgsql;
+
+-- Función para decrementar contador de documentos
+CREATE OR REPLACE FUNCTION decrement_document_count(
+    p_tenant_id UUID,
+    p_count INTEGER
+) RETURNS VOID AS $$
+BEGIN
+    UPDATE ai.tenant_stats
+    SET document_count = GREATEST(0, document_count - p_count),
+        last_activity = now()
+    WHERE tenant_id = p_tenant_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- POLÍTICAS DE SEGURIDAD ROW LEVEL SECURITY ------------------------------------
+
+-- Habilitar RLS en todas las tablas
+ALTER TABLE ai.agent_configs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai.chat_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai.agent_collections ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai.chat_feedback ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai.collections ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai.document_chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai.tenant_stats ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai.query_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai.embedding_metrics ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai.tenant_subscriptions ENABLE ROW LEVEL SECURITY;
+
+-- Crear políticas de aislamiento por tenant
+CREATE POLICY tenant_isolation_agent_configs ON ai.agent_configs
+    FOR ALL
+    USING (tenant_id = auth.uid()::uuid);
+
+CREATE POLICY tenant_isolation_chat_history ON ai.chat_history
+    FOR ALL
+    USING (tenant_id = auth.uid()::uuid);
+
+CREATE POLICY tenant_isolation_agent_collections ON ai.agent_collections
+    FOR ALL
+    USING (tenant_id = auth.uid()::uuid);
+
+CREATE POLICY tenant_isolation_chat_feedback ON ai.chat_feedback
+    FOR ALL
+    USING (tenant_id = auth.uid()::uuid);
+
+CREATE POLICY tenant_isolation_collections ON ai.collections
+    FOR ALL
+    USING (tenant_id = auth.uid()::uuid);
+
+CREATE POLICY tenant_isolation_document_chunks ON ai.document_chunks
+    FOR ALL
+    USING (tenant_id = auth.uid()::uuid);
+
+CREATE POLICY tenant_isolation_tenant_stats ON ai.tenant_stats
+    FOR ALL
+    USING (tenant_id = auth.uid()::uuid);
+
+CREATE POLICY tenant_isolation_query_logs ON ai.query_logs
+    FOR ALL
+    USING (tenant_id = auth.uid()::uuid);
+
+CREATE POLICY tenant_isolation_embedding_metrics ON ai.embedding_metrics
+    FOR ALL
+    USING (tenant_id = auth.uid()::uuid);
+
+CREATE POLICY tenant_isolation_tenant_subscriptions ON ai.tenant_subscriptions
+    FOR ALL
+    USING (tenant_id = auth.uid()::uuid);

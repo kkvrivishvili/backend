@@ -1,0 +1,88 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    volumes:
+      - redis-data:/data
+
+  embedding-service:
+    build:
+      context: .
+      dockerfile: docker/services/Dockerfile.embedding
+    ports:
+      - "8001:8001"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - REDIS_URL=redis://redis:6379/0
+      - SKIP_SUPABASE=true
+      - TESTING_MODE=true
+      - LOG_LEVEL=INFO
+      - PYTHONPATH=/app
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  ingestion-service:
+    build:
+      context: .
+      dockerfile: docker/services/Dockerfile.ingestion
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - REDIS_URL=redis://redis:6379/0
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8001
+      - SKIP_SUPABASE=true
+      - TESTING_MODE=true
+      - LOG_LEVEL=INFO
+      - PYTHONPATH=/app
+    depends_on:
+      - embedding-service
+
+  query-service:
+    build:
+      context: .
+      dockerfile: docker/services/Dockerfile.query
+    ports:
+      - "8002:8002"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - REDIS_URL=redis://redis:6379/0
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8001
+      - SKIP_SUPABASE=true
+      - TESTING_MODE=true
+      - LOG_LEVEL=INFO
+      - PYTHONPATH=/app
+    depends_on:
+      - embedding-service
+
+  agent-service:
+    build:
+      context: .
+      dockerfile: docker/services/Dockerfile.agent
+    ports:
+      - "8003:8003"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - REDIS_URL=redis://redis:6379/0
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8001
+      - QUERY_SERVICE_URL=http://query-service:8002
+      - SKIP_SUPABASE=true
+      - TESTING_MODE=true
+      - LOG_LEVEL=INFO
+      - PYTHONPATH=/app
+    depends_on:
+      - embedding-service
+      - query-service
+
+volumes:
+  redis-data:

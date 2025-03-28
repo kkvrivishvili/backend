@@ -12,6 +12,10 @@ class TenantInfo(BaseModel):
     tenant_id: str
     subscription_tier: str  # "free", "pro", "business"
 
+    model_config = {
+        "extra": "ignore"
+    }
+
 
 class HealthResponse(BaseModel):
     """Respuesta estándar para endpoints de health check."""
@@ -64,8 +68,8 @@ class DocumentMetadata(BaseModel):
 class DocumentIngestionRequest(BaseModel):
     """Solicitud para ingerir documentos."""
     tenant_id: str
-    documents: List[str] = []  # Contenido de texto de los documentos
-    document_metadatas: List[DocumentMetadata] = []  # Metadatos para cada documento
+    documents: List[str]  # Contenido de texto de los documentos
+    document_metadatas: List[DocumentMetadata]  # Metadatos para cada documento
     collection_name: Optional[str] = "default"  # Colección/namespace para los documentos
 
 

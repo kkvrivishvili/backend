@@ -14,9 +14,16 @@ from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 # LlamaIndex imports
-from llama_index.core import Document
-from llama_index.core.node_parser import SimpleNodeParser
-from llama_index.core.schema import MetadataMode
+try:
+    # Nuevas importaciones (LlamaIndex >= 0.10.x)
+    from llama_index_core import Document
+    from llama_index_core.node_parser import SimpleNodeParser
+    from llama_index_core.schema import MetadataMode
+except ImportError:
+    # Importaciones antiguas
+    from llama_index.core import Document
+    from llama_index.core.node_parser import SimpleNodeParser
+    from llama_index.core.schema import MetadataMode
 
 # Importar nuestra biblioteca común
 from common.models import (
@@ -133,22 +140,10 @@ def process_document(
         }
     )
     
-    # Parsear documento en nodos con tamaño adaptado al tipo de documento
-    chunk_size = 512  # Valor predeterminado
-    chunk_overlap = 50
-    
-    # Ajustar tamaño según el tipo de documento
-    doc_type = metadata.document_type.lower() if metadata.document_type else "text"
-    if doc_type == "article" or doc_type == "blog":
-        chunk_size = 750  # Mayor para textos cohesivos
-    elif doc_type == "code" or doc_type == "technical":
-        chunk_size = 350  # Menor para contenido técnico más denso
-    elif doc_type == "faq" or doc_type == "qa":
-        chunk_size = 256  # Aún menor para preguntas/respuestas
-        
+    # Parsear documento en nodos
     parser = SimpleNodeParser.from_defaults(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap
+        chunk_size=512,
+        chunk_overlap=50
     )
     
     nodes = parser.get_nodes_from_documents([document])
@@ -200,7 +195,7 @@ async def index_documents_task(
         # Añadir cada nodo al vector store
         for i, node_data in enumerate(node_data_list):
             # Añadir chunk de documento a Supabase
-            supabase.table("ai.document_chunks").insert({
+            supabase.table("document_chunks").insert({
                 "id": node_data["id"],
                 "tenant_id": tenant_id,
                 "content": node_data["text"],
@@ -324,37 +319,7 @@ async def ingest_file(
     
     # Leer contenido del archivo
     content = await file.read()
-    
-    # Verificar el tamaño del archivo
-    max_file_size = 10 * 1024 * 1024  # 10 MB
-    if len(content) > max_file_size:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File size exceeds maximum allowed size of {max_file_size/1024/1024} MB"
-        )
-    
-    # Detectar tipo de archivo y manejar según su tipo
-    file_extension = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
-    supported_extensions = ['txt', 'md', 'html', 'json', 'csv']
-    
-    if file_extension not in supported_extensions:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type. Supported types: {', '.join(supported_extensions)}"
-        )
-    
-    # Intentar decodificar como UTF-8, con manejo de errores
-    try:
-        file_text = content.decode("utf-8")
-    except UnicodeDecodeError:
-        # Intentar con otras codificaciones comunes
-        try:
-            file_text = content.decode("latin-1")  # Alternativa común
-        except:
-            raise HTTPException(
-                status_code=400,
-                detail="Could not decode file. Please ensure it's a text file with UTF-8 or Latin-1 encoding."
-            )
+    file_text = content.decode("utf-8")
     
     # Crear metadatos
     metadata = DocumentMetadata(
@@ -424,7 +389,7 @@ async def delete_document(
     supabase = get_supabase_client()
     
     # Eliminar chunks de documento
-    result = supabase.table("ai.document_chunks").delete() \
+    result = supabase.table("document_chunks").delete() \
         .eq("tenant_id", tenant_id) \
         .eq("metadata->>document_id", document_id) \
         .execute()
@@ -470,7 +435,7 @@ async def delete_collection(
     supabase = get_supabase_client()
     
     # Eliminar chunks de documento para esta colección
-    result = supabase.table("ai.document_chunks").delete() \
+    result = supabase.table("document_chunks").delete() \
         .eq("tenant_id", tenant_id) \
         .eq("metadata->>collection", collection_name) \
         .execute()

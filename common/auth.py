@@ -4,7 +4,7 @@ Funciones para verificación de tenant y permisos.
 """
 
 from typing import Dict, Any, Optional
-from fastapi import HTTPException, Depends, Request
+from fastapi import HTTPException, Depends
 import logging
 
 from .models import TenantInfo
@@ -14,13 +14,12 @@ from .config import get_tier_limits
 logger = logging.getLogger(__name__)
 
 
-async def verify_tenant(tenant_id: str = None, request: Request = None) -> TenantInfo:
+async def verify_tenant(tenant_id: str) -> TenantInfo:
     """
     Verifica que un tenant exista y tenga una suscripción activa.
     
     Args:
-        tenant_id: ID del tenant a verificar (puede venir como parámetro o en el body)
-        request: Request para obtener el tenant_id del body cuando no se proporciona como parámetro
+        tenant_id: ID del tenant a verificar
         
     Returns:
         TenantInfo: Información del tenant
@@ -30,36 +29,15 @@ async def verify_tenant(tenant_id: str = None, request: Request = None) -> Tenan
     """
     supabase = get_supabase_client()
     
-    # Obtener tenant_id del body de la request si no viene como parámetro
-    if not tenant_id and request:
-        try:
-            # Intentar obtener del body como JSON
-            body = await request.json()
-            tenant_id = body.get('tenant_id')
-        except:
-            # Si no es JSON, intentar form data
-            try:
-                form_data = await request.form()
-                tenant_id = form_data.get('tenant_id')
-            except:
-                # Si no hay form data, intentar query params
-                query_params = request.query_params
-                tenant_id = query_params.get('tenant_id')
-    
-    # Verificar que se ha proporcionado tenant_id
-    if not tenant_id:
-        logger.warning("No se ha proporcionado tenant_id")
-        raise HTTPException(status_code=400, detail="tenant_id is required")
-    
     # Verificar que el tenant existe
-    tenant_data = supabase.table("ai.tenants").select("*").eq("tenant_id", tenant_id).execute()
+    tenant_data = supabase.table("tenants").select("*").eq("tenant_id", tenant_id).execute()
     
     if not tenant_data.data:
         logger.warning(f"Tenant no encontrado: {tenant_id}")
         raise HTTPException(status_code=404, detail=f"Tenant {tenant_id} not found")
     
     # Verificar que tiene una suscripción activa
-    subscription_data = supabase.table("ai.tenant_subscriptions").select("*") \
+    subscription_data = supabase.table("tenant_subscriptions").select("*") \
         .eq("tenant_id", tenant_id) \
         .eq("is_active", True) \
         .execute()
@@ -92,7 +70,7 @@ async def check_tenant_quotas(tenant_info: TenantInfo) -> bool:
     supabase = get_supabase_client()
     
     # Obtener estadísticas de uso actual
-    usage_data = supabase.table("ai.tenant_stats").select("*") \
+    usage_data = supabase.table("tenant_stats").select("*") \
         .eq("tenant_id", tenant_info.tenant_id) \
         .execute()
     
