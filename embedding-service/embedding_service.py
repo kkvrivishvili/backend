@@ -16,6 +16,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.core.embeddings import BaseEmbedding
 
+# Importar nuestro adaptador de Ollama
+from ollama_adapter import get_embedding_model
+
 # Importar nuestra biblioteca común
 from common.models import (
     TenantInfo, EmbeddingRequest, EmbeddingResponse, 
@@ -62,7 +65,9 @@ app.add_middleware(
 
 # Modelo de embedding con caché
 class CachedOpenAIEmbedding:
-    """Modelo OpenAI Embedding con soporte de caché."""
+    """
+    Modelo OpenAI o Ollama Embedding con soporte de caché.
+    """
     
     def __init__(
         self,
@@ -76,11 +81,19 @@ class CachedOpenAIEmbedding:
         self.api_key = api_key or settings.openai_api_key
         self.embed_batch_size = embed_batch_size
         self.tenant_id = tenant_id
-        self.openai_embed = OpenAIEmbedding(
-            model_name=model_name,
-            api_key=self.api_key,
-            embed_batch_size=embed_batch_size
-        )
+        
+        # Usar Ollama o OpenAI según configuración
+        use_ollama = os.environ.get("USE_OLLAMA", "").lower() == "true"
+        if use_ollama:
+            logger.info(f"Usando servicio de embeddings de Ollama con modelo {model_name}")
+            self.embedder = get_embedding_model(model_name)
+        else:
+            logger.info(f"Usando servicio de embeddings de OpenAI con modelo {model_name}")
+            self.openai_embed = OpenAIEmbedding(
+                model_name=model_name,
+                api_key=self.api_key,
+                embed_batch_size=embed_batch_size
+            )
     
     @handle_service_error()
     async def _aget_text_embedding(self, text: str) -> List[float]:
@@ -96,7 +109,10 @@ class CachedOpenAIEmbedding:
                 return cached_embedding
         
         # Get from OpenAI if not in cache - use async method
-        embedding = await self.openai_embed._aget_text_embedding(text)
+        if hasattr(self, 'openai_embed'):
+            embedding = await self.openai_embed._aget_text_embedding(text)
+        else:
+            embedding = await self.embedder.get_embedding(text)
         
         # Store in cache if tenant_id provided
         if self.tenant_id and redis_client:
@@ -136,7 +152,10 @@ class CachedOpenAIEmbedding:
             return [cache_hits[i] for i in range(len(texts))]
         
         # Get embeddings for non-cached texts
-        embeddings = await self.openai_embed._aget_text_embedding_batch(non_empty_texts)
+        if hasattr(self, 'openai_embed'):
+            embeddings = await self.openai_embed._aget_text_embedding_batch(non_empty_texts)
+        else:
+            embeddings = await self.embedder.get_batch_embeddings(non_empty_texts)
         
         # Store new embeddings in cache
         if self.tenant_id and redis_client:

@@ -14,6 +14,19 @@ services:
     volumes:
       - redis-data:/data
 
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
   embedding-service:
     build:
       context: .
@@ -27,8 +40,13 @@ services:
       - TESTING_MODE=true
       - LOG_LEVEL=INFO
       - PYTHONPATH=/app
+      - OLLAMA_API_URL=http://ollama:11434
+      - EMBEDDING_MODEL=nomic-embed-text
+      - USE_OLLAMA=true
     depends_on:
       redis:
+        condition: service_healthy
+      ollama:
         condition: service_healthy
 
   ingestion-service:
@@ -45,8 +63,11 @@ services:
       - TESTING_MODE=true
       - LOG_LEVEL=INFO
       - PYTHONPATH=/app
+      - OLLAMA_API_URL=http://ollama:11434
+      - USE_OLLAMA=true
     depends_on:
       - embedding-service
+      - ollama
 
   query-service:
     build:
@@ -62,8 +83,12 @@ services:
       - TESTING_MODE=true
       - LOG_LEVEL=INFO
       - PYTHONPATH=/app
+      - OLLAMA_API_URL=http://ollama:11434
+      - LLM_MODEL=llama3.2:1b
+      - USE_OLLAMA=true
     depends_on:
       - embedding-service
+      - ollama
 
   agent-service:
     build:
@@ -80,9 +105,14 @@ services:
       - TESTING_MODE=true
       - LOG_LEVEL=INFO
       - PYTHONPATH=/app
+      - OLLAMA_API_URL=http://ollama:11434
+      - LLM_MODEL=llama3.2:1b
+      - USE_OLLAMA=true
     depends_on:
       - embedding-service
       - query-service
+      - ollama
 
 volumes:
   redis-data:
+  ollama-data:

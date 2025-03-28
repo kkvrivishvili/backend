@@ -5,7 +5,7 @@ WORKDIR /app
 # Instalar dependencias base primero
 RUN pip install --upgrade pip && \
     pip install fastapi==0.115.12 uvicorn==0.34.0 pydantic==2.10.6 pydantic-settings==2.8.1 python-multipart==0.0.20 httpx==0.28.1 \
-    openai==1.69.0 tiktoken==0.9.0 redis==5.2.1 python-dotenv==1.0.1 tenacity==9.0.0 \
+    tiktoken==0.9.0 redis==5.2.1 python-dotenv==1.0.1 tenacity==9.0.0 \
     pytest==8.3.5 supabase==2.15.0
 
 # Instalar LlamaIndex en versión monolítica
@@ -18,18 +18,22 @@ COPY common/ ./common/
 # Instalar curl para health checks
 RUN apt-get update && apt-get install -y curl && apt-get clean
 
+# Hacer que el script de inicialización sea ejecutable
+RUN chmod +x /app/query-service/init_ollama.sh
+
 # Variables de entorno para modo de prueba
 ENV PYTHONPATH=/app
 ENV SKIP_SUPABASE=true
 ENV TESTING_MODE=true
-ENV MOCK_OPENAI=true
+ENV MOCK_OPENAI=false
 ENV LOG_LEVEL=INFO
-ENV OPENAI_API_KEY=sk-dummy-key-for-testing
 ENV REDIS_URL=redis://redis:6379/0
 ENV EMBEDDING_SERVICE_URL=http://embedding-service:8001
-ENV LLM_MODEL=gpt-3.5-turbo
+ENV LLM_MODEL=llama3
 ENV SUPABASE_URL=https://example.supabase.co
 ENV SUPABASE_KEY=dummy-key-for-testing
+ENV OLLAMA_API_URL=http://ollama:11434
+ENV USE_OLLAMA=true
 
 # Puerto en el que se ejecutará el servicio
 EXPOSE 8002
@@ -41,4 +45,4 @@ WORKDIR /app/query-service
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD curl -f http://localhost:8002/status || exit 1
 
 # Comando para ejecutar el servicio con modo de prueba
-CMD ["uvicorn", "query_service:app", "--host", "0.0.0.0", "--port", "8002"]
+CMD ./init_ollama.sh && uvicorn query_service:app --host 0.0.0.0 --port 8002

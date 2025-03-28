@@ -22,6 +22,9 @@ from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.postprocessor import SimilarityPostprocessor
 from llama_index.core.callbacks import CallbackManager, LlamaDebugHandler
 
+# Importar nuestro adaptador de Ollama
+from ollama_adapter import get_llm_model
+
 # Clase auxiliar para mantener compatibilidad con el código existente
 class ResponseSynthesizer:
     @classmethod
@@ -129,7 +132,7 @@ async def generate_embedding(text: str, tenant_id: str) -> List[float]:
 
 
 # Crear LLM basado en el tier del tenant
-def get_llm_for_tenant(tenant_info: TenantInfo, requested_model: Optional[str] = None) -> OpenAI:
+def get_llm_for_tenant(tenant_info: TenantInfo, requested_model: Optional[str] = None) -> Any:
     """
     Obtiene el LLM adecuado según nivel de suscripción del tenant.
     
@@ -138,16 +141,23 @@ def get_llm_for_tenant(tenant_info: TenantInfo, requested_model: Optional[str] =
         requested_model: Modelo solicitado (opcional)
         
     Returns:
-        OpenAI: Cliente LLM configurado
+        Any: Cliente LLM configurado (OpenAI o Ollama)
     """
     # Validar acceso al modelo
     model_name = validate_model_access(tenant_info, requested_model, "llm")
     
-    return OpenAI(
-        model=model_name,
-        temperature=0.1,
-        api_key=settings.openai_api_key
-    )
+    # Determinar si usar Ollama
+    use_ollama = os.environ.get("USE_OLLAMA", "").lower() == "true"
+    if use_ollama:
+        logger.info(f"Usando LLM de Ollama con modelo {model_name}")
+        return get_llm_model(model_name)
+    else:
+        logger.info(f"Usando LLM de OpenAI con modelo {model_name}")
+        return OpenAI(
+            model=model_name,
+            temperature=0.1,
+            api_key=settings.openai_api_key
+        )
 
 
 # Crear motor de consulta para el tenant
