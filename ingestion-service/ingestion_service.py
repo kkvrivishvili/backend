@@ -13,15 +13,16 @@ from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 
-# LlamaIndex imports
+# LlamaIndex imports - actualizado para paquetes modulares 2025
 try:
-    # Nuevas importaciones (LlamaIndex >= 0.10.x)
-    from llama_index_core import Document
+    # Importaciones específicas para cada módulo (recomendado para 0.12.26)
+    from llama_index_core.schema import Document
     from llama_index_core.node_parser import SimpleNodeParser
     from llama_index_core.schema import MetadataMode
-except ImportError:
-    # Importaciones antiguas
-    from llama_index.core import Document
+except ImportError as e:
+    print(f"Error importando módulos LlamaIndex modulares: {e}")
+    # Fallback a importaciones monolíticas (menos recomendado)
+    from llama_index.core.schema import Document
     from llama_index.core.node_parser import SimpleNodeParser
     from llama_index.core.schema import MetadataMode
 

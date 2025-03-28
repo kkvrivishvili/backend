@@ -2,12 +2,19 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Copiar requirements.txt para instalar dependencias
-COPY embedding-service/requirements.txt ./embedding-service/
+# Instalar dependencias base primero
+RUN pip install --upgrade pip && \
+    pip install fastapi==0.115.12 uvicorn==0.34.0 pydantic==2.10.6 python-multipart==0.0.20 httpx==0.28.1 \
+    openai==1.69.0 tiktoken==0.9.0 redis==5.2.1 python-dotenv==1.0.1 tenacity==9.0.0 \
+    pytest==8.3.5 supabase==2.15.0
+
+# Instalar componentes de LlamaIndex con las últimas versiones
+RUN pip install llama-index-core==0.10.22 llama-index-embeddings-openai==0.10.15
+
+# Copiar código de la aplicación
+COPY embedding-service/ ./embedding-service/
 COPY common/ ./common/
 
-# Instalar dependencias
-RUN pip install --no-cache-dir -r embedding-service/requirements.txt
 # Instalar curl para health checks
 RUN apt-get update && apt-get install -y curl && apt-get clean
 
@@ -17,9 +24,6 @@ ENV SKIP_SUPABASE=true
 ENV TESTING_MODE=true
 ENV LOG_LEVEL=INFO
 
-# Copiar código de la aplicación
-COPY embedding-service/ ./embedding-service/
-
 # Puerto en el que se ejecutará el servicio
 EXPOSE 8001
 
@@ -27,7 +31,7 @@ EXPOSE 8001
 WORKDIR /app/embedding-service
 
 # Health check para K8s
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD curl -f http://localhost:8001/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD curl -f http://localhost:8001/status || exit 1
 
 # Comando para iniciar el servicio
 CMD ["uvicorn", "embedding_service:app", "--host", "0.0.0.0", "--port", "8001"]

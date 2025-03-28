@@ -12,13 +12,14 @@ from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-# LlamaIndex imports
+# LlamaIndex imports - actualizado para paquetes modulares 2025
 try:
-    # Nuevas importaciones (LlamaIndex >= 0.8.0)
+    # Importaciones específicas para cada módulo (recomendado para 0.12.26)
     from llama_index_embeddings_openai import OpenAIEmbedding
     from llama_index_core.embeddings import BaseEmbedding
-except ImportError:
-    # Importaciones antiguas
+except ImportError as e:
+    print(f"Error importando módulos LlamaIndex modulares: {e}")
+    # Fallback a importaciones monolíticas (menos recomendado)
     from llama_index.embeddings.openai import OpenAIEmbedding
     from llama_index.embeddings.base import BaseEmbedding
 
@@ -67,7 +68,7 @@ app.add_middleware(
 )
 
 # Modelo de embedding con caché
-class CachedOpenAIEmbedding(BaseEmbedding):
+class CachedOpenAIEmbedding:
     """Modelo OpenAI Embedding con soporte de caché."""
     
     def __init__(
@@ -77,7 +78,8 @@ class CachedOpenAIEmbedding(BaseEmbedding):
         tenant_id: str = None,
         api_key: Optional[str] = None
     ):
-        super().__init__(model_name=model_name)
+        # Inicialización sin llamar a super() ya que no heredamos de BaseEmbedding
+        self.model_name = model_name
         self.api_key = api_key or settings.openai_api_key
         self.embed_batch_size = embed_batch_size
         self.tenant_id = tenant_id
