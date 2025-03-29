@@ -19,6 +19,20 @@ CREATE TABLE IF NOT EXISTS public.tenants (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
 
+-- Tabla de configuraciones por tenant (NUEVA)
+CREATE TABLE IF NOT EXISTS ai.tenant_configurations (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
+    environment TEXT NOT NULL DEFAULT 'development', -- development, staging, production
+    config_key TEXT NOT NULL,
+    config_value TEXT NOT NULL,
+    description TEXT,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    UNIQUE(tenant_id, environment, config_key)
+);
+
 -- Tabla de suscripciones de tenant
 CREATE TABLE IF NOT EXISTS ai.tenant_subscriptions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -192,6 +206,16 @@ CREATE INDEX IF NOT EXISTS idx_document_chunks_embedding ON ai.document_chunks
 USING ivfflat (embedding vector_cosine_ops)
 WITH (lists = 100);
 
+-- Índice para tenant_configurations
+CREATE INDEX IF NOT EXISTS idx_tenant_configurations_tenant
+ON ai.tenant_configurations(tenant_id);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_configurations_environment
+ON ai.tenant_configurations(tenant_id, environment);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_configurations_key
+ON ai.tenant_configurations(tenant_id, environment, config_key);
+
 -- FUNCIONES ----------------------------------------------------------------
 
 -- Función para obtener estadísticas de agente
@@ -351,6 +375,75 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Función para obtener todas las configuraciones de un tenant en un entorno específico
+CREATE OR REPLACE FUNCTION get_tenant_configurations(
+    p_tenant_id UUID,
+    p_environment TEXT DEFAULT 'development'
+) RETURNS TABLE (
+    config_key TEXT,
+    config_value TEXT,
+    description TEXT
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        tc.config_key,
+        tc.config_value,
+        tc.description
+    FROM 
+        ai.tenant_configurations tc
+    WHERE 
+        tc.tenant_id = p_tenant_id
+        AND tc.environment = p_environment
+        AND tc.is_active = TRUE;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Función para obtener una configuración específica de un tenant
+CREATE OR REPLACE FUNCTION get_tenant_configuration(
+    p_tenant_id UUID,
+    p_config_key TEXT,
+    p_environment TEXT DEFAULT 'development'
+) RETURNS TEXT AS $$
+DECLARE
+    v_value TEXT;
+BEGIN
+    SELECT config_value INTO v_value
+    FROM ai.tenant_configurations
+    WHERE 
+        tenant_id = p_tenant_id
+        AND config_key = p_config_key
+        AND environment = p_environment
+        AND is_active = TRUE;
+    
+    RETURN v_value;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Función para establecer o actualizar una configuración específica de un tenant
+CREATE OR REPLACE FUNCTION set_tenant_configuration(
+    p_tenant_id UUID,
+    p_config_key TEXT,
+    p_config_value TEXT,
+    p_description TEXT DEFAULT NULL,
+    p_environment TEXT DEFAULT 'development'
+) RETURNS BOOLEAN AS $$
+BEGIN
+    INSERT INTO ai.tenant_configurations (
+        tenant_id, environment, config_key, config_value, description
+    ) VALUES (
+        p_tenant_id, p_environment, p_config_key, p_config_value, p_description
+    )
+    ON CONFLICT (tenant_id, environment, config_key) 
+    DO UPDATE SET 
+        config_value = p_config_value,
+        description = COALESCE(p_description, ai.tenant_configurations.description),
+        updated_at = now();
+    
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql;
+
 -- POLÍTICAS DE SEGURIDAD ROW LEVEL SECURITY ------------------------------------
 
 -- Habilitar RLS en todas las tablas
@@ -364,6 +457,7 @@ ALTER TABLE ai.tenant_stats ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ai.query_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ai.embedding_metrics ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ai.tenant_subscriptions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai.tenant_configurations ENABLE ROW LEVEL SECURITY;
 
 -- Crear políticas de aislamiento por tenant
 CREATE POLICY tenant_isolation_agent_configs ON ai.agent_configs
@@ -403,5 +497,9 @@ CREATE POLICY tenant_isolation_embedding_metrics ON ai.embedding_metrics
     USING (tenant_id = auth.uid()::uuid);
 
 CREATE POLICY tenant_isolation_tenant_subscriptions ON ai.tenant_subscriptions
+    FOR ALL
+    USING (tenant_id = auth.uid()::uuid);
+
+CREATE POLICY tenant_isolation_tenant_configurations ON ai.tenant_configurations
     FOR ALL
     USING (tenant_id = auth.uid()::uuid);

@@ -16,8 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.core.embeddings import BaseEmbedding
 
-# Importar nuestro adaptador de Ollama
-from ollama_adapter import get_embedding_model
+# Importar nuestro adaptador de Ollama centralizado
+from common.ollama import get_embedding_model
 
 # Importar nuestra biblioteca común
 from common.models import (
@@ -33,13 +33,11 @@ from common.config import get_settings
 from common.errors import setup_error_handling, handle_service_error, ServiceError
 from common.tracking import track_embedding_usage
 from common.rate_limiting import setup_rate_limiting
+from common.logging import init_logging
 
-# Configurar logging
-logging.basicConfig(
-    level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("embeddings-service")
+# Inicializar logging usando la configuración centralizada
+init_logging()
+logger = logging.getLogger(__name__)
 
 # Configuración
 settings = get_settings()
@@ -82,9 +80,8 @@ class CachedOpenAIEmbedding:
         self.embed_batch_size = embed_batch_size
         self.tenant_id = tenant_id
         
-        # Usar Ollama o OpenAI según configuración
-        use_ollama = os.environ.get("USE_OLLAMA", "").lower() == "true"
-        if use_ollama:
+        # Usar Ollama o OpenAI según configuración centralizada
+        if settings.use_ollama:
             logger.info(f"Usando servicio de embeddings de Ollama con modelo {model_name}")
             self.embedder = get_embedding_model(model_name)
         else:

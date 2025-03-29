@@ -196,6 +196,219 @@ def get_tenant_collections(tenant_id: str) -> List[Dict[str, Any]]:
     
     return collection_stats
 
+
+def get_tenant_configurations(tenant_id: str, environment: str = "development") -> Dict[str, Any]:
+    """
+    Obtiene todas las configuraciones para un tenant específico en un entorno determinado.
+    
+    Args:
+        tenant_id: ID del tenant
+        environment: Entorno (development, staging, production)
+        
+    Returns:
+        Dict[str, Any]: Diccionario con las configuraciones (clave: valor)
+    """
+    try:
+        supabase = get_supabase_client()
+        response = supabase.rpc(
+            "get_tenant_configurations",
+            {
+                "p_tenant_id": tenant_id,
+                "p_environment": environment
+            }
+        ).execute()
+        
+        if hasattr(response, 'error') and response.error is not None:
+            logger.error(f"Error al obtener configuraciones para tenant {tenant_id}: {response.error}")
+            return {}
+            
+        # Convertir lista de configuraciones a diccionario
+        config_dict = {}
+        for item in response.data:
+            config_dict[item["config_key"]] = item["config_value"]
+            
+        return config_dict
+        
+    except Exception as e:
+        logger.error(f"Error al obtener configuraciones para tenant {tenant_id}: {str(e)}")
+        return {}
+
+
+def get_tenant_configuration(tenant_id: str, config_key: str, environment: str = "development") -> Optional[str]:
+    """
+    Obtiene una configuración específica para un tenant y entorno.
+    
+    Args:
+        tenant_id: ID del tenant
+        config_key: Clave de configuración
+        environment: Entorno (development, staging, production)
+        
+    Returns:
+        Optional[str]: Valor de configuración o None si no existe
+    """
+    try:
+        supabase = get_supabase_client()
+        response = supabase.rpc(
+            "get_tenant_configuration",
+            {
+                "p_tenant_id": tenant_id,
+                "p_config_key": config_key,
+                "p_environment": environment
+            }
+        ).execute()
+        
+        if hasattr(response, 'error') and response.error is not None:
+            logger.error(f"Error al obtener configuración {config_key} para tenant {tenant_id}: {response.error}")
+            return None
+            
+        return response.data
+        
+    except Exception as e:
+        logger.error(f"Error al obtener configuración {config_key} para tenant {tenant_id}: {str(e)}")
+        return None
+
+
+def set_tenant_configuration(
+    tenant_id: str, 
+    config_key: str, 
+    config_value: str,
+    description: Optional[str] = None,
+    environment: str = "development"
+) -> bool:
+    """
+    Establece o actualiza una configuración para un tenant específico.
+    
+    Args:
+        tenant_id: ID del tenant
+        config_key: Clave de configuración
+        config_value: Valor de configuración
+        description: Descripción opcional
+        environment: Entorno (development, staging, production)
+        
+    Returns:
+        bool: True si se actualizó correctamente
+    """
+    try:
+        supabase = get_supabase_client()
+        response = supabase.rpc(
+            "set_tenant_configuration",
+            {
+                "p_tenant_id": tenant_id,
+                "p_config_key": config_key,
+                "p_config_value": config_value,
+                "p_description": description,
+                "p_environment": environment
+            }
+        ).execute()
+        
+        if hasattr(response, 'error') and response.error is not None:
+            logger.error(f"Error al configurar {config_key} para tenant {tenant_id}: {response.error}")
+            return False
+            
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error al configurar {config_key} para tenant {tenant_id}: {str(e)}")
+        return False
+
+
+def override_settings_from_supabase(settings: Any, tenant_id: str, environment: str = "development") -> Any:
+    """
+    Sobrescribe las configuraciones del objeto Settings con valores de Supabase.
+    Esta función es utilizada por get_settings() en config.py cuando load_config_from_supabase=True.
+    
+    Args:
+        settings: Objeto Settings de configuración
+        tenant_id: ID del tenant
+        environment: Entorno (development, staging, production)
+        
+    Returns:
+        Any: Objeto Settings con los valores actualizados
+    """
+    try:
+        # Obtener todas las configuraciones para el tenant
+        configs = get_tenant_configurations(tenant_id, environment)
+        if not configs:
+            logger.warning(f"No se encontraron configuraciones para tenant {tenant_id} en entorno {environment}")
+            return settings
+            
+        # Recorrer las configuraciones y actualizar el objeto settings
+        for key, value in configs.items():
+            if hasattr(settings, key):
+                # Intentar convertir el valor al tipo de dato correcto
+                original_value = getattr(settings, key)
+                
+                try:
+                    # Manejar tipos básicos
+                    if value is None:
+                        # Preservar valores nulos si el tipo original lo permite
+                        if original_value is None:
+                            setattr(settings, key, None)
+                        continue
+                            
+                    if isinstance(original_value, bool):
+                        # Convertir a booleano con manejo seguro
+                        if isinstance(value, bool):
+                            setattr(settings, key, value)
+                        elif isinstance(value, str):
+                            setattr(settings, key, value.lower() in ('true', 'yes', 'y', '1', 'on'))
+                        elif isinstance(value, (int, float)):
+                            setattr(settings, key, bool(value))
+                        else:
+                            logger.warning(f"No se pudo convertir '{value}' a booleano para {key}")
+                            
+                    elif isinstance(original_value, int):
+                        # Convertir a entero con validación
+                        try:
+                            int_value = int(float(value)) if isinstance(value, str) else int(value)
+                            setattr(settings, key, int_value)
+                        except (ValueError, TypeError):
+                            logger.warning(f"No se pudo convertir '{value}' a entero para {key}")
+                            
+                    elif isinstance(original_value, float):
+                        # Convertir a flotante con validación
+                        try:
+                            float_value = float(value)
+                            setattr(settings, key, float_value)
+                        except (ValueError, TypeError):
+                            logger.warning(f"No se pudo convertir '{value}' a flotante para {key}")
+                            
+                    elif isinstance(original_value, (dict, list)):
+                        # Convertir strings JSON a dict/list
+                        if isinstance(value, str):
+                            try:
+                                import json
+                                parsed_value = json.loads(value)
+                                if isinstance(parsed_value, type(original_value)):
+                                    setattr(settings, key, parsed_value)
+                                else:
+                                    logger.warning(f"Tipo incorrecto después de parsear JSON para {key}")
+                            except json.JSONDecodeError:
+                                logger.warning(f"Error de formato JSON para {key}: {value}")
+                        elif isinstance(value, type(original_value)):
+                            # Si ya es del tipo correcto (dict o list)
+                            setattr(settings, key, value)
+                        else:
+                            logger.warning(f"Tipo incompatible para {key}: esperaba {type(original_value)}, recibió {type(value)}")
+                            
+                    else:
+                        # Para otros tipos (principalmente strings), asignar directamente
+                        setattr(settings, key, value)
+                        
+                    logger.debug(f"Configuración {key} actualizada para tenant {tenant_id}: {value}")
+                    
+                except Exception as e:
+                    logger.error(f"Error al convertir valor para {key}: {str(e)}")
+            else:
+                logger.warning(f"La configuración {key} no existe en el objeto Settings")
+                
+        return settings
+        
+    except Exception as e:
+        logger.error(f"Error al sobrescribir configuraciones para tenant {tenant_id}: {str(e)}")
+        return settings
+
+
 """
 Esquema para colecciones en Supabase
 

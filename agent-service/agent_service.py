@@ -36,6 +36,7 @@ from common.supabase import get_supabase_client, init_supabase
 from common.config import Settings, get_settings
 from common.utils import handle_service_error, track_usage, sanitize_content
 from common.logging import init_logging
+from common.ollama import get_llm_model, is_using_ollama
 
 # Configuración
 settings = get_settings()

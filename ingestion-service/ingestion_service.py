@@ -28,13 +28,11 @@ from common.config import get_settings
 from common.errors import setup_error_handling, handle_service_error, ServiceError
 from common.supabase import get_supabase_client, get_tenant_vector_store
 from common.rate_limiting import setup_rate_limiting
+from common.logging import init_logging
 
-# Configurar logging
-logging.basicConfig(
-    level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("ingestion-service")
+# Inicializar logging usando la configuración centralizada
+init_logging()
+logger = logging.getLogger(__name__)
 
 # Configuración
 settings = get_settings()

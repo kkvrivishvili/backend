@@ -8,6 +8,8 @@ import sys
 import os
 from typing import Optional
 
+from .config import get_settings
+
 
 def init_logging(log_level: Optional[str] = None) -> None:
     """
@@ -15,13 +17,16 @@ def init_logging(log_level: Optional[str] = None) -> None:
     
     Args:
         log_level: Nivel de logging (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-                  Si no se especifica, se usa INFO por defecto
+                  Si no se especifica, se usa el nivel configurado en config.py
     """
-    # Determinar nivel de log
-    level = getattr(logging, (log_level or "INFO").upper(), logging.INFO)
+    settings = get_settings()
+    
+    # Determinar nivel de log (priorizar el parámetro si se proporciona)
+    level_str = log_level or settings.log_level
+    level = getattr(logging, level_str.upper(), logging.INFO)
     
     # Configurar formato según el entorno
-    is_development = os.environ.get("ENVIRONMENT", "dev").lower() == "dev"
+    is_development = settings.testing_mode
     
     if is_development:
         format_str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

@@ -14,6 +14,7 @@ RUN pip install llama-index==0.12.26
 # Copiar código de la aplicación
 COPY ingestion-service/ ./ingestion-service/
 COPY common/ ./common/
+COPY .env.example ./.env.example
 
 # Instalar curl para health checks
 RUN apt-get update && apt-get install -y curl && apt-get clean
@@ -21,21 +22,21 @@ RUN apt-get update && apt-get install -y curl && apt-get clean
 # Hacer que el script de inicialización sea ejecutable
 RUN chmod +x /app/ingestion-service/init_ollama.sh
 
-# Variables de entorno para modo de prueba
+# Variables mínimas de identificación del servicio
 ENV PYTHONPATH=/app
-ENV SKIP_SUPABASE=true
-ENV TESTING_MODE=true
-ENV MOCK_OPENAI=false
-ENV LOG_LEVEL=INFO
-ENV OPENAI_API_KEY=sk-dummy-key-for-testing
-ENV REDIS_URL=redis://redis:6379/0
-ENV EMBEDDING_SERVICE_URL=http://embedding-service:8001
+ENV SERVICE_NAME=ingestion-service
+
+# Variables mínimas para modo de prueba (pueden ser sobreescritas por config.py o .env)
+ENV CONFIG_ENVIRONMENT=development
+ENV TENANT_ID=default
+ENV LOAD_CONFIG_FROM_SUPABASE=false
+
+# Variables de credenciales (estas deben ser sobreescritas en producción)
 ENV SUPABASE_URL=https://example.supabase.co
 ENV SUPABASE_KEY=dummy-key-for-testing
-ENV OLLAMA_API_URL=http://ollama:11434
-ENV USE_OLLAMA=true
+ENV OPENAI_API_KEY=sk-dummy-key-for-testing
 
-# Puerto en el que se ejecutará el servicio
+# Puerto en el que se ejecutará el servicio (definido en config.py)
 EXPOSE 8000
 
 # Directorio de trabajo para el servicio
@@ -44,5 +45,5 @@ WORKDIR /app/ingestion-service
 # Health check para K8s
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD curl -f http://localhost:8000/status || exit 1
 
-# Comando para ejecutar el servicio con modo de prueba
+# Comando para ejecutar el servicio
 CMD ./init_ollama.sh && uvicorn ingestion_service:app --host 0.0.0.0 --port 8000

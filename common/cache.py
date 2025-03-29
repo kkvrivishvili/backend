@@ -108,8 +108,16 @@ def cache_set(key: str, value: Any, ttl: int = None) -> bool:
     if not redis_client:
         return False
     
+    settings = get_settings()
+    
+    # Si no se especifica TTL, determinar según el tipo de clave
     if ttl is None:
-        ttl = get_settings().cache_ttl
+        if key.startswith('embed:'):
+            ttl = settings.embedding_cache_ttl
+        elif key.startswith('query:'):
+            ttl = settings.query_cache_ttl
+        else:
+            ttl = settings.cache_ttl
     
     try:
         serialized = json.dumps(value)

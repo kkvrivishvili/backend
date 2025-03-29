@@ -14,6 +14,7 @@ RUN pip install langchain==0.3.21 langchain-core==0.3.49 langchain-community==0.
 # Copiar código de la aplicación
 COPY agent-service/ ./agent-service/
 COPY common/ ./common/
+COPY .env.example ./.env.example
 
 # Instalar curl para health checks
 RUN apt-get update && apt-get install -y curl && apt-get clean
@@ -21,30 +22,28 @@ RUN apt-get update && apt-get install -y curl && apt-get clean
 # Hacer que el script de inicialización sea ejecutable
 RUN chmod +x /app/agent-service/init_ollama.sh
 
-# Variables de entorno para modo de prueba
+# Variables mínimas de identificación del servicio
 ENV PYTHONPATH=/app
-ENV SKIP_SUPABASE=true
-ENV TESTING_MODE=true
-ENV MOCK_OPENAI=false
-ENV LOG_LEVEL=INFO
-ENV OPENAI_API_KEY=sk-dummy-key-for-testing
-ENV REDIS_URL=redis://redis:6379/0
-ENV EMBEDDING_SERVICE_URL=http://embedding-service:8001
-ENV QUERY_SERVICE_URL=http://query-service:8002
-ENV LLM_MODEL=llama3
+ENV SERVICE_NAME=agent-service
+
+# Variables mínimas para modo de prueba (pueden ser sobreescritas por config.py o .env)
+ENV CONFIG_ENVIRONMENT=development
+ENV TENANT_ID=default
+ENV LOAD_CONFIG_FROM_SUPABASE=false
+
+# Variables de credenciales (estas deben ser sobreescritas en producción)
 ENV SUPABASE_URL=https://example.supabase.co
 ENV SUPABASE_KEY=dummy-key-for-testing
-ENV OLLAMA_API_URL=http://ollama:11434
-ENV USE_OLLAMA=true
+ENV OPENAI_API_KEY=sk-dummy-key-for-testing
 
-# Puerto en el que se ejecutará el servicio
-EXPOSE 8004
+# Puerto en el que se ejecutará el servicio (definido en config.py)
+EXPOSE 8003
 
 # Directorio de trabajo para el servicio
 WORKDIR /app/agent-service
 
 # Health check para K8s
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD curl -f http://localhost:8004/status || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD curl -f http://localhost:8003/status || exit 1
 
-# Comando para ejecutar el servicio con modo de prueba
-CMD ./init_ollama.sh && uvicorn agent_service:app --host 0.0.0.0 --port 8004
+# Comando para ejecutar el servicio
+CMD ./init_ollama.sh && uvicorn agent_service:app --host 0.0.0.0 --port 8003

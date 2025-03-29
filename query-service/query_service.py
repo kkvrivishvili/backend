@@ -22,8 +22,16 @@ from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.postprocessor import SimilarityPostprocessor
 from llama_index.core.callbacks import CallbackManager, LlamaDebugHandler
 
-# Importar nuestro adaptador de Ollama
-from ollama_adapter import get_llm_model
+# Importar nuestro adaptador de Ollama centralizado
+from common.ollama import get_llm_model
+
+# Importamos la configuración centralizada
+from common.config import get_settings
+from common.logging import init_logging
+
+# Inicializar logging usando la configuración centralizada
+init_logging()
+logger = logging.getLogger(__name__)
 
 # Clase auxiliar para mantener compatibilidad con el código existente
 class ResponseSynthesizer:
@@ -49,20 +57,10 @@ from common.auth import (
     verify_tenant, check_tenant_quotas, validate_model_access, 
     get_allowed_models_for_tier, get_tier_limits
 )
-from common.config import get_settings
-from common.errors import setup_error_handling, handle_service_error, ServiceError
 from common.supabase import get_supabase_client, get_tenant_vector_store, get_tenant_documents, get_tenant_collections
 from common.tracking import track_query, track_token_usage
 from common.rate_limiting import setup_rate_limiting
 
-# Configurar logging
-logging.basicConfig(
-    level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO")),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("query-service")
-
-# Configuración
 settings = get_settings()
 
 # HTTP cliente para servicio de embeddings
@@ -72,10 +70,13 @@ http_client = httpx.AsyncClient(timeout=30.0)
 llama_debug = LlamaDebugHandler(print_trace_on_end=False)
 callback_manager = CallbackManager([llama_debug])
 
-# FastAPI app
-app = FastAPI(title="Linktree AI - Query Service")
+# Configuración de la aplicación FastAPI
+app = FastAPI(
+    title="Linktree AI - Query Service"
+)
 
 # Configurar manejo de errores y rate limiting
+from common.errors import setup_error_handling, handle_service_error, ServiceError
 setup_error_handling(app)
 setup_rate_limiting(app)
 
@@ -146,18 +147,9 @@ def get_llm_for_tenant(tenant_info: TenantInfo, requested_model: Optional[str] =
     # Validar acceso al modelo
     model_name = validate_model_access(tenant_info, requested_model, "llm")
     
-    # Determinar si usar Ollama
-    use_ollama = os.environ.get("USE_OLLAMA", "").lower() == "true"
-    if use_ollama:
-        logger.info(f"Usando LLM de Ollama con modelo {model_name}")
-        return get_llm_model(model_name)
-    else:
-        logger.info(f"Usando LLM de OpenAI con modelo {model_name}")
-        return OpenAI(
-            model=model_name,
-            temperature=0.1,
-            api_key=settings.openai_api_key
-        )
+    # Obtener el modelo LLM desde el adaptador centralizado
+    logger.info(f"Usando modelo LLM: {model_name}")
+    return get_llm_model(model_name)
 
 
 # Crear motor de consulta para el tenant

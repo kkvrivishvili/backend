@@ -8,6 +8,7 @@ import time
 from typing import Dict, Any, List, Optional
 
 from .supabase import get_supabase_client
+from .config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -24,18 +25,20 @@ async def track_token_usage(tenant_id: str, tokens: int, model: str = None) -> b
     Returns:
         bool: True si se registró correctamente
     """
+    # Verificar si el tracking está habilitado
+    settings = get_settings()
+    if not settings.enable_usage_tracking:
+        logger.debug(f"Tracking de uso deshabilitado, omitiendo registro de {tokens} tokens para {tenant_id}")
+        return True
+        
     supabase = get_supabase_client()
     
     try:
-        # Ajustar factor de costo según modelo
-        model_cost_factor = {
-            "gpt-3.5-turbo": 1.0,
-            "gpt-4-turbo": 5.0,
-            "gpt-4-turbo-vision": 10.0,
-            "claude-3-5-sonnet": 8.0
-        }
+        # Obtener factores de costo desde la configuración centralizada
+        settings = get_settings()
         
-        cost_factor = model_cost_factor.get(model, 1.0) if model else 1.0
+        # Usar el factor de costo del modelo o 1.0 por defecto
+        cost_factor = settings.model_cost_factors.get(model, 1.0) if model else 1.0
         adjusted_tokens = int(tokens * cost_factor)
         
         # Llamar a la función de incremento de tokens
@@ -71,6 +74,12 @@ async def track_embedding_usage(tenant_id: str, texts: List[str], model: str, ca
     Returns:
         bool: True si se registró correctamente
     """
+    # Verificar si el tracking está habilitado
+    settings = get_settings()
+    if not settings.enable_usage_tracking:
+        logger.debug(f"Tracking de uso deshabilitado, omitiendo registro de {len(texts)} embeddings para {tenant_id}")
+        return True
+        
     supabase = get_supabase_client()
     
     try:
@@ -120,21 +129,35 @@ async def track_query(
     Returns:
         bool: True si se registró correctamente
     """
+    # Verificar si el tracking está habilitado
+    settings = get_settings()
+    if not settings.enable_usage_tracking:
+        logger.debug(f"Tracking de uso deshabilitado, omitiendo registro de consulta para {tenant_id}")
+        return True
+        
     supabase = get_supabase_client()
     
     try:
+        # Determinar si debemos registrar información de rendimiento
+        performance_data = {}
+        if settings.enable_performance_tracking:
+            performance_data["response_time_ms"] = response_time_ms
+        
+        # Metadatos básicos de la consulta
+        metadata = {
+            "query": query[:1000],  # Limitar longitud del query
+            "collection": collection,
+            "llm_model": llm_model,
+            "tokens": tokens,
+            "timestamp": int(time.time()),
+            **performance_data  # Incluir datos de rendimiento si está habilitado
+        }
+        
         # Registrar uso de tokens primero
         await track_token_usage(tenant_id, tokens, llm_model)
         
         # Registrar la consulta para analytics
-        supabase.table("query_logs").insert({
-            "tenant_id": tenant_id,
-            "query": query,
-            "collection": collection,
-            "llm_model": llm_model,
-            "tokens_estimated": tokens,
-            "response_time_ms": response_time_ms
-        }).execute()
+        supabase.table("query_logs").insert(metadata).execute()
         
         return True
     except Exception as e:
