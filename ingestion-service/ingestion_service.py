@@ -29,6 +29,8 @@ from common.errors import setup_error_handling, handle_service_error, ServiceErr
 from common.supabase import get_supabase_client, get_tenant_vector_store
 from common.rate_limiting import setup_rate_limiting
 from common.logging import init_logging
+from common.utils import prepare_service_request
+from common.context import TenantContext, get_current_tenant_id, with_tenant_context
 
 # Inicializar logging usando la configuración centralizada
 init_logging()
@@ -68,37 +70,36 @@ async def generate_embeddings(texts: List[str], tenant_id: str) -> List[List[flo
     Returns:
         List[List[float]]: Lista de vectores embedding
     """
-    payload = {
-        "tenant_id": tenant_id,
-        "texts": texts
-    }
+    if not texts:
+        return []
     
-    try:
-        response = await http_client.post(
-            f"{settings.embedding_service_url}/embed", 
-            json=payload,
-            timeout=60.0  # Timeout más largo para listas grandes
-        )
-        response.raise_for_status()
-        result = response.json()
-        
-        if result.get("embeddings") and len(result["embeddings"]) > 0:
+    # Usar el contexto del tenant en la llamada al servicio de embeddings
+    with TenantContext(tenant_id):
+        try:
+            settings = get_settings()
+            model = settings.default_embedding_model
+            
+            # Usar la función auxiliar para preparar la solicitud con contexto de tenant
+            payload = {
+                "model": model,
+                "texts": texts
+            }
+            
+            # tenant_id se propaga automáticamente
+            result = await prepare_service_request(
+                f"{settings.embedding_service_url}/embed",
+                payload,
+                tenant_id
+            )
+            
             return result["embeddings"]
-        else:
-            raise ServiceError("No embeddings returned from service", status_code=500)
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error connecting to embedding service: {str(e)}")
-        raise ServiceError(
-            f"Error connecting to embedding service: {str(e)}",
-            status_code=500
-        )
-    except Exception as e:
-        logger.error(f"Error getting embeddings: {str(e)}")
-        raise ServiceError(
-            f"Error getting embeddings: {str(e)}",
-            status_code=500
-        )
-
+            
+        except ServiceError as e:
+            logger.error(f"Error específico del servicio de embeddings para tenant {tenant_id}: {str(e)}")
+            raise ServiceError(f"Error al generar embeddings: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error inesperado al generar embeddings para tenant {tenant_id}: {str(e)}", exc_info=True)
+            raise ServiceError(f"Error al generar embeddings: {str(e)}")
 
 # Procesar documento y crear nodos
 def process_document(
@@ -154,7 +155,6 @@ def process_document(
     
     return node_data
 
-
 # Background task para indexar documentos
 @handle_service_error()
 async def index_documents_task(
@@ -171,41 +171,40 @@ async def index_documents_task(
         collection_name: Nombre de la colección
     """
     try:
-        supabase = get_supabase_client()
-        
-        # Extraer textos para embedding en batch
-        texts = [node["text"] for node in node_data_list]
-        
-        # Generar embeddings en batch
-        embeddings = await generate_embeddings(texts, tenant_id)
-        
-        if len(embeddings) != len(texts):
-            logger.error(f"Mismatch between texts and embeddings: {len(texts)} vs {len(embeddings)}")
-            raise ServiceError("Error generating embeddings: count mismatch")
-        
-        # Añadir cada nodo al vector store
-        for i, node_data in enumerate(node_data_list):
-            # Añadir chunk de documento a Supabase
-            supabase.table("document_chunks").insert({
-                "id": node_data["id"],
-                "tenant_id": tenant_id,
-                "content": node_data["text"],
-                "metadata": node_data["metadata"],
-                "embedding": embeddings[i]
-            }).execute()
-        
-        # Actualizar contador de documentos para el tenant
-        supabase.rpc(
-            "increment_document_count",
-            {"p_tenant_id": tenant_id, "p_count": 1}
-        ).execute()
-        
-        logger.info(f"Indexed {len(node_data_list)} nodes for tenant {tenant_id}")
+        # Usar el contexto del tenant durante la indexación
+        with TenantContext(tenant_id):
+            # Obtener vector store para este tenant
+            vector_store = get_tenant_vector_store(tenant_id, collection_name)
+            
+            logger.info(f"Indexando {len(node_data_list)} nodos para tenant {tenant_id} en colección {collection_name}")
+            
+            # Convertir nodos a documentos de LlamaIndex
+            documents = []
+            for node_data in node_data_list:
+                # Crear documento
+                doc = Document(
+                    text=node_data["text"],
+                    metadata=node_data["metadata"]
+                )
+                documents.append(doc)
+            
+            # Generar textos para embeddings
+            texts = [doc.get_content(metadata_mode=MetadataMode.NONE) for doc in documents]
+            
+            # Generar embeddings
+            embeddings = await generate_embeddings(texts, tenant_id)
+            
+            # Indexar documentos en la base de datos vectorial
+            for i, doc in enumerate(documents):
+                vector_store.add(
+                    documents=[doc],
+                    embeddings=[embeddings[i]] if embeddings else None
+                )
+            
+            logger.info(f"Indexación completada para {len(node_data_list)} nodos en colección {collection_name}")
+    
     except Exception as e:
-        logger.error(f"Error indexing documents: {str(e)}")
-        # En un sistema de producción, deberíamos tener un sistema para reintentar fallidos
-        # o al menos notificar el error
-
+        logger.error(f"Error en la tarea de indexación: {str(e)}", exc_info=True)
 
 @app.post("/ingest", response_model=IngestionResponse)
 @handle_service_error()
@@ -225,52 +224,56 @@ async def ingest_documents(
     Returns:
         IngestionResponse: Respuesta con IDs de documentos y contador de nodos
     """
-    # Verificar cuotas
+    # Verificar cuotas del tenant
     await check_tenant_quotas(tenant_info)
     
-    if len(request.documents) != len(request.document_metadatas):
-        raise HTTPException(
-            status_code=400, 
-            detail="Number of documents must match number of metadata objects"
-        )
+    tenant_id = tenant_info.tenant_id
+    collection_name = request.collection_name or "default"
     
-    document_ids = []
-    all_nodes = []
-    
-    # Procesar cada documento
-    for i, doc_text in enumerate(request.documents):
-        metadata = request.document_metadatas[i]
-        doc_id = str(uuid.uuid4())
-        document_ids.append(doc_id)
-        
-        # Añadir ID de documento a metadatos
-        metadata.custom_metadata = metadata.custom_metadata or {}
-        metadata.custom_metadata["document_id"] = doc_id
-        
-        # Procesar documento para obtener nodos
-        node_data = process_document(
-            doc_text=doc_text,
-            metadata=metadata,
-            collection_name=request.collection_name
-        )
-        
-        all_nodes.extend(node_data)
-    
-    # Programar tarea en segundo plano para indexar documentos
-    background_tasks.add_task(
-        index_documents_task,
-        all_nodes,
-        request.tenant_id,
-        request.collection_name
-    )
-    
-    return IngestionResponse(
-        success=True,
-        message=f"Processing {len(request.documents)} documents with {len(all_nodes)} total chunks",
-        document_ids=document_ids,
-        nodes_count=len(all_nodes)
-    )
-
+    # Usar el contexto del tenant durante todo el proceso
+    with TenantContext(tenant_id):
+        try:
+            total_nodes = 0
+            document_ids = []
+            node_data_list = []
+            
+            # Procesar cada documento
+            for doc in request.documents:
+                # Verificar que el texto no esté vacío
+                if not doc.text or not doc.text.strip():
+                    continue
+                
+                # Procesar el documento
+                nodes = process_document(
+                    doc.text, 
+                    doc.metadata,
+                    collection_name
+                )
+                
+                # Añadir nodos a la lista para indexación
+                node_data_list.extend(nodes)
+                
+                # Actualizar contadores
+                document_ids.append(doc.metadata.document_id)
+                total_nodes += len(nodes)
+            
+            # Iniciar tarea en segundo plano para indexar documentos
+            if node_data_list:
+                background_tasks.add_task(
+                    index_documents_task,
+                    node_data_list, 
+                    tenant_id,
+                    collection_name
+                )
+            
+            return IngestionResponse(
+                document_ids=document_ids,
+                node_count=total_nodes
+            )
+            
+        except Exception as e:
+            logger.error(f"Error al ingerir documentos: {str(e)}", exc_info=True)
+            raise ServiceError(f"Error al ingerir documentos: {str(e)}")
 
 @app.post("/ingest-file")
 @handle_service_error()
@@ -308,49 +311,60 @@ async def ingest_file(
             detail="You can only upload files to your own tenant"
         )
     
-    # Leer contenido del archivo
-    content = await file.read()
-    file_text = content.decode("utf-8")
-    
-    # Crear metadatos
-    metadata = DocumentMetadata(
-        source=file.filename,
-        author=author,
-        created_at=None,  # Se rellenará automáticamente
-        document_type=document_type,
-        tenant_id=tenant_id,
-        custom_metadata={"filename": file.filename}
-    )
-    
-    # Generar ID de documento
-    doc_id = str(uuid.uuid4())
-    
-    # Añadir ID de documento a metadatos
-    metadata.custom_metadata = metadata.custom_metadata or {}
-    metadata.custom_metadata["document_id"] = doc_id
-    
-    # Procesar documento para obtener nodos
-    node_data = process_document(
-        doc_text=file_text,
-        metadata=metadata,
-        collection_name=collection_name
-    )
-    
-    # Programar tarea en segundo plano para indexar documentos
-    background_tasks.add_task(
-        index_documents_task,
-        node_data,
-        tenant_id,
-        collection_name
-    )
-    
-    return {
-        "success": True,
-        "message": f"Processing file {file.filename} with {len(node_data)} chunks",
-        "document_id": doc_id,
-        "nodes_count": len(node_data)
-    }
-
+    # Usar el contexto del tenant para toda la operación
+    with TenantContext(tenant_id):
+        try:
+            # Leer contenido del archivo
+            content = await file.read()
+            file_text = content.decode("utf-8")
+            
+            # Crear metadatos
+            metadata = DocumentMetadata(
+                source=file.filename,
+                author=author,
+                created_at=None,  # Se rellenará automáticamente
+                document_type=document_type,
+                tenant_id=tenant_id,
+                custom_metadata={"filename": file.filename}
+            )
+            
+            # Generar ID de documento
+            doc_id = str(uuid.uuid4())
+            
+            # Añadir ID de documento a metadatos
+            metadata.custom_metadata = metadata.custom_metadata or {}
+            metadata.custom_metadata["document_id"] = doc_id
+            
+            # Procesar documento para obtener nodos
+            node_data = process_document(
+                doc_text=file_text,
+                metadata=metadata,
+                collection_name=collection_name
+            )
+            
+            # Programar tarea en segundo plano para indexar documentos
+            background_tasks.add_task(
+                index_documents_task,
+                node_data,
+                tenant_id,
+                collection_name
+            )
+            
+            logger.info(f"Archivo {file.filename} procesado con {len(node_data)} fragmentos para tenant {tenant_id}")
+            
+            return {
+                "success": True,
+                "message": f"Processing file {file.filename} with {len(node_data)} chunks",
+                "document_id": doc_id,
+                "nodes_count": len(node_data)
+            }
+        
+        except UnicodeDecodeError:
+            logger.error(f"Error al decodificar archivo {file.filename} para tenant {tenant_id}")
+            raise ServiceError(f"Error decoding file. Please ensure the file is in UTF-8 format.")
+        except Exception as e:
+            logger.error(f"Error al procesar archivo {file.filename} para tenant {tenant_id}: {str(e)}", exc_info=True)
+            raise ServiceError(f"Error processing file: {str(e)}")
 
 @app.delete("/documents/{tenant_id}/{document_id}")
 @handle_service_error()
@@ -396,7 +410,6 @@ async def delete_document(
         "message": f"Document {document_id} deleted",
         "deleted_chunks": len(result.data) if result.data else 0
     }
-
 
 @app.delete("/collections/{tenant_id}/{collection_name}")
 @handle_service_error()
@@ -452,7 +465,6 @@ async def delete_collection(
         "deleted_chunks": len(result.data) if result.data else 0
     }
 
-
 @app.get("/status", response_model=HealthResponse)
 @handle_service_error()
 async def get_service_status():
@@ -497,7 +509,6 @@ async def get_service_status():
             },
             version=settings.service_version
         )
-
 
 if __name__ == "__main__":
     import uvicorn

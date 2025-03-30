@@ -86,6 +86,8 @@ class Settings(BaseSettings):
     
     # Modos de ejecución
     testing_mode: bool = Field(False, env="TESTING_MODE")
+    # Nota: SKIP_SUPABASE está obsoleto y será eliminado en el futuro,
+    # usar LOAD_CONFIG_FROM_SUPABASE=false en su lugar
     skip_supabase: bool = Field(False, env="SKIP_SUPABASE")
     mock_openai: bool = Field(False, env="MOCK_OPENAI")
     
@@ -193,21 +195,36 @@ def get_settings() -> Settings:
     
     settings = Settings()
     
-    # En el futuro, aquí se implementará la lógica para cargar configuraciones desde Supabase
-    if settings.load_config_from_supabase:
+    # Determinar si debemos cargar configuraciones desde Supabase
+    should_load_from_supabase = settings.load_config_from_supabase and not settings.skip_supabase
+    
+    if should_load_from_supabase:
         try:
             # Importar aquí para evitar dependencias circulares
             from .supabase import override_settings_from_supabase
+            from .context import get_current_tenant_id
+            
+            # Determinar el tenant_id a utilizar (priorizar contexto si está disponible)
+            tenant_id_to_use = settings.tenant_id
+            try:
+                context_tenant_id = get_current_tenant_id()
+                if context_tenant_id and context_tenant_id != "default":
+                    tenant_id_to_use = context_tenant_id
+                    logger.debug(f"Usando tenant_id del contexto: {tenant_id_to_use}")
+            except Exception as e:
+                logger.debug(f"No se pudo obtener tenant_id del contexto: {str(e)}")
             
             # Cargar configuraciones específicas del tenant desde Supabase
             settings = override_settings_from_supabase(
                 settings, 
-                settings.tenant_id,
+                tenant_id_to_use,
                 settings.config_environment
             )
-            logger.info(f"Configuración para tenant {settings.tenant_id} cargada desde Supabase")
+            logger.info(f"Configuración para tenant {tenant_id_to_use} cargada desde Supabase")
         except Exception as e:
             logger.error(f"Error al cargar configuraciones desde Supabase: {str(e)}")
+    elif settings.skip_supabase and settings.load_config_from_supabase:
+        logger.warning("SKIP_SUPABASE está activado, no se cargarán configuraciones desde Supabase aunque LOAD_CONFIG_FROM_SUPABASE esté habilitado")
     
     return settings
 

@@ -30,6 +30,8 @@ class EmbeddingRequest(BaseModel):
     texts: List[str]
     metadata: Optional[List[Dict[str, Any]]] = None
     model: Optional[str] = None
+    agent_id: Optional[str] = None
+    conversation_id: Optional[str] = None
 
 
 class EmbeddingResponse(BaseModel):
@@ -53,6 +55,8 @@ class BatchEmbeddingRequest(BaseModel):
     tenant_id: str
     items: List[TextItem]
     model: Optional[str] = None
+    agent_id: Optional[str] = None
+    conversation_id: Optional[str] = None
 
 
 class DocumentMetadata(BaseModel):
@@ -98,17 +102,21 @@ class QueryRequest(BaseModel):
     additional_metadata_filter: Optional[Dict[str, Any]] = None
     response_mode: Optional[str] = "compact"  # compact, refine, tree
     stream: Optional[bool] = False
+    agent_id: Optional[str] = None
+    conversation_id: Optional[str] = None
 
 
 class QueryResponse(BaseModel):
     """Respuesta a una consulta RAG."""
-    tenant_id: str
     query: str
     response: str
     sources: List[QueryContextItem]
     processing_time: float
-    llm_model: str
-    collection_name: str
+    llm_model: Optional[str] = None
+    collection_name: Optional[str] = None
+    tenant_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    conversation_id: Optional[str] = None
 
 
 class DocumentsListResponse(BaseModel):
@@ -193,6 +201,8 @@ class ChatRequest(BaseModel):
     conversation_id: Optional[str] = None
     chat_history: Optional[List[ChatMessage]] = None
     stream: bool = False
+    context: Optional[Dict[str, Any]] = None
+    client_reference_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -203,6 +213,7 @@ class ChatResponse(BaseModel):
     thinking: Optional[str] = None
     processing_time: float
     tools_used: Optional[List[str]] = None
+    context: Optional[Dict[str, Any]] = None
 
 
 class RAGConfig(BaseModel):
@@ -212,3 +223,57 @@ class RAGConfig(BaseModel):
     llm_model: Optional[str] = None
     response_mode: str = "compact"
     additional_metadata_filter: Optional[Dict[str, Any]] = None
+
+
+class ConversationMetadata(BaseModel):
+    """Metadatos de una conversación."""
+    title: Optional[str] = None
+    status: str = "active"
+    context: Optional[Dict[str, Any]] = None
+    client_reference_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class ConversationCreate(BaseModel):
+    """Solicitud para crear una nueva conversación."""
+    tenant_id: str
+    agent_id: str
+    title: Optional[str] = None
+    context: Optional[Dict[str, Any]] = None
+    client_reference_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class ConversationResponse(BaseModel):
+    """Detalles de una conversación."""
+    conversation_id: str
+    tenant_id: str
+    agent_id: str
+    title: Optional[str] = None
+    status: str = "active"
+    context: Optional[Dict[str, Any]] = None
+    client_reference_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    last_message_at: Optional[str] = None
+    messages_count: Optional[int] = 0
+
+
+class ConversationsListResponse(BaseModel):
+    """Lista de conversaciones para un tenant o agente."""
+    tenant_id: str
+    agent_id: Optional[str] = None
+    conversations: List[ConversationResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class MessageListResponse(BaseModel):
+    """Lista de mensajes en una conversación."""
+    conversation_id: str
+    messages: List[ChatMessage]
+    total: int
+    limit: int
+    offset: int

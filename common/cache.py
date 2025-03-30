@@ -12,6 +12,7 @@ import redis
 from redis.exceptions import ConnectionError
 
 from .config import get_settings
+from .context import get_current_tenant_id, get_current_agent_id, get_current_conversation_id
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,8 @@ def get_redis_client() -> Optional[redis.Redis]:
         return None
 
 
-def get_cache_key(prefix: str, identifier: str, tenant_id: str) -> str:
+def get_cache_key(prefix: str, identifier: str, tenant_id: Optional[str] = None,
+                  agent_id: Optional[str] = None, conversation_id: Optional[str] = None) -> str:
     """
     Genera una clave de caché para Redis.
     
@@ -48,11 +50,35 @@ def get_cache_key(prefix: str, identifier: str, tenant_id: str) -> str:
         prefix: Prefijo para la clave (ej: 'embed', 'query')
         identifier: Identificador único del objeto (ej: hash del texto)
         tenant_id: ID del tenant para aislamiento
+        agent_id: ID del agente (opcional)
+        conversation_id: ID de la conversación (opcional)
     
     Returns:
-        str: Clave de caché
+        str: Clave de caché formateada
     """
-    return f"{prefix}:{tenant_id}:{identifier}"
+    # Si no se proporciona tenant_id, usar el del contexto actual
+    if tenant_id is None:
+        tenant_id = get_current_tenant_id()
+    
+    # Obtener los IDs del contexto actual si no se proporcionan
+    if agent_id is None:
+        agent_id = get_current_agent_id()
+    
+    if conversation_id is None:
+        conversation_id = get_current_conversation_id()
+    
+    # Construir clave con los niveles de contexto disponibles
+    key_parts = [tenant_id, prefix]
+    
+    if agent_id is not None:
+        key_parts.append(f"agent:{agent_id}")
+    
+    if conversation_id is not None:
+        key_parts.append(f"conv:{conversation_id}")
+    
+    key_parts.append(identifier)
+    
+    return ":".join(key_parts)
 
 
 def generate_hash(text: str) -> str:
@@ -183,7 +209,9 @@ def cache_delete_pattern(pattern: str) -> int:
         return 0
 
 
-def cache_embedding(text: str, embedding: List[float], tenant_id: str, model_name: str) -> bool:
+def cache_embedding(text: str, embedding: List[float], tenant_id: str, 
+                   model_name: str, agent_id: Optional[str] = None,
+                   conversation_id: Optional[str] = None) -> bool:
     """
     Almacena un embedding en caché.
     
@@ -192,16 +220,21 @@ def cache_embedding(text: str, embedding: List[float], tenant_id: str, model_nam
         embedding: Vector embedding
         tenant_id: ID del tenant
         model_name: Nombre del modelo de embedding
+        agent_id: ID del agente (opcional)
+        conversation_id: ID de la conversación (opcional)
         
     Returns:
         bool: True si se almacenó correctamente
     """
     text_hash = generate_hash(text)
-    key = get_cache_key("embed", f"{model_name}:{text_hash}", tenant_id)
-    return cache_set(key, embedding)
+    key = get_cache_key("embed", f"{model_name}:{text_hash}", tenant_id, agent_id, conversation_id)
+    
+    return cache_set(key, embedding, ttl=86400)  # 24 horas
 
 
-def get_cached_embedding(text: str, tenant_id: str, model_name: str) -> Optional[List[float]]:
+def get_cached_embedding(text: str, tenant_id: str, model_name: str,
+                        agent_id: Optional[str] = None,
+                        conversation_id: Optional[str] = None) -> Optional[List[float]]:
     """
     Obtiene un embedding de la caché.
     
@@ -209,25 +242,110 @@ def get_cached_embedding(text: str, tenant_id: str, model_name: str) -> Optional
         text: Texto original
         tenant_id: ID del tenant
         model_name: Nombre del modelo de embedding
+        agent_id: ID del agente (opcional)
+        conversation_id: ID de la conversación (opcional)
         
     Returns:
         Optional[List[float]]: Vector embedding o None si no está en caché
     """
     text_hash = generate_hash(text)
+    
+    # Estrategia de cascada:
+    # 1. Intentar recuperar con el contexto completo (si está disponible)
+    if agent_id and conversation_id:
+        key = get_cache_key("embed", f"{model_name}:{text_hash}", tenant_id, agent_id, conversation_id)
+        embedding = cache_get(key)
+        if embedding:
+            return embedding
+    
+    # 2. Intentar recuperar con el contexto de agente (si está disponible)
+    if agent_id:
+        key = get_cache_key("embed", f"{model_name}:{text_hash}", tenant_id, agent_id)
+        embedding = cache_get(key)
+        if embedding:
+            return embedding
+    
+    # 3. Finalmente, intentar recuperar con solo el contexto de tenant
     key = get_cache_key("embed", f"{model_name}:{text_hash}", tenant_id)
     return cache_get(key)
 
 
-def clear_tenant_cache(tenant_id: str, cache_type: Optional[str] = None) -> int:
+def clear_tenant_cache(tenant_id: str, cache_type: Optional[str] = None,
+                      agent_id: Optional[str] = None, conversation_id: Optional[str] = None) -> int:
     """
     Limpia la caché para un tenant específico.
     
     Args:
         tenant_id: ID del tenant
         cache_type: Tipo de caché (ej: 'embed', 'query') o None para todo
+        agent_id: ID del agente para limpiar solo la caché de ese agente
+        conversation_id: ID de la conversación para limpiar solo esa conversación
         
     Returns:
         int: Número de claves eliminadas
     """
-    pattern = f"*:{tenant_id}:*" if cache_type is None else f"{cache_type}:{tenant_id}:*"
+    pattern_parts = [tenant_id]
+    
+    if cache_type:
+        pattern_parts.append(cache_type)
+    
+    if agent_id:
+        pattern_parts.append(f"agent:{agent_id}")
+    
+    if conversation_id:
+        pattern_parts.append(f"conv:{conversation_id}")
+    
+    pattern_parts.append("*")
+    pattern = ":".join(pattern_parts)
+    
     return cache_delete_pattern(pattern)
+
+
+def invalidate_tenant_cache(tenant_id: str) -> int:
+    """
+    Invalida toda la caché para un tenant específico.
+    Esta función debe llamarse cuando se actualizan las configuraciones
+    del tenant en Supabase.
+    
+    Args:
+        tenant_id: ID del tenant
+        
+    Returns:
+        int: Número de claves eliminadas
+    """
+    logger.info(f"Invalidando toda la caché para tenant {tenant_id}")
+    return clear_tenant_cache(tenant_id)
+
+
+def invalidate_agent_cache(tenant_id: str, agent_id: str) -> int:
+    """
+    Invalida toda la caché para un agente específico.
+    Esta función debe llamarse cuando se actualizan las configuraciones
+    del agente o sus herramientas.
+    
+    Args:
+        tenant_id: ID del tenant
+        agent_id: ID del agente
+        
+    Returns:
+        int: Número de claves eliminadas
+    """
+    logger.info(f"Invalidando caché para agente {agent_id} del tenant {tenant_id}")
+    return clear_tenant_cache(tenant_id, agent_id=agent_id)
+
+
+def invalidate_conversation_cache(tenant_id: str, agent_id: str, conversation_id: str) -> int:
+    """
+    Invalida la caché para una conversación específica.
+    Esta función debe llamarse cuando se borran o modifican mensajes.
+    
+    Args:
+        tenant_id: ID del tenant
+        agent_id: ID del agente
+        conversation_id: ID de la conversación
+        
+    Returns:
+        int: Número de claves eliminadas
+    """
+    logger.info(f"Invalidando caché para conversación {conversation_id} del agente {agent_id}")
+    return clear_tenant_cache(tenant_id, agent_id=agent_id, conversation_id=conversation_id)

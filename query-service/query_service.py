@@ -28,10 +28,47 @@ from common.ollama import get_llm_model
 # Importamos la configuración centralizada
 from common.config import get_settings
 from common.logging import init_logging
+from common.context import (
+    TenantContext, AgentContext, ConversationContext, FullContext,
+    get_current_tenant_id, get_current_agent_id, get_current_conversation_id,
+    with_tenant_context, with_agent_context, with_conversation_context, with_full_context
+)
+
+def get_appropriate_context_manager(tenant_id: str, agent_id: Optional[str] = None, conversation_id: Optional[str] = None):
+    """
+    Obtiene el administrador de contexto apropiado según los IDs proporcionados.
+    
+    Args:
+        tenant_id: ID del tenant (requerido)
+        agent_id: ID del agente (opcional)
+        conversation_id: ID de la conversación (opcional)
+        
+    Returns:
+        Un administrador de contexto apropiado (TenantContext, AgentContext, o FullContext)
+    """
+    # Solo aplicar contexto multinivel cuando realmente se necesite
+    # Para operaciones generales, usar solo TenantContext
+    if conversation_id and agent_id:
+        # Solo usar FullContext para operaciones específicas de conversación
+        return FullContext(tenant_id, agent_id, conversation_id)
+    elif agent_id:
+        # Usar AgentContext para operaciones específicas de agente
+        return AgentContext(tenant_id, agent_id)
+    else:
+        # Para operaciones generales, el TenantContext es suficiente
+        return TenantContext(tenant_id)
 
 # Inicializar logging usando la configuración centralizada
 init_logging()
 logger = logging.getLogger(__name__)
+
+# Inicializar configuración y HTTP client
+settings = get_settings()
+http_client = httpx.AsyncClient(timeout=30.0)
+
+# Debug handler para LlamaIndex
+llama_debug = LlamaDebugHandler(print_trace_on_end=False)
+callback_manager = CallbackManager([llama_debug])
 
 # Clase auxiliar para mantener compatibilidad con el código existente
 class ResponseSynthesizer:
@@ -60,15 +97,7 @@ from common.auth import (
 from common.supabase import get_supabase_client, get_tenant_vector_store, get_tenant_documents, get_tenant_collections
 from common.tracking import track_query, track_token_usage
 from common.rate_limiting import setup_rate_limiting
-
-settings = get_settings()
-
-# HTTP cliente para servicio de embeddings
-http_client = httpx.AsyncClient(timeout=30.0)
-
-# Debug handler para LlamaIndex
-llama_debug = LlamaDebugHandler(print_trace_on_end=False)
-callback_manager = CallbackManager([llama_debug])
+from common.utils import prepare_service_request
 
 # Configuración de la aplicación FastAPI
 app = FastAPI(
@@ -90,46 +119,68 @@ app.add_middleware(
 )
 
 # Obtener embedding a través del servicio de embeddings
-async def generate_embedding(text: str, tenant_id: str) -> List[float]:
+async def generate_embedding(
+    text: str, 
+    tenant_id: str, 
+    agent_id: Optional[str] = None, 
+    conversation_id: Optional[str] = None
+) -> List[float]:
     """
     Genera un embedding para un texto a través del servicio de embeddings.
     
     Args:
         text: Texto para generar embedding
         tenant_id: ID del tenant
+        agent_id: ID del agente (opcional)
+        conversation_id: ID de la conversación (opcional)
         
     Returns:
         List[float]: Vector embedding
     """
-    payload = {
-        "tenant_id": tenant_id,
-        "texts": [text]
-    }
+    if not text or not text.strip():
+        logger.warning("Attempted to generate embedding for empty text")
+        return []
     
-    try:
-        response = await http_client.post(
-            f"{settings.embedding_service_url}/embed", 
-            json=payload
-        )
-        response.raise_for_status()
-        result = response.json()
-        
-        if result.get("embeddings") and len(result["embeddings"]) > 0:
-            return result["embeddings"][0]
-        else:
-            raise ServiceError("No embedding returned from service", status_code=500)
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error connecting to embedding service: {str(e)}")
-        raise ServiceError(
-            f"Error connecting to embedding service: {str(e)}",
-            status_code=500
-        )
-    except Exception as e:
-        logger.error(f"Error getting embedding: {str(e)}")
-        raise ServiceError(
-            f"Error getting embedding: {str(e)}",
-            status_code=500
-        )
+    # Seleccionar el nivel de contexto apropiado según los parámetros proporcionados
+    context_manager = get_appropriate_context_manager(tenant_id, agent_id, conversation_id)
+    
+    with context_manager:
+        try:
+            settings = get_settings()
+            model = settings.default_embedding_model
+            
+            # Incluir agent_id y conversation_id en la solicitud si están disponibles
+            payload = {
+                "tenant_id": tenant_id,
+                "model": model,
+                "texts": [text]
+            }
+            
+            if agent_id:
+                payload["agent_id"] = agent_id
+            
+            if conversation_id:
+                payload["conversation_id"] = conversation_id
+            
+            # El tenant_id se propaga automáticamente
+            result = await prepare_service_request(
+                f"{settings.embedding_service_url}/embed",
+                payload,
+                tenant_id
+            )
+            
+            if result.get("embeddings") and len(result["embeddings"]) > 0:
+                return result["embeddings"][0]
+            else:
+                logger.error(f"No embeddings received from service for tenant {tenant_id}")
+                return []
+            
+        except ServiceError as e:
+            logger.error(f"Error específico del servicio de embeddings para tenant {tenant_id}: {str(e)}")
+            raise ServiceError(f"Error generating embedding: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error inesperado al generar embedding para tenant {tenant_id}: {str(e)}", exc_info=True)
+            raise ServiceError(f"Error generating embedding: {str(e)}")
 
 
 # Crear LLM basado en el tier del tenant
@@ -144,12 +195,27 @@ def get_llm_for_tenant(tenant_info: TenantInfo, requested_model: Optional[str] =
     Returns:
         Any: Cliente LLM configurado (OpenAI o Ollama)
     """
-    # Validar acceso al modelo
-    model_name = validate_model_access(tenant_info, requested_model, "llm")
-    
-    # Obtener el modelo LLM desde el adaptador centralizado
-    logger.info(f"Usando modelo LLM: {model_name}")
-    return get_llm_model(model_name)
+    # Usar el contexto del tenant para facilitar la propagación
+    with TenantContext(tenant_info.tenant_id):
+        settings = get_settings()
+        
+        # Determinar modelo basado en tier del tenant y solicitud
+        model_name = validate_model_access(
+            tenant_info, 
+            requested_model or settings.default_llm_model,
+            model_type="llm"
+        )
+        
+        # Configurar el LLM según si usamos Ollama u OpenAI
+        if settings.use_ollama:
+            return get_llm_model(model_name)
+        else:
+            return OpenAI(
+                model=model_name,
+                api_key=settings.openai_api_key,
+                temperature=settings.llm_temperature,
+                max_tokens=settings.llm_max_tokens
+            )
 
 
 # Crear motor de consulta para el tenant
@@ -173,54 +239,59 @@ async def create_query_engine(
     Returns:
         RetrieverQueryEngine: Motor de consulta configurado
     """
-    # Validar response_mode
-    valid_response_modes = ["compact", "refine", "tree_summarize", "simple_summarize"]
-    if response_mode not in valid_response_modes:
-        logger.warning(f"Invalid response_mode '{response_mode}', defaulting to 'compact'")
-        response_mode = "compact"
+    tenant_id = tenant_info.tenant_id
     
-    # Obtener vector store
-    vector_store = get_tenant_vector_store(tenant_info.tenant_id, collection_name)
-    
-    # Crear índice vacío con el vector store
-    vector_index = VectorStoreIndex.from_vector_store(vector_store)
-    
-    # Configurar recuperador
-    retriever = VectorIndexRetriever(
-        index=vector_index,
-        similarity_top_k=similarity_top_k
-    )
-    
-    # Obtener LLM según tier del tenant
-    llm = get_llm_for_tenant(tenant_info, llm_model)
-    
-    # Crear sintetizador de respuesta según modo
-    response_synthesizer = ResponseSynthesizer.from_args(
-        response_mode=response_mode,
-        llm=llm,
-        callback_manager=callback_manager
-    )
-    
-    # Crear motor de consulta
-    query_engine = RetrieverQueryEngine(
-        retriever=retriever,
-        response_synthesizer=response_synthesizer,
-        node_postprocessors=[
-            SimilarityPostprocessor(similarity_cutoff=0.7)
-        ]
-    )
-    
-    return query_engine
-
+    # Usar el contexto del tenant para toda la operación
+    with TenantContext(tenant_id):
+        # Configurar callback para depuración
+        debug_handler = LlamaDebugHandler()
+        callback_manager = CallbackManager([debug_handler])
+        
+        # Obtener vector store para el tenant
+        vector_store = get_tenant_vector_store(tenant_id, collection_name)
+        
+        # Crear índice sobre el vector store
+        index = VectorStoreIndex.from_vector_store(vector_store)
+        
+        # Configurar recuperador
+        retriever = VectorIndexRetriever(
+            index=index,
+            similarity_top_k=similarity_top_k
+        )
+        
+        # Configurar postprocesador de similitud
+        node_postprocessor = SimilarityPostprocessor(
+            similarity_cutoff=0.7
+        )
+        
+        # Obtener LLM adecuado para el tenant
+        llm = get_llm_for_tenant(tenant_info, llm_model)
+        
+        # Crear sintetizador de respuesta
+        response_synthesizer = ResponseSynthesizer.from_args(
+            response_mode=response_mode,
+            llm=llm,
+            callback_manager=callback_manager
+        )
+        
+        # Crear motor de consulta
+        query_engine = RetrieverQueryEngine(
+            retriever=retriever,
+            response_synthesizer=response_synthesizer,
+            node_postprocessors=[node_postprocessor],
+            callback_manager=callback_manager
+        )
+        
+        return query_engine, debug_handler
 
 @app.post("/query", response_model=QueryResponse)
 @handle_service_error()
 async def process_query(
     request: QueryRequest,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> QueryResponse:
     """
-    Procesa una consulta usando RAG y devuelve resultados con fuentes.
+    Procesa una consulta RAG utilizando el contexto adecuado.
     
     Args:
         request: Solicitud de consulta
@@ -231,91 +302,107 @@ async def process_query(
     """
     start_time = time.time()
     
-    # Verificar cuotas
+    # Verificar cuotas del tenant
     await check_tenant_quotas(tenant_info)
     
-    # Obtener límites según tier
-    tier_limits = get_tier_limits(tenant_info.subscription_tier)
+    tenant_id = tenant_info.tenant_id
+    agent_id = request.agent_id
+    conversation_id = request.conversation_id
+    query_text = request.query.strip()
+    collection_name = request.collection_name or "default"
     
-    # Aplicar límites de similarity_top_k según tier
-    max_top_k = tier_limits.get("similarity_top_k", 4)
-    requested_top_k = request.similarity_top_k or 4
+    if not query_text:
+        raise HTTPException(status_code=400, detail="Query text cannot be empty")
     
-    if requested_top_k > max_top_k:
-        logger.info(f"Requested top_k {requested_top_k} exceeds tier limit {max_top_k}. Using {max_top_k} instead.")
-        requested_top_k = max_top_k
+    # Seleccionar el nivel de contexto apropiado según los parámetros proporcionados
+    context_manager = get_appropriate_context_manager(tenant_id, agent_id, conversation_id)
     
-    try:
-        # Crear motor de consulta
-        query_engine = await create_query_engine(
-            tenant_info=tenant_info,
-            collection_name=request.collection_name,
-            llm_model=request.llm_model,
-            similarity_top_k=requested_top_k,
-            response_mode=request.response_mode or "compact"
-        )
-        
-        # Ejecutar consulta
-        response = await query_engine.aquery(request.query)
-        
-        # Extraer nodos de fuente
-        source_nodes: List[QueryContextItem] = []
-        if hasattr(response, "source_nodes"):
-            for node in response.source_nodes:
-                metadata = node.node.metadata.copy() if node.node.metadata else {}
-                
-                # Eliminar metadatos específicos del tenant que no son relevantes
-                if "tenant_id" in metadata:
-                    del metadata["tenant_id"]
-                
-                source_nodes.append(
-                    QueryContextItem(
-                        text=node.node.text,
-                        metadata=metadata,
-                        score=node.score if hasattr(node, "score") else None
-                    )
-                )
-        
-        # Estimar uso de tokens (usado mismo factor 1.3 para consistencia con otros servicios)
-        query_tokens = len(request.query.split()) * 1.3
-        response_tokens = len(str(response).split()) * 1.3
-        context_tokens = sum([len(node.text.split()) for node in source_nodes]) * 1.3  # Usar el mismo factor que otros servicios
-        total_tokens = int(query_tokens + response_tokens + context_tokens)
-        
-        # Obtener modelo LLM usado
-        llm = get_llm_for_tenant(tenant_info, request.llm_model)
-        actual_model = llm.model
-        
-        # Registrar uso
-        response_time_ms = int((time.time() - start_time) * 1000)
-        await track_query(
-            request.tenant_id,
-            request.query,
-            request.collection_name,
-            actual_model,
-            total_tokens,
-            response_time_ms
-        )
-        
-        return QueryResponse(
-            tenant_id=request.tenant_id,
-            query=request.query,
-            response=str(response),
-            sources=source_nodes,
-            processing_time=time.time() - start_time,
-            llm_model=actual_model,
-            collection_name=request.collection_name or "default"
-        )
+    # Construir una descripción del contexto actual para mensajes de error más informativos
+    context_description = f"tenant '{tenant_id}'"
+    if agent_id:
+        context_description += f", agent '{agent_id}'"
+    if conversation_id:
+        context_description += f", conversation '{conversation_id}'"
     
-    except Exception as e:
-        logger.error(f"Error processing query: {str(e)}")
-        raise ServiceError(
-            f"Error processing query: {str(e)}",
-            status_code=500
-        )
+    with context_manager:
+        try:
+            # Crear motor de consulta para el tenant
+            query_engine, debug_handler = await create_query_engine(
+                tenant_info=tenant_info,
+                collection_name=collection_name,
+                llm_model=request.llm_model,
+                similarity_top_k=request.similarity_top_k or 4,
+                response_mode=request.response_mode or "compact"
+            )
+            
+            # Ejecutar consulta
+            response = query_engine.query(query_text)
+            
+            # Extraer fuentes del debug handler
+            source_nodes = []
+            for event in debug_handler.get_events():
+                if event.event_type == "retrieve":
+                    if hasattr(event, "nodes"):
+                        source_nodes = event.nodes
+                        break
+            
+            # Extraer metadatos de las fuentes
+            sources = []
+            for node in source_nodes:
+                if hasattr(node, "metadata") and node.metadata:
+                    source = {
+                        "text": node.get_content(),
+                        "metadata": node.metadata,
+                        "score": node.score if hasattr(node, "score") else None
+                    }
+                    sources.append(source)
+            
+            # Registrar uso
+            await track_query(
+                tenant_id=tenant_id,
+                operation_type="query",
+                model=request.llm_model or get_settings().default_llm_model,
+                tokens_in=len(query_text.split()),
+                tokens_out=len(str(response).split()) if response else 0,
+                agent_id=agent_id,
+                conversation_id=conversation_id
+            )
+            
+            # Preparar respuesta
+            processing_time = time.time() - start_time
+            
+            return QueryResponse(
+                query=query_text,
+                response=str(response) if response else "",
+                sources=sources,
+                processing_time=processing_time,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                conversation_id=conversation_id,
+                llm_model=request.llm_model or get_settings().default_llm_model,
+                collection_name=collection_name
+            )
+            
+        except Exception as e:
+            error_type = type(e).__name__
+            logger.error(f"Error processing query for {context_description}: {str(e)}", exc_info=True)
+            
+            if isinstance(e, HTTPException):
+                # Reenviar excepciones HTTP sin modificar
+                raise e
+            
+            # Personalizar el mensaje de error basado en el tipo de error y el contexto
+            if "collection not found" in str(e).lower():
+                raise ServiceError(f"Collection '{collection_name}' not found for {context_description}")
+            elif "index not found" in str(e).lower():
+                raise ServiceError(f"Index not found for {context_description}")
+            elif "invalid embedding" in str(e).lower():
+                raise ServiceError(f"Failed to generate valid embedding for query in {context_description}")
+            else:
+                # Error genérico con información de contexto
+                raise ServiceError(f"Error processing query in {context_description}: {str(e)}")
 
-
-@app.get("/documents", response_model=DocumentsListResponse)
+@app.get("/documents/{tenant_id}")
 @handle_service_error()
 async def list_documents(
     tenant_id: str,
@@ -337,32 +424,46 @@ async def list_documents(
     Returns:
         DocumentsListResponse: Lista de documentos paginada
     """
-    # Verificar que el tenant es el correcto
+    # Verificar que el usuario solo puede ver sus propios documentos
     if tenant_id != tenant_info.tenant_id:
-        raise HTTPException(
+        raise ServiceError(
             status_code=403,
-            detail="You can only access your own documents"
+            error_code="FORBIDDEN",
+            message="No puedes acceder a documentos de otro tenant"
         )
     
-    # Obtener documentos
-    docs_result = get_tenant_documents(
-        tenant_id=tenant_id,
-        collection_name=collection_name,
-        limit=limit,
-        offset=offset
-    )
-    
-    return DocumentsListResponse(
-        tenant_id=tenant_id,
-        documents=docs_result["documents"],
-        total=docs_result["total"],
-        limit=docs_result["limit"],
-        offset=docs_result["offset"],
-        collection_name=collection_name
-    )
+    # Para listar documentos, usar solo TenantContext ya que es una operación a nivel de tenant
+    with TenantContext(tenant_id):
+        try:
+            # Inicializar Supabase
+            supabase = get_supabase_client()
+            
+            # Construir consulta para documentos del tenant
+            query = supabase.table("documents").select("*").eq("tenant_id", tenant_id)
+            
+            # Filtrar por colección si se especifica
+            if collection_name:
+                query = query.eq("collection_name", collection_name)
+            
+            # Aplicar paginación
+            total_count = len(query.execute().data)
+            documents = query.range(offset, offset + limit - 1).order("created_at", desc=True).execute().data
+            
+            return DocumentsListResponse(
+                tenant_id=tenant_id,
+                documents=documents,
+                total=total_count,
+                limit=limit,
+                offset=offset,
+                collection_name=collection_name
+            )
+            
+        except Exception as e:
+            logger.error(f"Error listing documents: {str(e)}")
+            raise ServiceError(f"Error listing documents: {str(e)}")
 
 
-@app.get("/collections")
+@app.get("/collections/{tenant_id}")
 @handle_service_error()
 async def list_collections(
     tenant_id: str,
@@ -378,23 +479,41 @@ async def list_collections(
     Returns:
         dict: Colecciones con estadísticas
     """
-    # Verificar que el tenant es el correcto
+    # Verificar que el usuario solo puede ver sus propias colecciones
     if tenant_id != tenant_info.tenant_id:
-        raise HTTPException(
+        raise ServiceError(
             status_code=403,
-            detail="You can only access your own collections"
+            error_code="FORBIDDEN",
+            message="No puedes acceder a colecciones de otro tenant"
         )
     
-    # Obtener colecciones
-    collections = get_tenant_collections(tenant_id)
-    
-    return {
-        "tenant_id": tenant_id,
-        "collections": collections
-    }
+    # Para listar colecciones, usamos TenantContext ya que es una operación a nivel de tenant
+    with TenantContext(tenant_id):
+        try:
+            # Obtener colecciones del tenant
+            supabase = get_supabase_client()
+            collections = supabase.table("collections").select("*").eq("tenant_id", tenant_id).execute().data
+            
+            # Obtener estadísticas para cada colección
+            for collection in collections:
+                # Contar documentos
+                docs_count = supabase.table("documents").select(
+                    "count", count="exact"
+                ).eq("tenant_id", tenant_id).eq("collection_name", collection["name"]).execute()
+                
+                collection["documents_count"] = docs_count.count if hasattr(docs_count, "count") else 0
+            
+            return {
+                "tenant_id": tenant_id,
+                "collections": collections
+            }
+        
+        except Exception as e:
+            logger.error(f"Error listing collections: {str(e)}")
+            raise ServiceError(f"Error listing collections: {str(e)}")
 
 
-@app.get("/llm/models")
+@app.get("/llm/models/{tenant_id}")
 @handle_service_error()
 async def list_llm_models(
     tenant_id: str,
@@ -410,54 +529,67 @@ async def list_llm_models(
     Returns:
         dict: Modelos disponibles
     """
-    # Verificar que el tenant es el correcto
+    # Verificar que el usuario solo puede ver sus propios modelos
     if tenant_id != tenant_info.tenant_id:
-        raise HTTPException(
+        raise ServiceError(
             status_code=403,
-            detail="You can only access your own models"
+            error_code="FORBIDDEN",
+            message="No puedes acceder a información de otro tenant"
         )
     
-    # Mapear tiers a modelos permitidos con detalles
-    model_details = {
-        "gpt-3.5-turbo": {
-            "id": "gpt-3.5-turbo",
-            "name": "GPT-3.5 Turbo",
-            "provider": "openai",
-            "description": "Fast and cost-effective model for most queries"
-        },
-        "gpt-4-turbo": {
-            "id": "gpt-4-turbo",
-            "name": "GPT-4 Turbo",
-            "provider": "openai",
-            "description": "Advanced reasoning capabilities for complex queries"
-        },
-        "gpt-4-turbo-vision": {
-            "id": "gpt-4-turbo-vision",
-            "name": "GPT-4 Turbo Vision",
-            "provider": "openai",
-            "description": "Vision capabilities for image analysis (if needed)"
-        },
-        "claude-3-5-sonnet": {
-            "id": "claude-3-5-sonnet",
-            "name": "Claude 3.5 Sonnet",
-            "provider": "anthropic",
-            "description": "Alternative model with excellent instruction following"
+    # Esta operación solo requiere contexto a nivel de tenant
+    with TenantContext(tenant_id):
+        # Obtener modelos según nivel de suscripción
+        tier = tenant_info.subscription_tier
+        
+        # Modelos básicos para todos
+        basic_models = {
+            "gpt-3.5-turbo": {
+                "description": "OpenAI GPT-3.5 Turbo, adecuado para la mayoría de tareas",
+                "max_tokens": 4096,
+                "premium": False
+            },
+            "llama3-8b": {
+                "description": "Llama 3 8B servido por Ollama, buen equilibrio entre rendimiento y eficiencia",
+                "max_tokens": 8192,
+                "premium": False
+            }
         }
-    }
-    
-    # Obtener modelos permitidos para el tier
-    allowed_model_ids = get_allowed_models_for_tier(tenant_info.subscription_tier, "llm")
-    available_models = [model_details[model_id] for model_id in allowed_model_ids if model_id in model_details]
-    
-    return {
-        "models": available_models
-    }
+        
+        # Modelos premium solo para niveles superiores
+        premium_models = {
+            "gpt-4": {
+                "description": "OpenAI GPT-4, capacidades avanzadas de razonamiento",
+                "max_tokens": 8192,
+                "premium": True
+            },
+            "claude-3-haiku": {
+                "description": "Anthropic Claude 3 Haiku, veloz y eficiente",
+                "max_tokens": 200000,
+                "premium": True
+            }
+        }
+        
+        result = {
+            "tenant_id": tenant_id,
+            "subscription_tier": tier,
+            "available_models": basic_models,
+            "default_model": settings.default_llm_model
+        }
+        
+        # Agregar modelos premium para niveles superiores
+        if tier in ["pro", "enterprise"]:
+            result["available_models"].update(premium_models)
+        
+        return result
 
 
-@app.get("/stats")
+@app.get("/stats/{tenant_id}")
 @handle_service_error()
 async def get_tenant_stats(
     tenant_id: str,
+    agent_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
     tenant_info: TenantInfo = Depends(verify_tenant)
 ):
     """
@@ -465,83 +597,93 @@ async def get_tenant_stats(
     
     Args:
         tenant_id: ID del tenant
+        agent_id: ID del agente para filtrar estadísticas (opcional)
+        conversation_id: ID de la conversación para filtrar estadísticas (opcional)
         tenant_info: Información del tenant (inyectada)
         
     Returns:
         dict: Estadísticas de uso
     """
-    # Verificar que el tenant es el correcto
+    # Verificar que el usuario solo puede ver sus propias estadísticas
     if tenant_id != tenant_info.tenant_id:
-        raise HTTPException(
-            status_code=403,
-            detail="You can only access your own statistics"
-        )
-    
-    supabase = get_supabase_client()
-    
-    try:
-        # Obtener estadísticas del tenant
-        stats_query = supabase.table("ai.tenant_stats").select("*").eq("tenant_id", tenant_id).execute()
-        
-        if not stats_query.data:
-            return {
-                "tenant_id": tenant_id,
-                "document_count": 0,
-                "tokens_used": 0,
-                "last_activity": None
-            }
-        
-        stats = stats_query.data[0]
-        
-        # Obtener logs de consultas para actividad reciente
-        logs_query = supabase.table("ai.query_logs").select("*") \
-            .eq("tenant_id", tenant_id) \
-            .order("created_at", desc=True) \
-            .limit(5) \
-            .execute()
-        
-        recent_queries = logs_query.data if logs_query.data else []
-        
-        # Obtener información de suscripción
-        sub_query = supabase.table("ai.tenant_subscriptions").select("*") \
-            .eq("tenant_id", tenant_id) \
-            .eq("is_active", True) \
-            .execute()
-        
-        subscription = sub_query.data[0] if sub_query.data else None
-        
-        # Obtener límites del tier
-        tier = tenant_info.subscription_tier
-        tier_limits = get_tier_limits(tier)
-        
-        return {
-            "tenant_id": tenant_id,
-            "document_count": stats.get("document_count", 0),
-            "tokens_used": stats.get("tokens_used", 0),
-            "last_activity": stats.get("last_activity"),
-            "token_limit": tier_limits.get("max_tokens_per_month"),
-            "subscription": {
-                "tier": tier,
-                "started_at": subscription.get("started_at") if subscription else None,
-                "expires_at": subscription.get("expires_at") if subscription else None
-            },
-            "recent_queries": [
-                {
-                    "query": q.get("query"),
-                    "collection": q.get("collection"),
-                    "llm_model": q.get("llm_model"),
-                    "tokens": q.get("tokens_estimated"),
-                    "timestamp": q.get("created_at")
-                } for q in recent_queries
-            ]
-        }
-    
-    except Exception as e:
-        logger.error(f"Error getting tenant stats: {str(e)}")
         raise ServiceError(
-            f"Error getting tenant stats: {str(e)}",
-            status_code=500
+            status_code=403,
+            error_code="FORBIDDEN",
+            message="No puedes acceder a estadísticas de otro tenant"
         )
+    
+    # Seleccionar el contexto adecuado según los parámetros
+    context_manager = get_appropriate_context_manager(tenant_id, agent_id, conversation_id)
+    
+    with context_manager:
+        try:
+            # Inicializar Supabase
+            supabase = get_supabase_client()
+            
+            # Obtener límites del tenant según su tier
+            tier_limits = get_tier_limits(tenant_info.subscription_tier)
+            
+            # Construir consulta base para estadísticas
+            stats_query = supabase.table("usage_stats").select("*").eq("tenant_id", tenant_id)
+            query_logs_query = supabase.table("query_logs").select("*").eq("tenant_id", tenant_id)
+            
+            # Filtrar por agente si se proporciona
+            if agent_id:
+                query_logs_query = query_logs_query.eq("agent_id", agent_id)
+            
+            # Filtrar por conversación si se proporciona
+            if conversation_id:
+                query_logs_query = query_logs_query.eq("conversation_id", conversation_id)
+            
+            # Ejecutar consultas
+            usage_stats = stats_query.execute().data
+            query_logs = query_logs_query.order("timestamp", desc=True).limit(100).execute().data
+            
+            # Obtener las colecciones y documentos del tenant
+            collections_count = supabase.table("collections").select("count", count="exact").eq("tenant_id", tenant_id).execute().count
+            documents_count = supabase.table("documents").select("count", count="exact").eq("tenant_id", tenant_id).execute().count
+            
+            # Calcular consumo total de tokens
+            total_tokens = 0
+            if usage_stats and len(usage_stats) > 0:
+                total_tokens = usage_stats[0].get("tokens_used", 0)
+            
+            # Construir respuesta
+            response = {
+                "tenant_id": tenant_id,
+                "subscription_tier": tenant_info.subscription_tier,
+                "usage": {
+                    "tokens": {
+                        "used": total_tokens,
+                        "limit": tier_limits.get("tokens_per_month", 0),
+                        "percentage": (total_tokens / tier_limits.get("tokens_per_month", 1)) * 100 if tier_limits.get("tokens_per_month", 0) > 0 else 0
+                    },
+                    "collections": {
+                        "count": collections_count,
+                        "limit": tier_limits.get("max_collections", 0),
+                        "percentage": (collections_count / tier_limits.get("max_collections", 1)) * 100 if tier_limits.get("max_collections", 0) > 0 else 0
+                    },
+                    "documents": {
+                        "count": documents_count,
+                        "limit": tier_limits.get("max_documents", 0),
+                        "percentage": (documents_count / tier_limits.get("max_documents", 1)) * 100 if tier_limits.get("max_documents", 0) > 0 else 0
+                    }
+                },
+                "recent_queries": query_logs
+            }
+            
+            # Incluir información de filtrado si se proporcionó
+            if agent_id:
+                response["agent_id"] = agent_id
+            
+            if conversation_id:
+                response["conversation_id"] = conversation_id
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error getting tenant stats: {str(e)}")
+            raise ServiceError(f"Error getting tenant stats: {str(e)}")
 
 
 @app.get("/status", response_model=HealthResponse)
@@ -554,33 +696,61 @@ async def get_service_status():
         HealthResponse: Estado del servicio
     """
     try:
-        # Verificar Supabase
-        supabase_status = "available"
+        # Para el health check no necesitamos un contexto específico
+        # Check if Redis is available (for caching)
+        redis_status = "unavailable"
+        try:
+            from common.cache import get_redis_client
+            redis_client = get_redis_client()
+            if redis_client and redis_client.ping():
+                redis_status = "available"
+        except Exception:
+            pass
+        
+        # Check if Supabase is available
+        supabase_status = "unavailable"
         try:
             supabase = get_supabase_client()
             supabase.table("tenants").select("tenant_id").limit(1).execute()
+            supabase_status = "available"
         except Exception:
-            supabase_status = "unavailable"
+            pass
         
-        # Verificar servicio de embeddings
-        embedding_status = "available"
+        # Check if OpenAI API is available
+        openai_status = "unavailable"
         try:
-            response = await http_client.get(f"{settings.embedding_service_url}/status")
-            if response.status_code != 200:
-                embedding_status = "degraded"
+            import openai
+            openai.api_key = settings.openai_api_key
+            openai.Completion.create(
+                model="gpt-3.5-turbo-instruct",
+                prompt="Hello, this is a test.",
+                max_tokens=5
+            )
+            openai_status = "available"
         except Exception:
-            embedding_status = "unavailable"
+            pass
+            
+        # Check if Embedding service is available
+        embed_status = "unavailable"
+        try:
+            result = http_client.get(f"{settings.embedding_service_url}/status")
+            if result.status_code == 200:
+                embed_status = "available"
+        except Exception:
+            pass
         
         return HealthResponse(
-            status="healthy" if all(s == "available" for s in [supabase_status, embedding_status]) else "degraded",
+            status="healthy" if all(s == "available" for s in [supabase_status, openai_status, embed_status]) else "degraded",
             components={
+                "redis": redis_status,
                 "supabase": supabase_status,
-                "embedding_service": embedding_status
+                "openai": openai_status,
+                "embedding_service": embed_status
             },
             version=settings.service_version
         )
     except Exception as e:
-        logger.error(f"Error in healthcheck: {str(e)}")
+        logger.error(f"Error in healthcheck: {str(e)}", exc_info=True)
         return HealthResponse(
             status="error",
             components={
@@ -844,7 +1014,6 @@ async def get_collection_tool(
     )
     
     return tool
-
 
 if __name__ == "__main__":
     import uvicorn

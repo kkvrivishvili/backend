@@ -9,6 +9,7 @@ from typing import Dict, Any, List, Optional
 from supabase import create_client, Client
 
 from .config import get_settings
+from .context import get_current_tenant_id, TenantContext
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ def init_supabase():
         raise
 
 
-def get_tenant_vector_store(tenant_id: str, collection_name: Optional[str] = None) -> Any:
+def get_tenant_vector_store(tenant_id: Optional[str] = None, collection_name: Optional[str] = None) -> Any:
     """
     Obtiene un vector store para un tenant específico.
     
@@ -51,12 +52,16 @@ def get_tenant_vector_store(tenant_id: str, collection_name: Optional[str] = Non
     usamos Any como tipo de retorno.
     
     Args:
-        tenant_id: ID del tenant
+        tenant_id: ID del tenant (opcional, usa el contexto actual si no se especifica)
         collection_name: Nombre de la colección (opcional)
         
     Returns:
-        Any: SupabaseVectorStore configurado para el tenant
+        Any: Vector store para el tenant especificado
     """
+    # Si no se proporciona tenant_id, usar el del contexto actual
+    if tenant_id is None:
+        tenant_id = get_current_tenant_id()
+        
     from llama_index.vector_stores.supabase import SupabaseVectorStore
     
     supabase = get_supabase_client()
@@ -80,7 +85,7 @@ def get_tenant_vector_store(tenant_id: str, collection_name: Optional[str] = Non
 
 
 def get_tenant_documents(
-    tenant_id: str, 
+    tenant_id: Optional[str] = None, 
     collection_name: Optional[str] = None,
     limit: int = 50,
     offset: int = 0
@@ -89,7 +94,7 @@ def get_tenant_documents(
     Obtiene los documentos para un tenant específico.
     
     Args:
-        tenant_id: ID del tenant
+        tenant_id: ID del tenant (opcional, usa el contexto actual si no se especifica)
         collection_name: Filtrar por colección
         limit: Límite de resultados
         offset: Desplazamiento para paginación
@@ -97,6 +102,10 @@ def get_tenant_documents(
     Returns:
         Dict[str, Any]: Documentos y metadatos de paginación
     """
+    # Si no se proporciona tenant_id, usar el del contexto actual
+    if tenant_id is None:
+        tenant_id = get_current_tenant_id()
+    
     supabase = get_supabase_client()
     
     # Query base
@@ -197,40 +206,40 @@ def get_tenant_collections(tenant_id: str) -> List[Dict[str, Any]]:
     return collection_stats
 
 
-def get_tenant_configurations(tenant_id: str, environment: str = "development") -> Dict[str, Any]:
+def get_tenant_configurations(tenant_id: Optional[str] = None, environment: str = "development") -> Dict[str, Any]:
     """
     Obtiene todas las configuraciones para un tenant específico en un entorno determinado.
     
     Args:
-        tenant_id: ID del tenant
+        tenant_id: ID del tenant (opcional, usa el contexto actual si no se especifica)
         environment: Entorno (development, staging, production)
         
     Returns:
         Dict[str, Any]: Diccionario con las configuraciones (clave: valor)
     """
+    # Si no se proporciona tenant_id, usar el del contexto actual
+    if tenant_id is None:
+        tenant_id = get_current_tenant_id()
+    
     try:
-        supabase = get_supabase_client()
-        response = supabase.rpc(
-            "get_tenant_configurations",
-            {
-                "p_tenant_id": tenant_id,
-                "p_environment": environment
-            }
-        ).execute()
+        client = get_supabase_client()
+        query = client.table("tenant_configurations").select(
+            "config_key", "config_value"
+        ).eq("tenant_id", tenant_id).eq("environment", environment).eq("is_active", True)
         
-        if hasattr(response, 'error') and response.error is not None:
-            logger.error(f"Error al obtener configuraciones para tenant {tenant_id}: {response.error}")
+        result = query.execute()
+        
+        if not result.data:
+            logger.warning(f"No se encontraron configuraciones para tenant {tenant_id} en entorno {environment}")
             return {}
-            
-        # Convertir lista de configuraciones a diccionario
-        config_dict = {}
-        for item in response.data:
-            config_dict[item["config_key"]] = item["config_value"]
-            
+        
+        # Convertir a diccionario clave-valor
+        config_dict = {item["config_key"]: item["config_value"] for item in result.data}
+        logger.debug(f"Obtenidas {len(config_dict)} configuraciones para tenant {tenant_id}")
         return config_dict
         
     except Exception as e:
-        logger.error(f"Error al obtener configuraciones para tenant {tenant_id}: {str(e)}")
+        logger.error(f"Error al obtener configuraciones del tenant {tenant_id}: {str(e)}")
         return {}
 
 
@@ -407,6 +416,30 @@ def override_settings_from_supabase(settings: Any, tenant_id: str, environment: 
     except Exception as e:
         logger.error(f"Error al sobrescribir configuraciones para tenant {tenant_id}: {str(e)}")
         return settings
+
+
+def apply_tenant_configuration_changes(tenant_id: str, environment: str = "development") -> bool:
+    """
+    Aplica cambios de configuración para un tenant específico, incluyendo
+    la invalidación de caché y configuraciones.
+    
+    Args:
+        tenant_id: ID del tenant
+        environment: Entorno (development, staging, production)
+        
+    Returns:
+        bool: True si se aplicaron correctamente
+    """
+    try:
+        # Invalidar caché de Redis
+        from .cache import invalidate_tenant_cache
+        invalidate_tenant_cache(tenant_id)
+        
+        logger.info(f"Cambios de configuración aplicados para tenant {tenant_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error al aplicar cambios de configuración para tenant {tenant_id}: {str(e)}")
+        return False
 
 
 """

@@ -34,14 +34,25 @@ services:
     ports:
       - "8001:8001"
     environment:
+      # Variables de credenciales
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SUPABASE_URL=${SUPABASE_URL:-https://example.supabase.co}
+      - SUPABASE_KEY=${SUPABASE_KEY:-dummy-key-for-testing}
+      
+      # Variables de identificación del servicio
+      - SERVICE_NAME=embedding-service
+      
+      # Variables de conexión con servicios
       - REDIS_URL=redis://redis:6379/0
-      - SKIP_SUPABASE=true
-      - TESTING_MODE=true
-      - LOG_LEVEL=INFO
-      - PYTHONPATH=/app
       - OLLAMA_API_URL=http://ollama:11434
-      - EMBEDDING_MODEL=nomic-embed-text
+      
+      # Variables de configuración multi-tenant
+      - TENANT_ID=default
+      - CONFIG_ENVIRONMENT=development
+      - LOAD_CONFIG_FROM_SUPABASE=false
+      
+      # Variables de configuración general
+      - LOG_LEVEL=INFO
       - USE_OLLAMA=true
     depends_on:
       - redis
@@ -54,14 +65,26 @@ services:
     ports:
       - "8000:8000"
     environment:
+      # Variables de credenciales
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SUPABASE_URL=${SUPABASE_URL:-https://example.supabase.co}
+      - SUPABASE_KEY=${SUPABASE_KEY:-dummy-key-for-testing}
+      
+      # Variables de identificación del servicio
+      - SERVICE_NAME=ingestion-service
+      
+      # Variables de conexión con servicios
       - REDIS_URL=redis://redis:6379/0
       - EMBEDDING_SERVICE_URL=http://embedding-service:8001
-      - SKIP_SUPABASE=true
-      - TESTING_MODE=true
-      - LOG_LEVEL=INFO
-      - PYTHONPATH=/app
       - OLLAMA_API_URL=http://ollama:11434
+      
+      # Variables de configuración multi-tenant
+      - TENANT_ID=default
+      - CONFIG_ENVIRONMENT=development
+      - LOAD_CONFIG_FROM_SUPABASE=false
+      
+      # Variables de configuración general
+      - LOG_LEVEL=INFO
       - USE_OLLAMA=true
     depends_on:
       - embedding-service
@@ -74,16 +97,28 @@ services:
     ports:
       - "8002:8002"
     environment:
+      # Variables de credenciales
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SUPABASE_URL=${SUPABASE_URL:-https://example.supabase.co}
+      - SUPABASE_KEY=${SUPABASE_KEY:-dummy-key-for-testing}
+      
+      # Variables de identificación del servicio
+      - SERVICE_NAME=query-service
+      
+      # Variables de conexión con servicios
       - REDIS_URL=redis://redis:6379/0
       - EMBEDDING_SERVICE_URL=http://embedding-service:8001
-      - SKIP_SUPABASE=true
-      - TESTING_MODE=true
-      - LOG_LEVEL=INFO
-      - PYTHONPATH=/app
       - OLLAMA_API_URL=http://ollama:11434
-      - LLM_MODEL=llama3.2:1b
+      
+      # Variables de configuración multi-tenant
+      - TENANT_ID=default
+      - CONFIG_ENVIRONMENT=development
+      - LOAD_CONFIG_FROM_SUPABASE=false
+      
+      # Variables de configuración general
+      - LOG_LEVEL=INFO
       - USE_OLLAMA=true
+      - DEFAULT_OLLAMA_MODEL=llama3
     depends_on:
       - embedding-service
       - ollama
@@ -93,19 +128,31 @@ services:
       context: .
       dockerfile: docker/services/Dockerfile.agent
     ports:
-      - "8004:8004"
+      - "8003:8003"
     environment:
+      # Variables de credenciales
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SUPABASE_URL=${SUPABASE_URL:-https://example.supabase.co}
+      - SUPABASE_KEY=${SUPABASE_KEY:-dummy-key-for-testing}
+      
+      # Variables de identificación del servicio
+      - SERVICE_NAME=agent-service
+      
+      # Variables de conexión con servicios
       - REDIS_URL=redis://redis:6379/0
       - EMBEDDING_SERVICE_URL=http://embedding-service:8001
       - QUERY_SERVICE_URL=http://query-service:8002
-      - SKIP_SUPABASE=true
-      - TESTING_MODE=true
-      - LOG_LEVEL=INFO
-      - PYTHONPATH=/app
       - OLLAMA_API_URL=http://ollama:11434
-      - LLM_MODEL=llama3.2:1b
+      
+      # Variables de configuración multi-tenant
+      - TENANT_ID=default
+      - CONFIG_ENVIRONMENT=development
+      - LOAD_CONFIG_FROM_SUPABASE=false
+      
+      # Variables de configuración general
+      - LOG_LEVEL=INFO
       - USE_OLLAMA=true
+      - DEFAULT_OLLAMA_MODEL=llama3
     depends_on:
       - embedding-service
       - query-service

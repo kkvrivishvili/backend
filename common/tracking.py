@@ -61,7 +61,14 @@ async def track_token_usage(tenant_id: str, tokens: int, model: str = None) -> b
         return False
 
 
-async def track_embedding_usage(tenant_id: str, texts: List[str], model: str, cached_count: int = 0) -> bool:
+async def track_embedding_usage(
+    tenant_id: str, 
+    texts: List[str], 
+    model: str, 
+    cached_count: int = 0,
+    agent_id: Optional[str] = None,
+    conversation_id: Optional[str] = None
+) -> bool:
     """
     Registra el uso de embeddings para un tenant.
     
@@ -70,6 +77,8 @@ async def track_embedding_usage(tenant_id: str, texts: List[str], model: str, ca
         texts: Lista de textos procesados
         model: Modelo de embedding usado
         cached_count: Cantidad de embeddings que se obtuvieron de caché
+        agent_id: ID del agente (opcional)
+        conversation_id: ID de la conversación (opcional)
         
     Returns:
         bool: True si se registró correctamente
@@ -98,7 +107,9 @@ async def track_embedding_usage(tenant_id: str, texts: List[str], model: str, ca
             "model": model,
             "total_requests": len(texts),
             "cache_hits": cached_count,
-            "tokens_processed": estimated_tokens
+            "tokens_processed": estimated_tokens,
+            "agent_id": agent_id,
+            "conversation_id": conversation_id
         }).execute()
         
         return True
@@ -109,22 +120,24 @@ async def track_embedding_usage(tenant_id: str, texts: List[str], model: str, ca
 
 async def track_query(
     tenant_id: str, 
-    query: str, 
-    collection: str, 
-    llm_model: str, 
-    tokens: int, 
-    response_time_ms: int
+    operation_type: str,
+    model: str,
+    tokens_in: int,
+    tokens_out: int,
+    agent_id: Optional[str] = None,
+    conversation_id: Optional[str] = None
 ) -> bool:
     """
     Registra una consulta para análisis y facturación.
     
     Args:
         tenant_id: ID del tenant
-        query: Texto de la consulta
-        collection: Colección consultada
-        llm_model: Modelo LLM utilizado
-        tokens: Tokens estimados
-        response_time_ms: Tiempo de respuesta en milisegundos
+        operation_type: Tipo de operación (query, chat, etc)
+        model: Modelo LLM utilizado
+        tokens_in: Tokens de entrada
+        tokens_out: Tokens de salida generados
+        agent_id: ID del agente (opcional)
+        conversation_id: ID de la conversación (opcional)
         
     Returns:
         bool: True si se registró correctamente
@@ -138,23 +151,29 @@ async def track_query(
     supabase = get_supabase_client()
     
     try:
-        # Determinar si debemos registrar información de rendimiento
-        performance_data = {}
-        if settings.enable_performance_tracking:
-            performance_data["response_time_ms"] = response_time_ms
+        # Calcular total de tokens
+        total_tokens = tokens_in + tokens_out
         
         # Metadatos básicos de la consulta
         metadata = {
-            "query": query[:1000],  # Limitar longitud del query
-            "collection": collection,
-            "llm_model": llm_model,
-            "tokens": tokens,
-            "timestamp": int(time.time()),
-            **performance_data  # Incluir datos de rendimiento si está habilitado
+            "tenant_id": tenant_id,
+            "operation_type": operation_type,
+            "model": model,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "total_tokens": total_tokens,
+            "timestamp": int(time.time())
         }
         
+        # Agregar agent_id y conversation_id si están presentes
+        if agent_id:
+            metadata["agent_id"] = agent_id
+        
+        if conversation_id:
+            metadata["conversation_id"] = conversation_id
+        
         # Registrar uso de tokens primero
-        await track_token_usage(tenant_id, tokens, llm_model)
+        await track_token_usage(tenant_id, total_tokens, model)
         
         # Registrar la consulta para analytics
         supabase.table("query_logs").insert(metadata).execute()

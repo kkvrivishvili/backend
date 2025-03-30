@@ -59,3 +59,65 @@ async def track_usage(tenant_id: str, operation: str, metadata: Dict[str, Any]) 
     except Exception as e:
         logger.error(f"Error al registrar uso: {str(e)}")
         return False
+
+
+async def prepare_service_request(url: str, data: Dict[str, Any], 
+                                 tenant_id: Optional[str] = None,
+                                 agent_id: Optional[str] = None,
+                                 conversation_id: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Prepara una solicitud HTTP entre servicios con el contexto completo.
+    
+    Args:
+        url: URL del servicio
+        data: Datos a enviar
+        tenant_id: ID del tenant (opcional, usa el contexto actual si no se especifica)
+        agent_id: ID del agente (opcional, usa el contexto actual si no se especifica)
+        conversation_id: ID de la conversación (opcional, usa el contexto actual si no se especifica)
+        
+    Returns:
+        Dict con los datos de la respuesta
+    """
+    # Si no se proporciona tenant_id, usar el del contexto actual
+    if tenant_id is None:
+        from .context import get_current_tenant_id
+        tenant_id = get_current_tenant_id()
+    
+    # Asegurar que tenant_id esté incluido en los datos
+    if "tenant_id" not in data:
+        data["tenant_id"] = tenant_id
+    
+    # Propagar ID del agente si está disponible
+    if agent_id is None:
+        from .context import get_current_agent_id
+        agent_id = get_current_agent_id()
+    
+    if agent_id is not None and "agent_id" not in data:
+        data["agent_id"] = agent_id
+    
+    # Propagar ID de la conversación si está disponible
+    if conversation_id is None:
+        from .context import get_current_conversation_id
+        conversation_id = get_current_conversation_id()
+    
+    if conversation_id is not None and "conversation_id" not in data:
+        data["conversation_id"] = conversation_id
+    
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            logger.debug(f"Enviando solicitud a {url} con contexto: tenant={tenant_id}, agent={agent_id}, conversation={conversation_id}")
+            response = await client.post(url, json=data)
+            
+            # Verificar respuesta
+            if response.status_code != 200:
+                logger.error(f"Error en solicitud a {url}: {response.status_code} - {response.text}")
+                raise ServiceError(f"Error en solicitud: {response.status_code} - {response.text}")
+                
+            return response.json()
+    except httpx.HTTPError as e:
+        logger.error(f"Error HTTP en solicitud a {url}: {str(e)}")
+        raise ServiceError(f"Error de conexión: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error al enviar solicitud a {url}: {str(e)}")
+        raise ServiceError(f"Error en solicitud: {str(e)}")

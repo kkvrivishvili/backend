@@ -94,6 +94,21 @@ CREATE TABLE IF NOT EXISTS ai.agent_configs (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
 
+-- Tabla para gestionar conversaciones
+CREATE TABLE IF NOT EXISTS ai.conversations (
+    conversation_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
+    agent_id UUID NOT NULL REFERENCES ai.agent_configs(agent_id) ON DELETE CASCADE,
+    title TEXT,
+    status TEXT DEFAULT 'active',
+    context JSONB DEFAULT '{}'::jsonb,
+    client_reference_id TEXT,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    last_message_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
 -- Historial de chat
 CREATE TABLE IF NOT EXISTS ai.chat_history (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -163,12 +178,31 @@ ON ai.agent_configs(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_agent_configs_tenant_active
 ON ai.agent_configs(tenant_id, is_active);
 
+-- Índices para conversations
+CREATE INDEX IF NOT EXISTS idx_conversations_tenant
+ON ai.conversations(tenant_id);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_agent
+ON ai.conversations(agent_id);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_tenant_agent
+ON ai.conversations(tenant_id, agent_id);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_client_reference
+ON ai.conversations(client_reference_id);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_status
+ON ai.conversations(status);
+
 -- Índices para chat_history
 CREATE INDEX IF NOT EXISTS idx_chat_history_conversation
 ON ai.chat_history(conversation_id);
 
 CREATE INDEX IF NOT EXISTS idx_chat_history_tenant_agent
 ON ai.chat_history(tenant_id, agent_id);
+
+CREATE INDEX IF NOT EXISTS idx_chat_history_tenant_agent_conversation
+ON ai.chat_history(tenant_id, agent_id, conversation_id);
 
 -- Índices para agent_collections
 CREATE INDEX IF NOT EXISTS idx_agent_collections_agent
@@ -444,10 +478,183 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Función para crear una nueva conversación
+CREATE OR REPLACE FUNCTION ai.create_conversation(
+    p_tenant_id UUID,
+    p_agent_id UUID,
+    p_title TEXT DEFAULT NULL,
+    p_context JSONB DEFAULT '{}'::jsonb,
+    p_client_reference_id TEXT DEFAULT NULL,
+    p_metadata JSONB DEFAULT '{}'::jsonb
+)
+RETURNS UUID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_conversation_id UUID;
+BEGIN
+    INSERT INTO ai.conversations (
+        tenant_id, agent_id, title, context, client_reference_id, metadata
+    ) VALUES (
+        p_tenant_id, p_agent_id, p_title, p_context, p_client_reference_id, p_metadata
+    ) RETURNING conversation_id INTO v_conversation_id;
+    
+    RETURN v_conversation_id;
+END;
+$$;
+
+-- Función para añadir mensaje a una conversación
+CREATE OR REPLACE FUNCTION ai.add_chat_message(
+    p_conversation_id UUID,
+    p_tenant_id UUID,
+    p_agent_id UUID,
+    p_user_message TEXT,
+    p_assistant_message TEXT,
+    p_thinking TEXT DEFAULT NULL,
+    p_tools_used JSONB DEFAULT NULL,
+    p_processing_time NUMERIC DEFAULT NULL,
+    p_metadata JSONB DEFAULT '{}'::jsonb
+)
+RETURNS UUID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_message_id UUID;
+BEGIN
+    -- Insertar mensaje
+    INSERT INTO ai.chat_history (
+        conversation_id, tenant_id, agent_id, 
+        user_message, assistant_message, thinking,
+        tools_used, processing_time, metadata
+    ) VALUES (
+        p_conversation_id, p_tenant_id, p_agent_id,
+        p_user_message, p_assistant_message, p_thinking,
+        p_tools_used, p_processing_time, p_metadata
+    ) RETURNING id INTO v_message_id;
+    
+    -- Actualizar timestamp de última actividad
+    UPDATE ai.conversations
+    SET last_message_at = now(), updated_at = now()
+    WHERE conversation_id = p_conversation_id;
+    
+    RETURN v_message_id;
+END;
+$$;
+
+-- Función para obtener conversaciones de un tenant
+CREATE OR REPLACE FUNCTION ai.get_tenant_conversations(
+    p_tenant_id UUID,
+    p_agent_id UUID DEFAULT NULL,
+    p_limit INTEGER DEFAULT 50,
+    p_offset INTEGER DEFAULT 0,
+    p_status TEXT DEFAULT NULL
+)
+RETURNS TABLE (
+    conversation_id UUID,
+    agent_id UUID,
+    title TEXT,
+    status TEXT,
+    context JSONB,
+    client_reference_id TEXT,
+    metadata JSONB,
+    created_at TIMESTAMP WITH TIME ZONE,
+    updated_at TIMESTAMP WITH TIME ZONE,
+    last_message_at TIMESTAMP WITH TIME ZONE,
+    messages_count BIGINT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        c.conversation_id,
+        c.agent_id,
+        c.title,
+        c.status,
+        c.context,
+        c.client_reference_id,
+        c.metadata,
+        c.created_at,
+        c.updated_at,
+        c.last_message_at,
+        COUNT(ch.id)::BIGINT AS messages_count
+    FROM ai.conversations c
+    LEFT JOIN ai.chat_history ch ON c.conversation_id = ch.conversation_id
+    WHERE 
+        c.tenant_id = p_tenant_id
+        AND (p_agent_id IS NULL OR c.agent_id = p_agent_id)
+        AND (p_status IS NULL OR c.status = p_status)
+    GROUP BY 
+        c.conversation_id
+    ORDER BY 
+        c.last_message_at DESC
+    LIMIT p_limit
+    OFFSET p_offset;
+END;
+$$;
+
+-- Función para obtener mensajes de una conversación
+CREATE OR REPLACE FUNCTION ai.get_conversation_messages(
+    p_conversation_id UUID,
+    p_limit INTEGER DEFAULT 50,
+    p_offset INTEGER DEFAULT 0
+)
+RETURNS TABLE (
+    message_id UUID,
+    role TEXT,
+    content TEXT,
+    thinking TEXT,
+    tools_used JSONB,
+    processing_time NUMERIC,
+    metadata JSONB,
+    created_at TIMESTAMP WITH TIME ZONE
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        id as message_id,
+        'user' as role,
+        user_message as content,
+        thinking,
+        tools_used,
+        processing_time,
+        metadata,
+        created_at
+    FROM ai.chat_history
+    WHERE conversation_id = p_conversation_id
+    UNION ALL
+    SELECT 
+        id as message_id,
+        'assistant' as role,
+        assistant_message as content,
+        NULL as thinking,
+        NULL as tools_used,
+        NULL as processing_time,
+        NULL as metadata,
+        created_at + INTERVAL '1 millisecond' as created_at
+    FROM ai.chat_history
+    WHERE conversation_id = p_conversation_id
+    ORDER BY created_at ASC
+    LIMIT p_limit
+    OFFSET p_offset;
+END;
+$$;
+
 -- POLÍTICAS DE SEGURIDAD ROW LEVEL SECURITY ------------------------------------
 
 -- Habilitar RLS en todas las tablas
 ALTER TABLE ai.agent_configs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai.conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ai.chat_history ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ai.agent_collections ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ai.chat_feedback ENABLE ROW LEVEL SECURITY;
@@ -461,6 +668,10 @@ ALTER TABLE ai.tenant_configurations ENABLE ROW LEVEL SECURITY;
 
 -- Crear políticas de aislamiento por tenant
 CREATE POLICY tenant_isolation_agent_configs ON ai.agent_configs
+    FOR ALL
+    USING (tenant_id = auth.uid()::uuid);
+
+CREATE POLICY tenant_isolation_conversations ON ai.conversations
     FOR ALL
     USING (tenant_id = auth.uid()::uuid);
 

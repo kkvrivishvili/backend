@@ -19,6 +19,13 @@ from llama_index.core.embeddings import BaseEmbedding
 # Importar nuestro adaptador de Ollama centralizado
 from common.ollama import get_embedding_model
 
+# Importar nuestras clases de contexto
+from common.context import (
+    TenantContext, AgentContext, ConversationContext, FullContext,
+    get_current_tenant_id, get_current_agent_id, get_current_conversation_id,
+    with_tenant_context, with_agent_context, with_conversation_context, with_full_context
+)
+
 # Importar nuestra biblioteca común
 from common.models import (
     TenantInfo, EmbeddingRequest, EmbeddingResponse, 
@@ -26,8 +33,8 @@ from common.models import (
 )
 from common.auth import verify_tenant, check_tenant_quotas, validate_model_access
 from common.cache import (
-    get_redis_client, get_cached_embedding, cache_embedding,
-    clear_tenant_cache
+    get_redis_client, get_cached_embedding, cache_embedding, clear_tenant_cache,
+    cache_keys_by_pattern, cache_get_memory_usage
 )
 from common.config import get_settings
 from common.errors import setup_error_handling, handle_service_error, ServiceError
@@ -65,6 +72,7 @@ app.add_middleware(
 class CachedOpenAIEmbedding:
     """
     Modelo OpenAI o Ollama Embedding con soporte de caché.
+    Soporta contexto multinivel (tenant, agente, conversación).
     """
     
     def __init__(
@@ -72,13 +80,19 @@ class CachedOpenAIEmbedding:
         model_name: str = settings.default_embedding_model,
         embed_batch_size: int = settings.embedding_batch_size,
         tenant_id: str = None,
+        agent_id: str = None,
+        conversation_id: str = None,
         api_key: Optional[str] = None
     ):
         # Inicialización sin llamar a super() ya que no heredamos de BaseEmbedding
         self.model_name = model_name
         self.api_key = api_key or settings.openai_api_key
         self.embed_batch_size = embed_batch_size
-        self.tenant_id = tenant_id
+        
+        # Obtener valores de contexto actual si no se proporcionan
+        self.tenant_id = tenant_id or get_current_tenant_id()
+        self.agent_id = agent_id or get_current_agent_id()
+        self.conversation_id = conversation_id or get_current_conversation_id()
         
         # Usar Ollama o OpenAI según configuración centralizada
         if settings.use_ollama:
@@ -101,7 +115,13 @@ class CachedOpenAIEmbedding:
         
         # Check cache first if tenant_id is provided
         if self.tenant_id and redis_client:
-            cached_embedding = get_cached_embedding(text, self.tenant_id, self.model_name)
+            cached_embedding = get_cached_embedding(
+                text, 
+                self.tenant_id, 
+                self.model_name, 
+                self.agent_id, 
+                self.conversation_id
+            )
             if cached_embedding:
                 return cached_embedding
         
@@ -113,7 +133,14 @@ class CachedOpenAIEmbedding:
         
         # Store in cache if tenant_id provided
         if self.tenant_id and redis_client:
-            cache_embedding(text, embedding, self.tenant_id, self.model_name)
+            cache_embedding(
+                text, 
+                embedding, 
+                self.tenant_id, 
+                self.model_name, 
+                self.agent_id, 
+                self.conversation_id
+            )
         
         return embedding
     
@@ -136,7 +163,13 @@ class CachedOpenAIEmbedding:
                 continue
             
             if self.tenant_id and redis_client:
-                cached_embedding = get_cached_embedding(text, self.tenant_id, self.model_name)
+                cached_embedding = get_cached_embedding(
+                    text, 
+                    self.tenant_id, 
+                    self.model_name, 
+                    self.agent_id, 
+                    self.conversation_id
+                )
                 if cached_embedding:
                     cache_hits[i] = cached_embedding
                     continue
@@ -158,7 +191,14 @@ class CachedOpenAIEmbedding:
         if self.tenant_id and redis_client:
             for idx, embedding in zip(original_indices, embeddings):
                 text = texts[idx]
-                cache_embedding(text, embedding, self.tenant_id, self.model_name)
+                cache_embedding(
+                    text, 
+                    embedding, 
+                    self.tenant_id, 
+                    self.model_name, 
+                    self.agent_id, 
+                    self.conversation_id
+                )
         
         # Combine cached and new embeddings
         result = [None] * len(texts)
@@ -172,6 +212,31 @@ class CachedOpenAIEmbedding:
             result[orig_idx] = embedding
         
         return result
+
+
+def get_appropriate_context_manager(tenant_id: str, agent_id: Optional[str] = None, conversation_id: Optional[str] = None):
+    """
+    Obtiene el administrador de contexto apropiado según los IDs proporcionados.
+    
+    Args:
+        tenant_id: ID del tenant (requerido)
+        agent_id: ID del agente (opcional)
+        conversation_id: ID de la conversación (opcional)
+        
+    Returns:
+        Un administrador de contexto apropiado (TenantContext, AgentContext, o FullContext)
+    """
+    # Solo aplicar contexto multinivel cuando realmente se necesite
+    # Para operaciones generales, usar solo TenantContext
+    if conversation_id and agent_id:
+        # Solo usar FullContext para operaciones específicas de conversación
+        return FullContext(tenant_id, agent_id, conversation_id)
+    elif agent_id:
+        # Usar AgentContext para operaciones específicas de agente
+        return AgentContext(tenant_id, agent_id)
+    else:
+        # Para operaciones generales, el TenantContext es suficiente
+        return TenantContext(tenant_id)
 
 
 @app.post("/embed", response_model=EmbeddingResponse)
@@ -191,6 +256,9 @@ async def generate_embeddings(
         EmbeddingResponse: Respuesta con embeddings generados
     """
     start_time = time.time()
+    tenant_id = tenant_info.tenant_id
+    agent_id = request.agent_id
+    conversation_id = request.conversation_id
     
     # Check quotas
     await check_tenant_quotas(tenant_info)
@@ -214,33 +282,45 @@ async def generate_embeddings(
     while len(metadata) < len(request.texts):
         metadata.append({})
     
-    # Add tenant_id to metadata
+    # Add context info to metadata
     for meta in metadata:
         meta["tenant_id"] = request.tenant_id
+        if agent_id:
+            meta["agent_id"] = agent_id
+        if conversation_id:
+            meta["conversation_id"] = conversation_id
     
     # Count cache hits for stats
     cache_hits = 0
     if redis_client:
         for text in request.texts:
-            if get_cached_embedding(text, request.tenant_id, model_name):
+            if get_cached_embedding(text, request.tenant_id, model_name, agent_id, conversation_id):
                 cache_hits += 1
     
-    # Initialize embedding model
-    embed_model = CachedOpenAIEmbedding(
-        model_name=model_name,
-        tenant_id=request.tenant_id
-    )
+    # Establecer contexto completo para garantizar propagación
+    context_manager = get_appropriate_context_manager(tenant_id, agent_id, conversation_id)
     
-    # Generate embeddings
-    embeddings = await embed_model._aget_text_embedding_batch(request.texts)
-    
-    # Track usage
-    await track_embedding_usage(
-        request.tenant_id,
-        request.texts,
-        model_name,
-        cache_hits
-    )
+    with context_manager:
+        # Initialize embedding model
+        embed_model = CachedOpenAIEmbedding(
+            model_name=model_name,
+            tenant_id=request.tenant_id,
+            agent_id=agent_id,
+            conversation_id=conversation_id
+        )
+        
+        # Generate embeddings
+        embeddings = await embed_model._aget_text_embedding_batch(request.texts)
+        
+        # Track usage
+        await track_embedding_usage(
+            request.tenant_id,
+            request.texts,
+            model_name,
+            cache_hits,
+            agent_id,
+            conversation_id
+        )
     
     return EmbeddingResponse(
         success=True,
@@ -269,6 +349,9 @@ async def batch_generate_embeddings(
         EmbeddingResponse: Respuesta con embeddings generados
     """
     start_time = time.time()
+    tenant_id = tenant_info.tenant_id
+    agent_id = request.agent_id
+    conversation_id = request.conversation_id
     
     # Check quotas
     await check_tenant_quotas(tenant_info)
@@ -284,33 +367,45 @@ async def batch_generate_embeddings(
     texts = [item.text for item in request.items]
     metadata = [item.metadata for item in request.items]
     
-    # Add tenant_id to metadata
+    # Add context info to metadata
     for meta in metadata:
         meta["tenant_id"] = request.tenant_id
+        if agent_id:
+            meta["agent_id"] = agent_id
+        if conversation_id:
+            meta["conversation_id"] = conversation_id
     
     # Count cache hits for stats
     cache_hits = 0
     if redis_client:
         for text in texts:
-            if get_cached_embedding(text, request.tenant_id, model_name):
+            if get_cached_embedding(text, request.tenant_id, model_name, agent_id, conversation_id):
                 cache_hits += 1
     
-    # Initialize embedding model
-    embed_model = CachedOpenAIEmbedding(
-        model_name=model_name,
-        tenant_id=request.tenant_id
-    )
+    # Establecer contexto completo para garantizar propagación
+    context_manager = get_appropriate_context_manager(tenant_id, agent_id, conversation_id)
     
-    # Generate embeddings
-    embeddings = await embed_model._aget_text_embedding_batch(texts)
-    
-    # Track usage
-    await track_embedding_usage(
-        request.tenant_id,
-        texts,
-        model_name,
-        cache_hits
-    )
+    with context_manager:
+        # Initialize embedding model
+        embed_model = CachedOpenAIEmbedding(
+            model_name=model_name,
+            tenant_id=request.tenant_id,
+            agent_id=agent_id,
+            conversation_id=conversation_id
+        )
+        
+        # Generate embeddings
+        embeddings = await embed_model._aget_text_embedding_batch(texts)
+        
+        # Track usage
+        await track_embedding_usage(
+            request.tenant_id,
+            texts,
+            model_name,
+            cache_hits,
+            agent_id,
+            conversation_id
+        )
     
     return EmbeddingResponse(
         success=True,
@@ -324,43 +419,59 @@ async def batch_generate_embeddings(
 
 @app.get("/models")
 @handle_service_error()
-async def list_available_models(tenant_info: TenantInfo = Depends(verify_tenant)):
+async def list_available_models(
+    tenant_info: TenantInfo = Depends(verify_tenant)
+):
     """
-    Lista los modelos de embedding disponibles para un tenant según su nivel de suscripción.
+    Lista los modelos de embedding disponibles para el tenant.
     
     Args:
         tenant_info: Información del tenant (inyectada)
         
     Returns:
-        dict: Modelos disponibles
+        dict: Modelos disponibles y configuración
     """
-    # Base models available to all tiers
-    base_models = [
-        {
-            "id": "text-embedding-3-small",
-            "name": "OpenAI Embedding Small",
-            "dimensions": 1536,
-            "provider": "openai",
-            "description": "Fast and efficient general purpose embedding model"
-        }
-    ]
+    tenant_id = tenant_info.tenant_id
     
-    # Pro and business tier models
-    advanced_models = [
-        {
-            "id": "text-embedding-3-large",
-            "name": "OpenAI Embedding Large",
-            "dimensions": 3072,
-            "provider": "openai",
-            "description": "High performance embedding model with better retrieval quality"
+    # Para listar modelos, solo necesitamos el contexto de tenant
+    with TenantContext(tenant_id):
+        subscription_tier = tenant_info.subscription_tier
+        
+        # Modelos básicos disponibles para todos
+        available_models = get_available_models_for_tier("free")
+        
+        # Modelos premium
+        premium_models = {
+            "text-embedding-3-large": {
+                "dimensions": 3072,
+                "description": "OpenAI's most capable embedding model with higher dimensions for better performance",
+                "max_tokens": 8191
+            }
         }
-    ]
-    
-    # Return models based on subscription tier
-    if tenant_info.subscription_tier in ["pro", "business"]:
-        return {"models": base_models + advanced_models}
-    else:
-        return {"models": base_models}
+        
+        # Add Ollama models if using local models
+        ollama_models = {}
+        if settings.use_ollama:
+            ollama_models = {
+                "nomic-embed-text": {
+                    "dimensions": 768,
+                    "description": "Nomic AI embedding model, locally hosted on Ollama",
+                    "max_tokens": 8192
+                }
+            }
+        
+        available_models.update(ollama_models)
+        
+        # Add premium models only for higher tier tenants
+        if subscription_tier in ["pro", "enterprise"]:
+            available_models.update(premium_models)
+        
+        return {
+            "tenant_id": tenant_id,
+            "subscription_tier": subscription_tier,
+            "available_models": available_models,
+            "default_model": settings.default_embedding_model
+        }
 
 
 @app.get("/status", response_model=HealthResponse)
@@ -373,6 +484,7 @@ async def get_service_status():
         HealthResponse: Estado del servicio
     """
     try:
+        # Para el health check no necesitamos un contexto específico
         # Check if Redis is available
         redis_status = "available" if redis_client and redis_client.ping() else "unavailable"
         
@@ -421,50 +533,75 @@ async def get_service_status():
 
 @app.get("/cache/stats")
 @handle_service_error()
-async def get_cache_stats(tenant_info: TenantInfo = Depends(verify_tenant)):
+async def get_cache_stats(
+    tenant_info: TenantInfo = Depends(verify_tenant),
+    agent_id: Optional[str] = None,
+    conversation_id: Optional[str] = None
+):
     """
     Obtiene estadísticas sobre el uso de caché.
     
     Args:
         tenant_info: Información del tenant (inyectada)
+        agent_id: ID del agente para filtrar estadísticas (opcional)
+        conversation_id: ID de la conversación para filtrar estadísticas (opcional)
         
     Returns:
         dict: Estadísticas de caché
     """
-    if not redis_client:
-        return {"status": "cache_unavailable"}
+    tenant_id = tenant_info.tenant_id
     
-    try:
-        # Get total keys in cache
-        total_keys = redis_client.dbsize()
+    # Para estadísticas de caché, usamos el nivel de contexto específico
+    # solo si se solicitan estadísticas para un agente o conversación específica
+    if conversation_id and agent_id:
+        context_manager = FullContext(tenant_id, agent_id, conversation_id)
+    elif agent_id:
+        context_manager = AgentContext(tenant_id, agent_id)
+    else:
+        context_manager = TenantContext(tenant_id)
+    
+    with context_manager:
+        if not redis_client:
+            return {
+                "tenant_id": tenant_id,
+                "agent_id": agent_id,
+                "conversation_id": conversation_id,
+                "cache_enabled": False,
+                "cached_embeddings": 0,
+                "memory_usage_bytes": 0,
+                "memory_usage_mb": 0
+            }
         
-        # Estimar claves del tenant (hacemos una búsqueda específica)
-        pattern = f"embed:{tenant_info.tenant_id}:*"
-        cursor = 0
-        tenant_keys = 0
+        # Construir patrón de búsqueda según los IDs proporcionados
+        pattern_parts = [tenant_id, "embed"]
         
-        # Escanear claves en batches
-        while True:
-            cursor, keys = redis_client.scan(cursor, match=pattern, count=100)
-            tenant_keys += len(keys)
-            if cursor == 0:
-                break
+        if agent_id:
+            pattern_parts.append(f"agent:{agent_id}")
         
-        # Get memory usage
-        memory_info = redis_client.info("memory")
-        used_memory = memory_info.get("used_memory_human", "unknown")
+        if conversation_id:
+            pattern_parts.append(f"conv:{conversation_id}")
+        
+        pattern_parts.append("*")
+        pattern = ":".join(pattern_parts)
+        
+        # Obtener claves que coinciden con el patrón
+        keys = cache_keys_by_pattern(pattern)
+        
+        # Calcular uso de memoria total
+        memory_usage = 0
+        for key in keys:
+            key_memory = cache_get_memory_usage(key)
+            if key_memory:
+                memory_usage += key_memory
         
         return {
-            "status": "available",
-            "total_cached_embeddings": total_keys,
-            "tenant_cached_embeddings": tenant_keys,
-            "memory_usage": used_memory
-        }
-    except Exception as e:
-        logger.error(f"Error getting cache stats: {str(e)}")
-        return {
-            "status": "error",
-            "error": str(e)
+            "tenant_id": tenant_id,
+            "agent_id": agent_id,
+            "conversation_id": conversation_id,
+            "cache_enabled": True,
+            "cached_embeddings": len(keys),
+            "memory_usage_bytes": memory_usage,
+            "memory_usage_mb": round(memory_usage / (1024 * 1024), 2) if memory_usage else 0
         }
 
 
@@ -472,35 +609,83 @@ async def get_cache_stats(tenant_info: TenantInfo = Depends(verify_tenant)):
 @handle_service_error()
 async def clear_tenant_cache(
     tenant_id: str,
-    tenant_info: TenantInfo = Depends(verify_tenant)
+    tenant_info: TenantInfo = Depends(verify_tenant),
+    cache_type: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    conversation_id: Optional[str] = None
 ):
     """
     Limpia la caché para un tenant específico.
     
     Args:
-        tenant_id: ID del tenant para el que limpiar caché
-        tenant_info: Información del tenant actual (inyectada)
+        tenant_id: ID del tenant
+        tenant_info: Información del tenant (inyectada)
+        cache_type: Tipo de caché (ej: 'embed', 'query') o None para todo
+        agent_id: ID del agente para limpiar solo la caché de ese agente
+        conversation_id: ID de la conversación para limpiar solo esa conversación
         
     Returns:
         dict: Resultado de la operación
     """
-    # Solo permitir al propio tenant o a admin (business tier) limpiar la caché
-    if tenant_id != tenant_info.tenant_id and tenant_info.subscription_tier != "business":
-        raise HTTPException(
-            status_code=403, 
-            detail="You can only clear your own cache unless you have admin privileges"
+    # Verificar que el usuario está limpiando su propia caché
+    if tenant_id != tenant_info.tenant_id:
+        raise ServiceError(
+            status_code=403,
+            error_code="FORBIDDEN",
+            message="No puedes limpiar la caché de otro tenant"
         )
     
-    if not redis_client:
-        return {"status": "cache_unavailable"}
+    # Para limpiar la caché, usamos el nivel de contexto específico
+    # solo si se solicita limpiar para un agente o conversación específica
+    if conversation_id and agent_id:
+        context_manager = FullContext(tenant_id, agent_id, conversation_id)
+    elif agent_id:
+        context_manager = AgentContext(tenant_id, agent_id)
+    else:
+        context_manager = TenantContext(tenant_id)
     
-    # Limpiar caché
-    deleted = clear_tenant_cache(tenant_id, cache_type="embed")
+    with context_manager:
+        if not redis_client:
+            return {
+                "success": False,
+                "message": "Redis no está disponible",
+                "keys_deleted": 0
+            }
+        
+        keys_deleted = clear_tenant_cache(tenant_id, cache_type, agent_id, conversation_id)
+        
+        return {
+            "success": True,
+            "message": f"Se han eliminado {keys_deleted} claves de caché",
+            "keys_deleted": keys_deleted
+        }
+
+
+def get_available_models_for_tier(tier: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Obtiene los modelos de embeddings disponibles para un nivel de suscripción.
     
-    return {
-        "status": "success",
-        "deleted_keys": deleted
+    Args:
+        tier: Nivel de suscripción ('free', 'pro', 'enterprise')
+        
+    Returns:
+        Dict[str, Dict[str, Any]]: Diccionario con modelos disponibles
+    """
+    # Modelos básicos disponibles para todos
+    basic_models = {
+        "text-embedding-3-small": {
+            "dimensions": 1536,
+            "description": "OpenAI text-embedding-3-small model, suitable for most applications",
+            "max_tokens": 8191
+        },
+        "text-embedding-ada-002": {
+            "dimensions": 1536,
+            "description": "OpenAI legacy model, maintained for backwards compatibility",
+            "max_tokens": 8191
+        }
     }
+    
+    return basic_models.copy()
 
 
 if __name__ == "__main__":
