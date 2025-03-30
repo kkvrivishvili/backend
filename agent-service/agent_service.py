@@ -35,7 +35,8 @@ from common.models import (
 from common.auth import verify_tenant, check_tenant_quotas, validate_model_access
 from common.supabase import get_supabase_client, init_supabase
 from common.config import Settings, get_settings
-from common.utils import handle_service_error, track_usage, sanitize_content, prepare_service_request, ServiceError
+from common.utils import track_usage, sanitize_content, prepare_service_request
+from common.errors import handle_service_error, handle_service_error_simple, ServiceError
 from common.logging import init_logging
 from common.ollama import get_llm_model, is_using_ollama
 from common.context import TenantContext, FullContext, get_current_tenant_id, get_current_agent_id, get_current_conversation_id, with_tenant_context, with_full_context, AgentContext
