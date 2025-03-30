@@ -7,13 +7,15 @@ import logging
 import traceback
 import sys
 import re
-from typing import Callable, Dict, Any, Optional
-from fastapi import FastAPI, Request
+from typing import Callable, Dict, Any, Optional, Union
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 from functools import wraps
+from pydantic import ValidationError
+from .context import get_current_tenant_id
 
 logger = logging.getLogger(__name__)
 
@@ -172,13 +174,14 @@ def handle_service_error(
 # Versión simple sin reintentos, para compatibilidad con código existente
 def handle_service_error_simple(on_error_response=None):
     """
-    Decorador simple para manejar errores del servicio de manera consistente, sin reintentos.
+    Decorador simplificado para manejar errores en servicios.
+    Captura excepciones y devuelve una respuesta de error estandarizada.
     
     Args:
-        on_error_response: Respuesta a devolver en caso de error
+        on_error_response: Respuesta personalizada opcional en caso de error
         
     Returns:
-        Decorador configurado
+        Decorador para funciones asíncronas
     """
     def decorator(func):
         @wraps(func)
@@ -186,26 +189,37 @@ def handle_service_error_simple(on_error_response=None):
             try:
                 return await func(*args, **kwargs)
             except Exception as e:
-                logger.error(f"Error en {func.__name__}: {str(e)}")
-                logger.error(traceback.format_exc())
+                context_info = ""
+                try:
+                    tenant_id = get_current_tenant_id()
+                    if tenant_id:
+                        context_info = f" [Tenant: {tenant_id}]"
+                except:
+                    pass
+                    
+                logger.error(f"Error en {func.__name__}{context_info}: {str(e)}")
                 
-                # Si es un ServiceError, dejarlo pasar
-                if isinstance(e, ServiceError):
-                    if on_error_response:
-                        return on_error_response
-                    raise
-                
-                # Convertir otras excepciones a ServiceError
-                error = ServiceError(
-                    message=f"Error en operación del servicio: {str(e)}",
-                    status_code=500,
-                    error_code="service_operation_failed",
-                    details={"operation": func.__name__}
-                )
+                # Si es un error de HTTP, obtenemos su código de estado
+                if isinstance(e, HTTPException):
+                    status_code = e.status_code
+                    detail = str(e.detail)
+                elif isinstance(e, ServiceError):
+                    status_code = 500
+                    detail = str(e)
+                else:
+                    status_code = 500
+                    detail = f"Error interno del servidor: {str(e)}"
                 
                 if on_error_response:
                     return on_error_response
-                raise error
+                
+                # Usar la función para crear respuesta estandarizada
+                return create_error_response(
+                    message=detail,
+                    status_code=status_code,
+                    error_detail={"function": func.__name__}
+                )
+                
         return wrapper
     return decorator
 
@@ -239,3 +253,37 @@ def sanitize_content(content: str) -> str:
         content = content[:100000] + "... [contenido truncado]"
     
     return content
+
+
+def create_error_response(message: str, status_code: int = 500, error_detail: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Crea una respuesta de error estandarizada.
+    
+    Args:
+        message: Mensaje de error principal
+        status_code: Código de estado HTTP
+        error_detail: Detalles adicionales del error (opcional)
+        
+    Returns:
+        Dict con estructura de respuesta estandarizada
+    """
+    response = {
+        "success": False,
+        "message": message,
+        "error": message,
+        "status_code": status_code,
+        "metadata": {}
+    }
+    
+    if error_detail:
+        response["metadata"]["error_detail"] = error_detail
+    
+    # Añadir tenant_id si está disponible en el contexto
+    try:
+        tenant_id = get_current_tenant_id()
+        if tenant_id:
+            response["metadata"]["tenant_id"] = tenant_id
+    except:
+        pass
+        
+    return response

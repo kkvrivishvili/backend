@@ -23,7 +23,8 @@ from common.ollama import get_embedding_model
 from common.context import (
     TenantContext, AgentContext, ConversationContext, FullContext,
     get_current_tenant_id, get_current_agent_id, get_current_conversation_id,
-    with_tenant_context, with_agent_context, with_conversation_context, with_full_context
+    with_tenant_context, with_agent_context, with_conversation_context, with_full_context,
+    get_appropriate_context_manager
 )
 
 # Importar nuestra biblioteca común
@@ -37,7 +38,7 @@ from common.cache import (
     cache_keys_by_pattern, cache_get_memory_usage
 )
 from common.config import get_settings
-from common.errors import setup_error_handling, handle_service_error, ServiceError
+from common.errors import setup_error_handling, handle_service_error_simple, ServiceError
 from common.tracking import track_embedding_usage
 from common.rate_limiting import setup_rate_limiting
 from common.logging import init_logging
@@ -106,7 +107,7 @@ class CachedOpenAIEmbedding:
                 embed_batch_size=embed_batch_size
             )
     
-    @handle_service_error()
+    @handle_service_error_simple()
     async def _aget_text_embedding(self, text: str) -> List[float]:
         """Get embedding with caching."""
         if not text.strip():
@@ -144,7 +145,7 @@ class CachedOpenAIEmbedding:
         
         return embedding
     
-    @handle_service_error()
+    @handle_service_error_simple()
     async def _aget_text_embedding_batch(self, texts: List[str]) -> List[List[float]]:
         """Get embeddings for a batch of texts with caching."""
         if not texts:
@@ -214,37 +215,13 @@ class CachedOpenAIEmbedding:
         return result
 
 
-def get_appropriate_context_manager(tenant_id: str, agent_id: Optional[str] = None, conversation_id: Optional[str] = None):
-    """
-    Obtiene el administrador de contexto apropiado según los IDs proporcionados.
-    
-    Args:
-        tenant_id: ID del tenant (requerido)
-        agent_id: ID del agente (opcional)
-        conversation_id: ID de la conversación (opcional)
-        
-    Returns:
-        Un administrador de contexto apropiado (TenantContext, AgentContext, o FullContext)
-    """
-    # Solo aplicar contexto multinivel cuando realmente se necesite
-    # Para operaciones generales, usar solo TenantContext
-    if conversation_id and agent_id:
-        # Solo usar FullContext para operaciones específicas de conversación
-        return FullContext(tenant_id, agent_id, conversation_id)
-    elif agent_id:
-        # Usar AgentContext para operaciones específicas de agente
-        return AgentContext(tenant_id, agent_id)
-    else:
-        # Para operaciones generales, el TenantContext es suficiente
-        return TenantContext(tenant_id)
-
-
 @app.post("/embed", response_model=EmbeddingResponse)
-@handle_service_error()
+@handle_service_error_simple
+@with_full_context
 async def generate_embeddings(
     request: EmbeddingRequest,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> EmbeddingResponse:
     """
     Genera embeddings para una lista de textos.
     
@@ -297,30 +274,26 @@ async def generate_embeddings(
             if get_cached_embedding(text, request.tenant_id, model_name, agent_id, conversation_id):
                 cache_hits += 1
     
-    # Establecer contexto completo para garantizar propagación
-    context_manager = get_appropriate_context_manager(tenant_id, agent_id, conversation_id)
+    # Initialize embedding model
+    embed_model = CachedOpenAIEmbedding(
+        model_name=model_name,
+        tenant_id=request.tenant_id,
+        agent_id=agent_id,
+        conversation_id=conversation_id
+    )
     
-    with context_manager:
-        # Initialize embedding model
-        embed_model = CachedOpenAIEmbedding(
-            model_name=model_name,
-            tenant_id=request.tenant_id,
-            agent_id=agent_id,
-            conversation_id=conversation_id
-        )
-        
-        # Generate embeddings
-        embeddings = await embed_model._aget_text_embedding_batch(request.texts)
-        
-        # Track usage
-        await track_embedding_usage(
-            request.tenant_id,
-            request.texts,
-            model_name,
-            cache_hits,
-            agent_id,
-            conversation_id
-        )
+    # Generate embeddings
+    embeddings = await embed_model._aget_text_embedding_batch(request.texts)
+    
+    # Track usage
+    await track_embedding_usage(
+        request.tenant_id,
+        request.texts,
+        model_name,
+        cache_hits,
+        agent_id,
+        conversation_id
+    )
     
     return EmbeddingResponse(
         success=True,
@@ -333,11 +306,12 @@ async def generate_embeddings(
 
 
 @app.post("/embed/batch", response_model=EmbeddingResponse)
-@handle_service_error()
+@handle_service_error_simple
+@with_full_context
 async def batch_generate_embeddings(
     request: BatchEmbeddingRequest,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> EmbeddingResponse:
     """
     Procesa embeddings para elementos con texto y metadata juntos.
     
@@ -382,30 +356,26 @@ async def batch_generate_embeddings(
             if get_cached_embedding(text, request.tenant_id, model_name, agent_id, conversation_id):
                 cache_hits += 1
     
-    # Establecer contexto completo para garantizar propagación
-    context_manager = get_appropriate_context_manager(tenant_id, agent_id, conversation_id)
+    # Initialize embedding model
+    embed_model = CachedOpenAIEmbedding(
+        model_name=model_name,
+        tenant_id=request.tenant_id,
+        agent_id=agent_id,
+        conversation_id=conversation_id
+    )
     
-    with context_manager:
-        # Initialize embedding model
-        embed_model = CachedOpenAIEmbedding(
-            model_name=model_name,
-            tenant_id=request.tenant_id,
-            agent_id=agent_id,
-            conversation_id=conversation_id
-        )
-        
-        # Generate embeddings
-        embeddings = await embed_model._aget_text_embedding_batch(texts)
-        
-        # Track usage
-        await track_embedding_usage(
-            request.tenant_id,
-            texts,
-            model_name,
-            cache_hits,
-            agent_id,
-            conversation_id
-        )
+    # Generate embeddings
+    embeddings = await embed_model._aget_text_embedding_batch(texts)
+    
+    # Track usage
+    await track_embedding_usage(
+        request.tenant_id,
+        texts,
+        model_name,
+        cache_hits,
+        agent_id,
+        conversation_id
+    )
     
     return EmbeddingResponse(
         success=True,
@@ -417,11 +387,12 @@ async def batch_generate_embeddings(
     )
 
 
-@app.get("/models")
-@handle_service_error()
+@app.get("/models", response_model=Dict[str, Any])
+@handle_service_error_simple
+@with_tenant_context
 async def list_available_models(
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> Dict[str, Any]:
     """
     Lista los modelos de embedding disponibles para el tenant.
     
@@ -433,50 +404,49 @@ async def list_available_models(
     """
     tenant_id = tenant_info.tenant_id
     
-    # Para listar modelos, solo necesitamos el contexto de tenant
-    with TenantContext(tenant_id):
-        subscription_tier = tenant_info.subscription_tier
-        
-        # Modelos básicos disponibles para todos
-        available_models = get_available_models_for_tier("free")
-        
-        # Modelos premium
-        premium_models = {
-            "text-embedding-3-large": {
-                "dimensions": 3072,
-                "description": "OpenAI's most capable embedding model with higher dimensions for better performance",
-                "max_tokens": 8191
+    subscription_tier = tenant_info.subscription_tier
+    
+    # Modelos básicos disponibles para todos
+    available_models = get_available_models_for_tier("free")
+    
+    # Modelos premium
+    premium_models = {
+        "text-embedding-3-large": {
+            "dimensions": 3072,
+            "description": "OpenAI's most capable embedding model with higher dimensions for better performance",
+            "max_tokens": 8191
+        }
+    }
+    
+    # Add Ollama models if using local models
+    ollama_models = {}
+    if settings.use_ollama:
+        ollama_models = {
+            "nomic-embed-text": {
+                "dimensions": 768,
+                "description": "Nomic AI embedding model, locally hosted on Ollama",
+                "max_tokens": 8192
             }
         }
-        
-        # Add Ollama models if using local models
-        ollama_models = {}
-        if settings.use_ollama:
-            ollama_models = {
-                "nomic-embed-text": {
-                    "dimensions": 768,
-                    "description": "Nomic AI embedding model, locally hosted on Ollama",
-                    "max_tokens": 8192
-                }
-            }
-        
-        available_models.update(ollama_models)
-        
-        # Add premium models only for higher tier tenants
-        if subscription_tier in ["pro", "enterprise"]:
-            available_models.update(premium_models)
-        
-        return {
-            "tenant_id": tenant_id,
-            "subscription_tier": subscription_tier,
-            "available_models": available_models,
-            "default_model": settings.default_embedding_model
-        }
+    
+    available_models.update(ollama_models)
+    
+    # Add premium models only for higher tier tenants
+    if subscription_tier in ["pro", "enterprise"]:
+        available_models.update(premium_models)
+    
+    return {
+        "tenant_id": tenant_id,
+        "subscription_tier": subscription_tier,
+        "available_models": available_models,
+        "default_model": settings.default_embedding_model
+    }
 
 
 @app.get("/status", response_model=HealthResponse)
-@handle_service_error()
-async def get_service_status():
+@app.get("/health", response_model=HealthResponse)
+@handle_service_error_simple
+async def get_service_status() -> HealthResponse:
     """
     Verifica el estado del servicio y sus dependencias.
     
@@ -531,13 +501,14 @@ async def get_service_status():
         )
 
 
-@app.get("/cache/stats")
-@handle_service_error()
+@app.get("/cache/stats", response_model=Dict[str, Any])
+@handle_service_error_simple
+@with_full_context
 async def get_cache_stats(
     tenant_info: TenantInfo = Depends(verify_tenant),
     agent_id: Optional[str] = None,
     conversation_id: Optional[str] = None
-):
+) -> Dict[str, Any]:
     """
     Obtiene estadísticas sobre el uso de caché.
     
@@ -551,78 +522,69 @@ async def get_cache_stats(
     """
     tenant_id = tenant_info.tenant_id
     
-    # Para estadísticas de caché, usamos el nivel de contexto específico
-    # solo si se solicitan estadísticas para un agente o conversación específica
-    if conversation_id and agent_id:
-        context_manager = FullContext(tenant_id, agent_id, conversation_id)
-    elif agent_id:
-        context_manager = AgentContext(tenant_id, agent_id)
-    else:
-        context_manager = TenantContext(tenant_id)
-    
-    with context_manager:
-        if not redis_client:
-            return {
-                "tenant_id": tenant_id,
-                "agent_id": agent_id,
-                "conversation_id": conversation_id,
-                "cache_enabled": False,
-                "cached_embeddings": 0,
-                "memory_usage_bytes": 0,
-                "memory_usage_mb": 0
-            }
-        
-        # Construir patrón de búsqueda según los IDs proporcionados
-        pattern_parts = [tenant_id, "embed"]
-        
-        if agent_id:
-            pattern_parts.append(f"agent:{agent_id}")
-        
-        if conversation_id:
-            pattern_parts.append(f"conv:{conversation_id}")
-        
-        pattern_parts.append("*")
-        pattern = ":".join(pattern_parts)
-        
-        # Obtener claves que coinciden con el patrón
-        keys = cache_keys_by_pattern(pattern)
-        
-        # Calcular uso de memoria total
-        memory_usage = 0
-        for key in keys:
-            key_memory = cache_get_memory_usage(key)
-            if key_memory:
-                memory_usage += key_memory
-        
+    if not redis_client:
         return {
             "tenant_id": tenant_id,
             "agent_id": agent_id,
             "conversation_id": conversation_id,
-            "cache_enabled": True,
-            "cached_embeddings": len(keys),
-            "memory_usage_bytes": memory_usage,
-            "memory_usage_mb": round(memory_usage / (1024 * 1024), 2) if memory_usage else 0
+            "cache_enabled": False,
+            "cached_embeddings": 0,
+            "memory_usage_bytes": 0,
+            "memory_usage_mb": 0
         }
+        
+    # Construir patrón de búsqueda según los IDs proporcionados
+    pattern_parts = [tenant_id, "embed"]
+    
+    if agent_id:
+        pattern_parts.append(f"agent:{agent_id}")
+    
+    if conversation_id:
+        pattern_parts.append(f"conv:{conversation_id}")
+    
+    pattern_parts.append("*")
+    pattern = ":".join(pattern_parts)
+    
+    # Obtener claves que coinciden con el patrón
+    keys = cache_keys_by_pattern(pattern)
+    
+    # Calcular uso de memoria total
+    memory_usage = 0
+    for key in keys:
+        key_memory = cache_get_memory_usage(key)
+        if key_memory:
+            memory_usage += key_memory
+    
+    return {
+        "tenant_id": tenant_id,
+        "agent_id": agent_id,
+        "conversation_id": conversation_id,
+        "cache_enabled": True,
+        "cached_embeddings": len(keys),
+        "memory_usage_bytes": memory_usage,
+        "memory_usage_mb": round(memory_usage / (1024 * 1024), 2) if memory_usage else 0
+    }
 
 
-@app.delete("/cache/clear/{tenant_id}")
-@handle_service_error()
-async def clear_tenant_cache(
+@app.delete("/cache/clear/{tenant_id}", response_model=Dict[str, Any])
+@handle_service_error_simple
+@with_tenant_context
+async def clear_cache(
     tenant_id: str,
-    tenant_info: TenantInfo = Depends(verify_tenant),
-    cache_type: Optional[str] = None,
+    cache_type: str = "embeddings",
     agent_id: Optional[str] = None,
-    conversation_id: Optional[str] = None
-):
+    conversation_id: Optional[str] = None,
+    tenant_info: TenantInfo = Depends(verify_tenant)
+) -> Dict[str, Any]:
     """
     Limpia la caché para un tenant específico.
     
     Args:
         tenant_id: ID del tenant
-        tenant_info: Información del tenant (inyectada)
         cache_type: Tipo de caché (ej: 'embed', 'query') o None para todo
         agent_id: ID del agente para limpiar solo la caché de ese agente
         conversation_id: ID de la conversación para limpiar solo esa conversación
+        tenant_info: Información del tenant (inyectada)
         
     Returns:
         dict: Resultado de la operación
@@ -635,30 +597,20 @@ async def clear_tenant_cache(
             message="No puedes limpiar la caché de otro tenant"
         )
     
-    # Para limpiar la caché, usamos el nivel de contexto específico
-    # solo si se solicita limpiar para un agente o conversación específica
-    if conversation_id and agent_id:
-        context_manager = FullContext(tenant_id, agent_id, conversation_id)
-    elif agent_id:
-        context_manager = AgentContext(tenant_id, agent_id)
-    else:
-        context_manager = TenantContext(tenant_id)
-    
-    with context_manager:
-        if not redis_client:
-            return {
-                "success": False,
-                "message": "Redis no está disponible",
-                "keys_deleted": 0
-            }
-        
-        keys_deleted = clear_tenant_cache(tenant_id, cache_type, agent_id, conversation_id)
-        
+    if not redis_client:
         return {
-            "success": True,
-            "message": f"Se han eliminado {keys_deleted} claves de caché",
-            "keys_deleted": keys_deleted
+            "success": False,
+            "message": "Redis no está disponible",
+            "keys_deleted": 0
         }
+        
+    keys_deleted = clear_tenant_cache(tenant_id, cache_type, agent_id, conversation_id)
+        
+    return {
+        "success": True,
+        "message": f"Se han eliminado {keys_deleted} claves de caché",
+        "keys_deleted": keys_deleted
+    }
 
 
 def get_available_models_for_tier(tier: str) -> Dict[str, Dict[str, Any]]:

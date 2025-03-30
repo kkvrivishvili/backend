@@ -25,7 +25,7 @@ from common.models import (
 )
 from common.auth import verify_tenant, check_tenant_quotas
 from common.config import get_settings
-from common.errors import setup_error_handling, handle_service_error, ServiceError
+from common.errors import setup_error_handling, handle_service_error_simple, ServiceError
 from common.supabase import get_supabase_client, get_tenant_vector_store
 from common.rate_limiting import setup_rate_limiting
 from common.logging import init_logging
@@ -33,7 +33,7 @@ from common.utils import prepare_service_request
 from common.context import (
     TenantContext, AgentContext, FullContext, 
     get_current_tenant_id, with_tenant_context, 
-    get_appropriate_context_manager
+    get_appropriate_context_manager, with_full_context
 )
 
 # Inicializar logging usando la configuración centralizada
@@ -160,7 +160,8 @@ def process_document(
     return node_data
 
 # Background task para indexar documentos
-@handle_service_error()
+@handle_service_error_simple
+@with_full_context
 async def index_documents_task(
     node_data_list: List[Dict[str, Any]],
     tenant_id: str,
@@ -215,12 +216,13 @@ async def index_documents_task(
         logger.error(f"Error en la tarea de indexación: {str(e)}", exc_info=True)
 
 @app.post("/ingest", response_model=IngestionResponse)
-@handle_service_error()
+@handle_service_error_simple
+@with_full_context
 async def ingest_documents(
     request: DocumentIngestionRequest,
     background_tasks: BackgroundTasks,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> IngestionResponse:
     """
     Ingiere documentos para su procesamiento e indexación.
     
@@ -298,8 +300,9 @@ async def ingest_documents(
             logger.error(f"Error al ingerir documentos para {context_desc}: {str(e)}", exc_info=True)
             raise ServiceError(f"Error al ingerir documentos para {context_desc}: {str(e)}")
 
-@app.post("/ingest-file")
-@handle_service_error()
+@app.post("/ingest-file", response_model=IngestionResponse)
+@handle_service_error_simple
+@with_full_context
 async def ingest_file(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -310,7 +313,7 @@ async def ingest_file(
     agent_id: Optional[str] = Form(None),
     conversation_id: Optional[str] = Form(None),
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> IngestionResponse:
     """
     Ingiere un archivo subido.
     
@@ -389,25 +392,25 @@ async def ingest_file(
             
             logger.info(f"Archivo {file.filename} procesado con {len(node_data)} fragmentos para tenant {tenant_id}")
             
-            return {
-                "success": True,
-                "document_id": doc_id,
-                "node_count": len(node_data)
-            }
+            return IngestionResponse(
+                document_ids=[doc_id],
+                node_count=len(node_data)
+            )
             
         except Exception as e:
             logger.error(f"Error al procesar archivo para {context_desc}: {str(e)}", exc_info=True)
             raise ServiceError(f"Error al procesar archivo para {context_desc}: {str(e)}")
 
-@app.delete("/documents/{tenant_id}/{document_id}")
-@handle_service_error()
+@app.delete("/documents/{tenant_id}/{document_id}", response_model=Dict[str, Any])
+@handle_service_error_simple
+@with_full_context
 async def delete_document(
     tenant_id: str,
     document_id: str,
     agent_id: Optional[str] = None,
     conversation_id: Optional[str] = None,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> Dict[str, Any]:
     """
     Elimina un documento específico.
     
@@ -469,15 +472,16 @@ async def delete_document(
             logger.error(f"Error eliminando documento para {context_desc}: {str(e)}", exc_info=True)
             raise ServiceError(f"Error eliminando documento: {str(e)}")
 
-@app.delete("/collections/{tenant_id}/{collection_name}")
-@handle_service_error()
+@app.delete("/collections/{tenant_id}/{collection_name}", response_model=Dict[str, Any])
+@handle_service_error_simple
+@with_tenant_context
 async def delete_collection(
     tenant_id: str,
     collection_name: str,
     agent_id: Optional[str] = None,
     conversation_id: Optional[str] = None,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> Dict[str, Any]:
     """
     Elimina una colección completa de documentos.
     
@@ -549,8 +553,9 @@ async def delete_collection(
             raise ServiceError(f"Error eliminando colección: {str(e)}")
 
 @app.get("/status", response_model=HealthResponse)
-@handle_service_error()
-async def get_service_status():
+@app.get("/health", response_model=HealthResponse)
+@handle_service_error_simple
+async def get_service_status() -> HealthResponse:
     """
     Verifica el estado del servicio y sus dependencias.
     

@@ -36,10 +36,14 @@ from common.auth import verify_tenant, check_tenant_quotas, validate_model_acces
 from common.supabase import get_supabase_client, init_supabase
 from common.config import Settings, get_settings
 from common.utils import track_usage, sanitize_content, prepare_service_request
-from common.errors import handle_service_error, handle_service_error_simple, ServiceError
+from common.errors import handle_service_error_simple, ServiceError
 from common.logging import init_logging
 from common.ollama import get_llm_model, is_using_ollama
-from common.context import TenantContext, FullContext, get_current_tenant_id, get_current_agent_id, get_current_conversation_id, with_tenant_context, with_full_context, AgentContext
+from common.context import (
+    TenantContext, FullContext, get_current_tenant_id, get_current_agent_id, 
+    get_current_conversation_id, with_tenant_context, with_full_context, 
+    AgentContext
+)
 
 # Configuración
 settings = get_settings()
@@ -48,26 +52,6 @@ logger = logging.getLogger("agent_service")
 
 # Cliente HTTP compartido
 http_client = httpx.AsyncClient()
-
-# Función para obtener el gestor de contexto apropiado basado en los parámetros disponibles
-def get_appropriate_context_manager(tenant_id: str, agent_id: Optional[str] = None, conversation_id: Optional[str] = None):
-    """
-    Selecciona el nivel de contexto apropiado basado en los parámetros proporcionados.
-    
-    Args:
-        tenant_id: ID del tenant (obligatorio)
-        agent_id: ID del agente (opcional)
-        conversation_id: ID de la conversación (opcional)
-        
-    Returns:
-        Un gestor de contexto (TenantContext, AgentContext o FullContext)
-    """
-    if agent_id and conversation_id:
-        return FullContext(tenant_id, agent_id, conversation_id)
-    elif agent_id:
-        return AgentContext(tenant_id, agent_id)
-    else:
-        return TenantContext(tenant_id)
 
 # Definir el contexto de lifespan para la aplicación
 @asynccontextmanager
@@ -218,6 +202,7 @@ def handle_service_error(on_error_response=None):
     return decorator
 
 # Función para crear una herramienta RAG
+@with_agent_context
 async def create_rag_tool(tool_config: AgentTool, tenant_id: str, agent_id: Optional[str] = None) -> Tool:
     """
     Crea una herramienta RAG que consulta una colección específica.
@@ -306,6 +291,7 @@ async def create_rag_tool(tool_config: AgentTool, tenant_id: str, agent_id: Opti
 
 
 # Función para crear las herramientas del agente
+@with_tenant_context
 async def create_agent_tools(agent_config: AgentConfig, tenant_id: Optional[str] = None) -> List[Tool]:
     """
     Crea herramientas para el agente LangChain.
@@ -341,6 +327,7 @@ async def create_agent_tools(agent_config: AgentConfig, tenant_id: Optional[str]
 
 
 # Función para consultar el sistema RAG
+@with_full_context
 async def query_rag(
     query: str, 
     rag_config: RAGConfig, 
@@ -422,6 +409,7 @@ async def query_rag(
 
 
 # Función para inicializar un agente LangChain
+@with_tenant_context
 async def initialize_agent_with_tools(tenant_info: TenantInfo, agent_config: AgentConfig, tools: List[Tool], callback_handler: Optional[BaseCallbackHandler] = None) -> AgentExecutor:
     """
     Inicializa un agente con herramientas utilizando la API de LangChain 0.3.x.
@@ -503,6 +491,7 @@ class StreamingCallbackHandler(BaseCallbackHandler):
 
 
 # Función para ejecutar un agente
+@with_full_context
 async def execute_agent(tenant_info: TenantInfo, agent_config: AgentConfig, query: str, session_id: Optional[str] = None, streaming: bool = False) -> Dict[str, Any]:
     """
     Ejecuta un agente con la configuración proporcionada.
@@ -585,8 +574,9 @@ async def execute_agent(tenant_info: TenantInfo, agent_config: AgentConfig, quer
 
 # Endpoint para verificar el estado
 @app.get("/status", response_model=HealthResponse)
-@handle_service_error()
-async def get_service_status():
+@app.get("/health", response_model=HealthResponse)
+@handle_service_error_simple
+async def get_service_status() -> HealthResponse:
     """
     Verifica el estado del servicio y sus dependencias.
     
@@ -632,7 +622,7 @@ async def get_service_status():
 # Endpoint para crear un agente
 @app.post("/agents", response_model=AgentResponse)
 @handle_service_error()
-async def create_agent(request: AgentRequest, tenant_info: TenantInfo = Depends(verify_tenant)):
+async def create_agent(request: AgentRequest, tenant_info: TenantInfo = Depends(verify_tenant)) -> AgentResponse:
     """
     Crea un nuevo agente para un tenant.
     
@@ -713,7 +703,7 @@ async def create_agent(request: AgentRequest, tenant_info: TenantInfo = Depends(
 # Endpoint para obtener un agente
 @app.get("/agents/{agent_id}", response_model=AgentResponse)
 @handle_service_error()
-async def get_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tenant)):
+async def get_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tenant)) -> AgentResponse:
     """
     Obtiene la configuración de un agente existente.
     
@@ -778,7 +768,7 @@ async def get_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tena
 # Endpoint para listar agentes
 @app.get("/agents", response_model=List[AgentResponse])
 @handle_service_error()
-async def list_agents(tenant_info: TenantInfo = Depends(verify_tenant)):
+async def list_agents(tenant_info: TenantInfo = Depends(verify_tenant)) -> List[AgentResponse]:
     """
     Lista todos los agentes de un tenant.
     
@@ -839,7 +829,7 @@ async def update_agent(
     agent_id: str, 
     request: AgentRequest, 
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> AgentResponse:
     """
     Actualiza la configuración de un agente existente.
     
@@ -857,7 +847,7 @@ async def update_agent(
     context_desc = f"tenant '{tenant_id}', agent '{agent_id}'"
     
     # Usar el contexto de agente para esta operación
-    with AgentContext(tenant_id, agent_id):
+    with get_appropriate_context_manager(tenant_id, agent_id):
         try:
             supabase = get_supabase_client()
             
@@ -948,7 +938,7 @@ async def delete_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_t
     context_desc = f"tenant '{tenant_id}', agent '{agent_id}'"
     
     # Usar el contexto de agente para esta operación
-    with AgentContext(tenant_id, agent_id):
+    with get_appropriate_context_manager(tenant_id, agent_id):
         try:
             supabase = get_supabase_client()
             
@@ -996,7 +986,7 @@ async def chat_with_agent(
     request: ChatRequest,
     background_tasks: BackgroundTasks,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> ChatResponse:
     """
     Conversa con un agente existente.
     
@@ -1197,7 +1187,7 @@ async def chat_with_agent(
 # Endpoint para chatear con un agente
 @app.post("/chat", response_model=AgentResponse)
 @handle_service_error(on_error_response={"output": "Error procesando la consulta", "intermediate_steps": []})
-async def chat(chat_request: ChatRequest, request: Request):
+async def chat(chat_request: ChatRequest, request: Request) -> AgentResponse:
     """
     Endpoint para chat con el agente.
     
@@ -1335,6 +1325,7 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
 
 
 # Función para obtener información del inquilino
+@with_tenant_context
 async def get_tenant_info(tenant_id: Optional[str] = None) -> Optional[TenantInfo]:
     """
     Obtiene información del inquilino desde Supabase.
@@ -1388,7 +1379,7 @@ async def list_conversations(
     agent_id: Optional[str] = None,
     status: Optional[str] = None,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> ConversationsListResponse:
     """
     Lista todas las conversaciones de un tenant.
     
@@ -1475,7 +1466,7 @@ async def list_conversations(
 async def get_conversation(
     conversation_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> ConversationResponse:
     """
     Obtiene los detalles de una conversación.
     
@@ -1554,18 +1545,18 @@ async def get_conversation(
 @handle_service_error()
 async def get_conversation_messages(
     conversation_id: str,
+    tenant_info: TenantInfo = Depends(verify_tenant),
     limit: int = 50,
-    offset: int = 0,
-    tenant_info: TenantInfo = Depends(verify_tenant)
-):
+    offset: int = 0
+) -> MessageListResponse:
     """
     Obtiene los mensajes de una conversación.
     
     Args:
         conversation_id: ID de la conversación
+        tenant_info: Información del tenant (inyectada por Depends)
         limit: Límite de resultados
         offset: Desplazamiento para paginación
-        tenant_info: Información del tenant (inyectada por Depends)
         
     Returns:
         MessageListResponse: Lista de mensajes
@@ -1645,7 +1636,7 @@ async def get_conversation_messages(
 async def create_conversation(
     request: ConversationCreate,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> ConversationResponse:
     """
     Crea una nueva conversación.
     
@@ -1742,7 +1733,7 @@ async def update_conversation(
     conversation_id: str,
     update_data: Dict[str, Any],
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> ConversationResponse:
     """
     Actualiza una conversación existente.
     

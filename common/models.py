@@ -17,7 +17,16 @@ class TenantInfo(BaseModel):
     }
 
 
-class HealthResponse(BaseModel):
+class BaseResponse(BaseModel):
+    """Modelo base para todas las respuestas API para garantizar consistencia."""
+    success: bool
+    message: Optional[str] = None
+    error: Optional[str] = None
+    data: Optional[Any] = None
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+
+class HealthResponse(BaseResponse):
     """Respuesta estándar para endpoints de health check."""
     status: str
     components: Dict[str, str]
@@ -34,9 +43,8 @@ class EmbeddingRequest(BaseModel):
     conversation_id: Optional[str] = None
 
 
-class EmbeddingResponse(BaseModel):
+class EmbeddingResponse(BaseResponse):
     """Respuesta con embeddings generados."""
-    success: bool
     embeddings: List[List[float]]
     model: str
     dimensions: int
@@ -79,10 +87,8 @@ class DocumentIngestionRequest(BaseModel):
     conversation_id: Optional[str] = None  # ID de la conversación (contexto específico)
 
 
-class IngestionResponse(BaseModel):
+class IngestionResponse(BaseResponse):
     """Respuesta tras ingerir documentos."""
-    success: bool
-    message: str
     document_ids: List[str]
     nodes_count: int
 
@@ -108,7 +114,7 @@ class QueryRequest(BaseModel):
     conversation_id: Optional[str] = None
 
 
-class QueryResponse(BaseModel):
+class QueryResponse(BaseResponse):
     """Respuesta a una consulta RAG."""
     query: str
     response: str
@@ -121,7 +127,7 @@ class QueryResponse(BaseModel):
     conversation_id: Optional[str] = None
 
 
-class DocumentsListResponse(BaseModel):
+class DocumentsListResponse(BaseResponse):
     """Lista de documentos para un tenant."""
     tenant_id: str
     documents: List[Dict[str, Any]]
@@ -170,7 +176,7 @@ class AgentRequest(BaseModel):
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 
-class AgentResponse(BaseModel):
+class AgentResponse(BaseResponse):
     """Respuesta con detalles de un agente."""
     agent_id: str
     tenant_id: str
@@ -207,7 +213,7 @@ class ChatRequest(BaseModel):
     client_reference_id: Optional[str] = None
 
 
-class ChatResponse(BaseModel):
+class ChatResponse(BaseResponse):
     """Respuesta de un agente a una consulta."""
     conversation_id: str
     message: ChatMessage
@@ -246,7 +252,7 @@ class ConversationCreate(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
 
 
-class ConversationResponse(BaseModel):
+class ConversationResponse(BaseResponse):
     """Detalles de una conversación."""
     conversation_id: str
     tenant_id: str
@@ -262,7 +268,7 @@ class ConversationResponse(BaseModel):
     messages_count: Optional[int] = 0
 
 
-class ConversationsListResponse(BaseModel):
+class ConversationsListResponse(BaseResponse):
     """Lista de conversaciones para un tenant o agente."""
     tenant_id: str
     agent_id: Optional[str] = None
@@ -272,7 +278,7 @@ class ConversationsListResponse(BaseModel):
     offset: int
 
 
-class MessageListResponse(BaseModel):
+class MessageListResponse(BaseResponse):
     """Lista de mensajes en una conversación."""
     conversation_id: str
     messages: List[ChatMessage]

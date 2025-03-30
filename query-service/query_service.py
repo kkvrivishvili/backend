@@ -31,32 +31,40 @@ from common.logging import init_logging
 from common.context import (
     TenantContext, AgentContext, ConversationContext, FullContext,
     get_current_tenant_id, get_current_agent_id, get_current_conversation_id,
-    with_tenant_context, with_agent_context, with_conversation_context, with_full_context
+    with_tenant_context, with_agent_context, with_conversation_context, with_full_context,
+    get_appropriate_context_manager
+)
+from common.models import (
+    TenantInfo, QueryRequest, QueryResponse, QueryContextItem,
+    DocumentsListResponse, HealthResponse, AgentTool, AgentConfig, AgentRequest, AgentResponse, ChatMessage, ChatRequest, ChatResponse
+)
+from common.auth import (
+    verify_tenant, check_tenant_quotas, validate_model_access, 
+    get_allowed_models_for_tier, get_tier_limits
+)
+from common.supabase import get_supabase_client, get_tenant_vector_store, get_tenant_documents, get_tenant_collections
+from common.tracking import track_query, track_token_usage
+from common.rate_limiting import setup_rate_limiting
+from common.utils import prepare_service_request
+from common.errors import setup_error_handling, handle_service_error_simple, ServiceError
+
+# Configuración de la aplicación FastAPI
+app = FastAPI(
+    title="Linktree AI - Query Service"
 )
 
-def get_appropriate_context_manager(tenant_id: str, agent_id: Optional[str] = None, conversation_id: Optional[str] = None):
-    """
-    Obtiene el administrador de contexto apropiado según los IDs proporcionados.
-    
-    Args:
-        tenant_id: ID del tenant (requerido)
-        agent_id: ID del agente (opcional)
-        conversation_id: ID de la conversación (opcional)
-        
-    Returns:
-        Un administrador de contexto apropiado (TenantContext, AgentContext, o FullContext)
-    """
-    # Solo aplicar contexto multinivel cuando realmente se necesite
-    # Para operaciones generales, usar solo TenantContext
-    if conversation_id and agent_id:
-        # Solo usar FullContext para operaciones específicas de conversación
-        return FullContext(tenant_id, agent_id, conversation_id)
-    elif agent_id:
-        # Usar AgentContext para operaciones específicas de agente
-        return AgentContext(tenant_id, agent_id)
-    else:
-        # Para operaciones generales, el TenantContext es suficiente
-        return TenantContext(tenant_id)
+# Configurar manejo de errores y rate limiting
+setup_error_handling(app)
+setup_rate_limiting(app)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Cambiar en producción
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Inicializar logging usando la configuración centralizada
 init_logging()
@@ -84,39 +92,6 @@ class ResponseSynthesizer:
             return SimpleSummarize(llm=llm, callback_manager=callback_manager, **kwargs)
         else:
             return CompactAndRefine(llm=llm, callback_manager=callback_manager, **kwargs)
-
-# Importar nuestra biblioteca común
-from common.models import (
-    TenantInfo, QueryRequest, QueryResponse, QueryContextItem,
-    DocumentsListResponse, HealthResponse, AgentTool, AgentConfig, AgentRequest, AgentResponse, ChatMessage, ChatRequest, ChatResponse
-)
-from common.auth import (
-    verify_tenant, check_tenant_quotas, validate_model_access, 
-    get_allowed_models_for_tier, get_tier_limits
-)
-from common.supabase import get_supabase_client, get_tenant_vector_store, get_tenant_documents, get_tenant_collections
-from common.tracking import track_query, track_token_usage
-from common.rate_limiting import setup_rate_limiting
-from common.utils import prepare_service_request
-
-# Configuración de la aplicación FastAPI
-app = FastAPI(
-    title="Linktree AI - Query Service"
-)
-
-# Configurar manejo de errores y rate limiting
-from common.errors import setup_error_handling, handle_service_error, ServiceError
-setup_error_handling(app)
-setup_rate_limiting(app)
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Cambiar en producción
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Obtener embedding a través del servicio de embeddings
 async def generate_embedding(
@@ -285,7 +260,8 @@ async def create_query_engine(
         return query_engine, debug_handler
 
 @app.post("/query", response_model=QueryResponse)
-@handle_service_error()
+@handle_service_error_simple
+@with_full_context
 async def process_query(
     request: QueryRequest,
     tenant_info: TenantInfo = Depends(verify_tenant)
@@ -402,15 +378,16 @@ async def process_query(
                 # Error genérico con información de contexto
                 raise ServiceError(f"Error processing query in {context_description}: {str(e)}")
 
-@app.get("/documents/{tenant_id}")
-@handle_service_error()
+@app.get("/documents/{tenant_id}", response_model=DocumentsListResponse)
+@handle_service_error_simple
+@with_tenant_context
 async def list_documents(
     tenant_id: str,
     collection_name: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> DocumentsListResponse:
     """
     Lista documentos para un tenant con filtrado opcional por colección.
     
@@ -463,12 +440,13 @@ async def list_documents(
             raise ServiceError(f"Error listing documents: {str(e)}")
 
 
-@app.get("/collections/{tenant_id}")
-@handle_service_error()
+@app.get("/collections/{tenant_id}", response_model=Dict[str, Any])
+@handle_service_error_simple
+@with_tenant_context
 async def list_collections(
     tenant_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> Dict[str, Any]:
     """
     Lista todas las colecciones para un tenant.
     
@@ -513,12 +491,13 @@ async def list_collections(
             raise ServiceError(f"Error listing collections: {str(e)}")
 
 
-@app.get("/llm/models/{tenant_id}")
-@handle_service_error()
+@app.get("/llm/models/{tenant_id}", response_model=Dict[str, Any])
+@handle_service_error_simple
+@with_tenant_context
 async def list_llm_models(
     tenant_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> Dict[str, Any]:
     """
     Lista los modelos LLM disponibles según nivel de suscripción.
     
@@ -584,21 +563,18 @@ async def list_llm_models(
         return result
 
 
-@app.get("/stats/{tenant_id}")
-@handle_service_error()
+@app.get("/stats/{tenant_id}", response_model=Dict[str, Any])
+@handle_service_error_simple
+@with_tenant_context
 async def get_tenant_stats(
     tenant_id: str,
-    agent_id: Optional[str] = None,
-    conversation_id: Optional[str] = None,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> Dict[str, Any]:
     """
     Obtiene estadísticas de uso para un tenant.
     
     Args:
         tenant_id: ID del tenant
-        agent_id: ID del agente para filtrar estadísticas (opcional)
-        conversation_id: ID de la conversación para filtrar estadísticas (opcional)
         tenant_info: Información del tenant (inyectada)
         
     Returns:
@@ -613,7 +589,7 @@ async def get_tenant_stats(
         )
     
     # Seleccionar el contexto adecuado según los parámetros
-    context_manager = get_appropriate_context_manager(tenant_id, agent_id, conversation_id)
+    context_manager = get_appropriate_context_manager(tenant_id)
     
     with context_manager:
         try:
@@ -626,14 +602,6 @@ async def get_tenant_stats(
             # Construir consulta base para estadísticas
             stats_query = supabase.table("usage_stats").select("*").eq("tenant_id", tenant_id)
             query_logs_query = supabase.table("query_logs").select("*").eq("tenant_id", tenant_id)
-            
-            # Filtrar por agente si se proporciona
-            if agent_id:
-                query_logs_query = query_logs_query.eq("agent_id", agent_id)
-            
-            # Filtrar por conversación si se proporciona
-            if conversation_id:
-                query_logs_query = query_logs_query.eq("conversation_id", conversation_id)
             
             # Ejecutar consultas
             usage_stats = stats_query.execute().data
@@ -672,13 +640,6 @@ async def get_tenant_stats(
                 "recent_queries": query_logs
             }
             
-            # Incluir información de filtrado si se proporcionó
-            if agent_id:
-                response["agent_id"] = agent_id
-            
-            if conversation_id:
-                response["conversation_id"] = conversation_id
-            
             return response
             
         except Exception as e:
@@ -687,8 +648,9 @@ async def get_tenant_stats(
 
 
 @app.get("/status", response_model=HealthResponse)
-@handle_service_error()
-async def get_service_status():
+@app.get("/health", response_model=HealthResponse)
+@handle_service_error_simple
+async def get_service_status() -> HealthResponse:
     """
     Verifica el estado del servicio y sus dependencias.
     
@@ -759,14 +721,15 @@ async def get_service_status():
             version=settings.service_version
         )
 
-@app.post("/collections")
-@handle_service_error()
+@app.post("/collections", response_model=Dict[str, Any])
+@handle_service_error_simple
+@with_tenant_context
 async def create_collection(
     tenant_id: str,
     name: str,
     description: Optional[str] = None,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> Dict[str, Any]:
     """
     Crea una nueva colección para un tenant.
     
@@ -813,8 +776,8 @@ async def create_collection(
     return result.data[0]
 
 
-@app.put("/collections/{collection_id}")
-@handle_service_error()
+@app.put("/collections/{collection_id}", response_model=Dict[str, Any])
+@handle_service_error_simple
 async def update_collection(
     collection_id: str,
     tenant_id: str,
@@ -822,7 +785,7 @@ async def update_collection(
     description: Optional[str] = None,
     is_active: bool = True,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> Dict[str, Any]:
     """
     Actualiza una colección existente.
     
@@ -874,13 +837,13 @@ async def update_collection(
     return result.data[0]
 
 
-@app.get("/collections/{collection_id}/stats")
-@handle_service_error()
+@app.get("/collections/{collection_id}/stats", response_model=Dict[str, Any])
+@handle_service_error_simple
 async def get_collection_stats(
     collection_id: str,
     tenant_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> Dict[str, Any]:
     """
     Obtiene estadísticas de una colección.
     
@@ -960,13 +923,13 @@ async def get_collection_stats(
 
 
 # Endpoint para obtener configuración de colección para integración con agentes
-@app.get("/collections/{collection_id}/tools")
-@handle_service_error()
+@app.get("/collections/{collection_id}/tools", response_model=Dict[str, Any])
+@handle_service_error_simple
 async def get_collection_tool(
     collection_id: str,
     tenant_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> Dict[str, Any]:
     """
     Obtiene configuración de herramienta para una colección.
     Útil para integración con servicio de agentes.
