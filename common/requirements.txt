@@ -1,8 +1,0 @@
-# backend/server-llama/common/requirements.txt
-fastapi>=0.95.0
-pydantic>=2.0.0
-supabase>=1.0.3
-redis>=4.5.4
-httpx>=0.24.0
-python-dotenv>=1.0.0
-tenacity>=8.2.2
