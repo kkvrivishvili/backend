@@ -75,6 +75,8 @@ class DocumentIngestionRequest(BaseModel):
     documents: List[str]  # Contenido de texto de los documentos
     document_metadatas: List[DocumentMetadata]  # Metadatos para cada documento
     collection_name: Optional[str] = "default"  # Colección/namespace para los documentos
+    agent_id: Optional[str] = None  # ID del agente (contexto específico)
+    conversation_id: Optional[str] = None  # ID de la conversación (contexto específico)
 
 
 class IngestionResponse(BaseModel):

@@ -30,7 +30,11 @@ from common.supabase import get_supabase_client, get_tenant_vector_store
 from common.rate_limiting import setup_rate_limiting
 from common.logging import init_logging
 from common.utils import prepare_service_request
-from common.context import TenantContext, get_current_tenant_id, with_tenant_context
+from common.context import (
+    TenantContext, AgentContext, FullContext, 
+    get_current_tenant_id, with_tenant_context, 
+    get_appropriate_context_manager
+)
 
 # Inicializar logging usando la configuración centralizada
 init_logging()
@@ -160,7 +164,9 @@ def process_document(
 async def index_documents_task(
     node_data_list: List[Dict[str, Any]],
     tenant_id: str,
-    collection_name: str
+    collection_name: str,
+    agent_id: Optional[str] = None,
+    conversation_id: Optional[str] = None
 ):
     """
     Tarea en segundo plano para indexar documentos.
@@ -169,10 +175,12 @@ async def index_documents_task(
         node_data_list: Lista de nodos a indexar
         tenant_id: ID del tenant
         collection_name: Nombre de la colección
+        agent_id: ID del agente (opcional)
+        conversation_id: ID de la conversación (opcional)
     """
     try:
         # Usar el contexto del tenant durante la indexación
-        with TenantContext(tenant_id):
+        with get_appropriate_context_manager(tenant_id, agent_id, conversation_id):
             # Obtener vector store para este tenant
             vector_store = get_tenant_vector_store(tenant_id, collection_name)
             
@@ -230,8 +238,21 @@ async def ingest_documents(
     tenant_id = tenant_info.tenant_id
     collection_name = request.collection_name or "default"
     
-    # Usar el contexto del tenant durante todo el proceso
-    with TenantContext(tenant_id):
+    # Determinar el nivel de contexto adecuado
+    # Para ingestión, el agent_id y conversation_id son opcionales
+    agent_id = request.agent_id
+    conversation_id = request.conversation_id
+    
+    # Construir descripción del contexto para mensajes de error
+    context_desc = f"tenant '{tenant_id}'"
+    if agent_id:
+        context_desc += f", agent '{agent_id}'"
+    if conversation_id:
+        context_desc += f", conversation '{conversation_id}'"
+    context_desc += f", collection '{collection_name}'"
+    
+    # Usar el contexto apropiado según los parámetros disponibles
+    with get_appropriate_context_manager(tenant_id, agent_id, conversation_id):
         try:
             total_nodes = 0
             document_ids = []
@@ -263,7 +284,9 @@ async def ingest_documents(
                     index_documents_task,
                     node_data_list, 
                     tenant_id,
-                    collection_name
+                    collection_name,
+                    agent_id,  # Pasar agent_id a la tarea en segundo plano
+                    conversation_id  # Pasar conversation_id a la tarea en segundo plano
                 )
             
             return IngestionResponse(
@@ -272,8 +295,8 @@ async def ingest_documents(
             )
             
         except Exception as e:
-            logger.error(f"Error al ingerir documentos: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error al ingerir documentos: {str(e)}")
+            logger.error(f"Error al ingerir documentos para {context_desc}: {str(e)}", exc_info=True)
+            raise ServiceError(f"Error al ingerir documentos para {context_desc}: {str(e)}")
 
 @app.post("/ingest-file")
 @handle_service_error()
@@ -284,6 +307,8 @@ async def ingest_file(
     collection_name: str = Form("default"),
     document_type: str = Form(...),
     author: Optional[str] = Form(None),
+    agent_id: Optional[str] = Form(None),
+    conversation_id: Optional[str] = Form(None),
     tenant_info: TenantInfo = Depends(verify_tenant)
 ):
     """
@@ -296,23 +321,33 @@ async def ingest_file(
         collection_name: Nombre de la colección
         document_type: Tipo de documento
         author: Autor del documento
+        agent_id: ID del agente (opcional)
+        conversation_id: ID de la conversación (opcional)
         tenant_info: Información del tenant (inyectada)
         
     Returns:
         dict: Respuesta con ID de documento y contador de nodos
     """
-    # Verificar cuotas
-    await check_tenant_quotas(tenant_info)
-    
-    # Verificar que el tenant es el correcto
+    # Verificar que el tenant_id coincida con el de la autenticación
     if tenant_id != tenant_info.tenant_id:
         raise HTTPException(
             status_code=403,
-            detail="You can only upload files to your own tenant"
+            detail="El ID de tenant no coincide con las credenciales"
         )
     
-    # Usar el contexto del tenant para toda la operación
-    with TenantContext(tenant_id):
+    # Verificar cuotas del tenant
+    await check_tenant_quotas(tenant_info)
+    
+    # Construir descripción del contexto para mensajes de error
+    context_desc = f"tenant '{tenant_id}'"
+    if agent_id:
+        context_desc += f", agent '{agent_id}'"
+    if conversation_id:
+        context_desc += f", conversation '{conversation_id}'"
+    context_desc += f", collection '{collection_name}', file '{file.filename}'"
+    
+    # Usar el contexto apropiado según los parámetros disponibles
+    with get_appropriate_context_manager(tenant_id, agent_id, conversation_id):
         try:
             # Leer contenido del archivo
             content = await file.read()
@@ -347,30 +382,30 @@ async def ingest_file(
                 index_documents_task,
                 node_data,
                 tenant_id,
-                collection_name
+                collection_name,
+                agent_id,
+                conversation_id
             )
             
             logger.info(f"Archivo {file.filename} procesado con {len(node_data)} fragmentos para tenant {tenant_id}")
             
             return {
                 "success": True,
-                "message": f"Processing file {file.filename} with {len(node_data)} chunks",
                 "document_id": doc_id,
-                "nodes_count": len(node_data)
+                "node_count": len(node_data)
             }
-        
-        except UnicodeDecodeError:
-            logger.error(f"Error al decodificar archivo {file.filename} para tenant {tenant_id}")
-            raise ServiceError(f"Error decoding file. Please ensure the file is in UTF-8 format.")
+            
         except Exception as e:
-            logger.error(f"Error al procesar archivo {file.filename} para tenant {tenant_id}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error processing file: {str(e)}")
+            logger.error(f"Error al procesar archivo para {context_desc}: {str(e)}", exc_info=True)
+            raise ServiceError(f"Error al procesar archivo para {context_desc}: {str(e)}")
 
 @app.delete("/documents/{tenant_id}/{document_id}")
 @handle_service_error()
 async def delete_document(
     tenant_id: str,
     document_id: str,
+    agent_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
     tenant_info: TenantInfo = Depends(verify_tenant)
 ):
     """
@@ -379,43 +414,68 @@ async def delete_document(
     Args:
         tenant_id: ID del tenant
         document_id: ID del documento
+        agent_id: ID del agente (opcional)
+        conversation_id: ID de la conversación (opcional)
         tenant_info: Información del tenant (inyectada)
         
     Returns:
         dict: Resultado de la operación
     """
-    # Verificar que el tenant es el correcto
+    # Verificar que el tenant_id coincida con el de la autenticación
     if tenant_id != tenant_info.tenant_id:
         raise HTTPException(
             status_code=403,
-            detail="You can only delete your own documents"
+            detail="El ID de tenant no coincide con las credenciales"
         )
     
-    supabase = get_supabase_client()
+    # Construir descripción del contexto para mensajes de error
+    context_desc = f"tenant '{tenant_id}', document '{document_id}'"
+    if agent_id:
+        context_desc += f", agent '{agent_id}'"
+    if conversation_id:
+        context_desc += f", conversation '{conversation_id}'"
     
-    # Eliminar chunks de documento
-    result = supabase.table("document_chunks").delete() \
-        .eq("tenant_id", tenant_id) \
-        .eq("metadata->>document_id", document_id) \
-        .execute()
-    
-    # Actualizar contador de documentos para el tenant
-    supabase.rpc(
-        "decrement_document_count",
-        {"p_tenant_id": tenant_id, "p_count": 1}
-    ).execute()
-    
-    return {
-        "success": True,
-        "message": f"Document {document_id} deleted",
-        "deleted_chunks": len(result.data) if result.data else 0
-    }
+    # Usar el contexto apropiado según los parámetros disponibles
+    with get_appropriate_context_manager(tenant_id, agent_id, conversation_id):
+        try:
+            supabase = get_supabase_client()
+            
+            # Eliminar chunks de documento
+            delete_result = await supabase.table("document_chunks").delete() \
+                .eq("tenant_id", tenant_id) \
+                .eq("metadata->>document_id", document_id) \
+                .execute()
+            
+            if delete_result.error:
+                logger.error(f"Error eliminando documento para {context_desc}: {delete_result.error}")
+                raise ServiceError(f"Error eliminando documento: {delete_result.error}")
+            
+            # Actualizar contador de documentos para el tenant
+            await supabase.rpc(
+                "decrement_document_count",
+                {"p_tenant_id": tenant_id, "p_count": 1}
+            ).execute()
+            
+            deleted_count = len(delete_result.data) if delete_result.data else 0
+            logger.info(f"Documento {document_id} eliminado con {deleted_count} chunks para {context_desc}")
+            
+            return {
+                "success": True,
+                "message": f"Documento {document_id} eliminado exitosamente",
+                "deleted_chunks": deleted_count
+            }
+        
+        except Exception as e:
+            logger.error(f"Error eliminando documento para {context_desc}: {str(e)}", exc_info=True)
+            raise ServiceError(f"Error eliminando documento: {str(e)}")
 
 @app.delete("/collections/{tenant_id}/{collection_name}")
 @handle_service_error()
 async def delete_collection(
     tenant_id: str,
     collection_name: str,
+    agent_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
     tenant_info: TenantInfo = Depends(verify_tenant)
 ):
     """
@@ -424,46 +484,69 @@ async def delete_collection(
     Args:
         tenant_id: ID del tenant
         collection_name: Nombre de la colección
+        agent_id: ID del agente (opcional)
+        conversation_id: ID de la conversación (opcional)
         tenant_info: Información del tenant (inyectada)
         
     Returns:
         dict: Resultado de la operación
     """
-    # Verificar que el tenant es el correcto
+    # Verificar que el tenant_id coincida con el de la autenticación
     if tenant_id != tenant_info.tenant_id:
         raise HTTPException(
             status_code=403,
-            detail="You can only delete your own collections"
+            detail="El ID de tenant no coincide con las credenciales"
         )
     
-    supabase = get_supabase_client()
+    # Construir descripción del contexto para mensajes de error
+    context_desc = f"tenant '{tenant_id}', collection '{collection_name}'"
+    if agent_id:
+        context_desc += f", agent '{agent_id}'"
+    if conversation_id:
+        context_desc += f", conversation '{conversation_id}'"
     
-    # Eliminar chunks de documento para esta colección
-    result = supabase.table("document_chunks").delete() \
-        .eq("tenant_id", tenant_id) \
-        .eq("metadata->>collection", collection_name) \
-        .execute()
-    
-    # Actualizar contador de documentos para el tenant
-    if result.data and len(result.data) > 0:
-        # Estimar contador de documentos (aproximado)
-        doc_ids = set()
-        for item in result.data:
-            if "metadata" in item and "document_id" in item["metadata"]:
-                doc_ids.add(item["metadata"]["document_id"])
+    # Usar el contexto apropiado según los parámetros disponibles
+    with get_appropriate_context_manager(tenant_id, agent_id, conversation_id):
+        try:
+            supabase = get_supabase_client()
+            
+            # Eliminar chunks de documento para esta colección
+            delete_result = await supabase.table("document_chunks").delete() \
+                .eq("tenant_id", tenant_id) \
+                .eq("metadata->>collection", collection_name) \
+                .execute()
+            
+            if delete_result.error:
+                logger.error(f"Error eliminando colección para {context_desc}: {delete_result.error}")
+                raise ServiceError(f"Error eliminando colección: {delete_result.error}")
+            
+            # Actualizar contador de documentos para el tenant
+            if delete_result.data and len(delete_result.data) > 0:
+                # Estimar contador de documentos (aproximado)
+                doc_ids = set()
+                for item in delete_result.data:
+                    if "metadata" in item and "document_id" in item["metadata"]:
+                        doc_ids.add(item["metadata"]["document_id"])
+                
+                # Decrementar contador de documentos
+                if doc_ids:
+                    await supabase.rpc(
+                        "decrement_document_count",
+                        {"p_tenant_id": tenant_id, "p_count": len(doc_ids)}
+                    ).execute()
+            
+            deleted_count = len(delete_result.data) if delete_result.data else 0
+            logger.info(f"Colección {collection_name} eliminada con {deleted_count} chunks para {context_desc}")
+            
+            return {
+                "success": True,
+                "message": f"Colección {collection_name} eliminada exitosamente",
+                "deleted_chunks": deleted_count
+            }
         
-        doc_count = len(doc_ids)
-        
-        supabase.rpc(
-            "decrement_document_count",
-            {"p_tenant_id": tenant_id, "p_count": doc_count}
-        ).execute()
-    
-    return {
-        "success": True,
-        "message": f"Collection {collection_name} deleted for tenant {tenant_id}",
-        "deleted_chunks": len(result.data) if result.data else 0
-    }
+        except Exception as e:
+            logger.error(f"Error eliminando colección para {context_desc}: {str(e)}", exc_info=True)
+            raise ServiceError(f"Error eliminando colección: {str(e)}")
 
 @app.get("/status", response_model=HealthResponse)
 @handle_service_error()
