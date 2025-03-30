@@ -36,7 +36,7 @@ from common.auth import verify_tenant, check_tenant_quotas, validate_model_acces
 from common.supabase import get_supabase_client, init_supabase
 from common.config import Settings, get_settings
 from common.utils import track_usage, sanitize_content, prepare_service_request
-from common.errors import handle_service_error, ServiceError, create_error_response
+from common.errors import handle_service_error_simple, ServiceError, create_error_response
 from common.logging import init_logging
 from common.ollama import get_llm_model, is_using_ollama
 from common.context import (
@@ -455,7 +455,7 @@ async def initialize_agent_with_tools(tenant_info: TenantInfo, agent_config: Age
 # Endpoint para verificar el estado
 @app.get("/status", response_model=HealthResponse)
 @app.get("/health", response_model=HealthResponse)
-@handle_service_error
+@handle_service_error_simple
 async def get_service_status() -> HealthResponse:
     """
     Verifica el estado del servicio y sus dependencias.
@@ -492,7 +492,7 @@ async def get_service_status() -> HealthResponse:
 
 # Endpoint para crear un agente
 @app.post("/agents", response_model=AgentResponse)
-@handle_service_error
+@handle_service_error_simple
 @with_tenant_context
 async def create_agent(request: AgentRequest, tenant_info: TenantInfo = Depends(verify_tenant)) -> AgentResponse:
     """
@@ -564,7 +564,7 @@ async def create_agent(request: AgentRequest, tenant_info: TenantInfo = Depends(
 
 # Endpoint para obtener un agente
 @app.get("/agents/{agent_id}", response_model=AgentResponse)
-@handle_service_error
+@handle_service_error_simple
 @with_agent_context
 async def get_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tenant)) -> AgentResponse:
     """
@@ -621,7 +621,7 @@ async def get_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tena
 
 # Endpoint para listar agentes
 @app.get("/agents", response_model=List[AgentResponse])
-@handle_service_error
+@handle_service_error_simple
 @with_tenant_context
 async def list_agents(tenant_info: TenantInfo = Depends(verify_tenant)) -> List[AgentResponse]:
     """
@@ -672,7 +672,7 @@ async def list_agents(tenant_info: TenantInfo = Depends(verify_tenant)) -> List[
 
 # Endpoint para actualizar un agente
 @app.put("/agents/{agent_id}", response_model=AgentResponse)
-@handle_service_error
+@handle_service_error_simple
 @with_agent_context
 async def update_agent(
     agent_id: str, 
@@ -767,7 +767,7 @@ async def update_agent(
 
 # Endpoint para eliminar un agente
 @app.delete("/agents/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
-@handle_service_error
+@handle_service_error_simple
 @with_agent_context
 async def delete_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tenant)):
     """
@@ -814,7 +814,7 @@ async def delete_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_t
 
 # Endpoint para chatear con un agente
 @app.post("/agents/{agent_id}/chat", response_model=ChatResponse)
-@handle_service_error
+@handle_service_error_simple
 @with_full_context
 async def chat_with_agent(
     agent_id: str,
@@ -1010,7 +1010,7 @@ async def chat_with_agent(
 
 # Endpoint para chatear con un agente
 @app.post("/chat", response_model=AgentResponse)
-@handle_service_error(on_error_response={"output": "Error procesando la consulta", "intermediate_steps": []})
+@handle_service_error_simple(on_error_response={"output": "Error procesando la consulta", "intermediate_steps": []})
 @with_tenant_context
 async def chat(chat_request: ChatRequest, request: Request) -> AgentResponse:
     """
@@ -1105,7 +1105,7 @@ async def chat(chat_request: ChatRequest, request: Request) -> AgentResponse:
 
 # Endpoint para streaming de chat con el agente
 @app.post("/chat/stream")
-@handle_service_error
+@handle_service_error_simple
 @with_tenant_context
 async def chat_stream(chat_request: ChatRequest, request: Request):
     """
@@ -1210,7 +1210,7 @@ async def get_tenant_info(tenant_id: Optional[str] = None) -> Optional[TenantInf
 # Endpoints para gestión de conversaciones
 
 @app.get("/conversations", response_model=ConversationsListResponse)
-@handle_service_error
+@handle_service_error_simple
 async def list_conversations(
     limit: int = 50,
     offset: int = 0,
@@ -1300,7 +1300,7 @@ async def list_conversations(
             raise ServiceError(f"Error listing conversations: {str(e)}")
 
 @app.get("/conversations/{conversation_id}", response_model=ConversationResponse)
-@handle_service_error
+@handle_service_error_simple
 @with_full_context
 async def get_conversation(
     conversation_id: str,
@@ -1371,7 +1371,7 @@ async def get_conversation(
     )
 
 @app.get("/conversations/{conversation_id}/messages", response_model=MessageListResponse)
-@handle_service_error
+@handle_service_error_simple
 @with_full_context
 async def get_conversation_messages(
     conversation_id: str,
@@ -1452,7 +1452,7 @@ async def get_conversation_messages(
     )
 
 @app.post("/conversations", response_model=ConversationResponse)
-@handle_service_error
+@handle_service_error_simple
 @with_agent_context
 async def create_conversation(
     request: ConversationCreate,
@@ -1538,7 +1538,7 @@ async def create_conversation(
     )
 
 @app.patch("/conversations/{conversation_id}", response_model=ConversationResponse)
-@handle_service_error
+@handle_service_error_simple
 @with_full_context
 async def update_conversation(
     conversation_id: str,
@@ -1630,7 +1630,7 @@ async def update_conversation(
     )
 
 @app.delete("/conversations/{conversation_id}")
-@handle_service_error
+@handle_service_error_simple
 @with_full_context
 async def delete_conversation(
     conversation_id: str,
