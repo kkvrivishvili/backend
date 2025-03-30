@@ -240,7 +240,6 @@ async def ingest_documents(
     tenant_id = tenant_info.tenant_id
     collection_name = request.collection_name or "default"
     
-    # Determinar el nivel de contexto adecuado
     # Para ingestión, el agent_id y conversation_id son opcionales
     agent_id = request.agent_id
     conversation_id = request.conversation_id
@@ -253,52 +252,45 @@ async def ingest_documents(
         context_desc += f", conversation '{conversation_id}'"
     context_desc += f", collection '{collection_name}'"
     
-    # Usar el contexto apropiado según los parámetros disponibles
-    with get_appropriate_context_manager(tenant_id, agent_id, conversation_id):
-        try:
-            total_nodes = 0
-            document_ids = []
-            node_data_list = []
-            
-            # Procesar cada documento
-            for doc in request.documents:
-                # Verificar que el texto no esté vacío
-                if not doc.text or not doc.text.strip():
-                    continue
-                
-                # Procesar el documento
-                nodes = process_document(
-                    doc.text, 
-                    doc.metadata,
-                    collection_name
-                )
-                
-                # Añadir nodos a la lista para indexación
-                node_data_list.extend(nodes)
-                
-                # Actualizar contadores
-                document_ids.append(doc.metadata.document_id)
-                total_nodes += len(nodes)
-            
-            # Iniciar tarea en segundo plano para indexar documentos
-            if node_data_list:
-                background_tasks.add_task(
-                    index_documents_task,
-                    node_data_list, 
-                    tenant_id,
-                    collection_name,
-                    agent_id,  # Pasar agent_id a la tarea en segundo plano
-                    conversation_id  # Pasar conversation_id a la tarea en segundo plano
-                )
-            
-            return IngestionResponse(
-                document_ids=document_ids,
-                node_count=total_nodes
-            )
-            
-        except Exception as e:
-            logger.error(f"Error al ingerir documentos para {context_desc}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error al ingerir documentos para {context_desc}: {str(e)}")
+    total_nodes = 0
+    document_ids = []
+    node_data_list = []
+    
+    # Procesar cada documento
+    for doc in request.documents:
+        # Verificar que el texto no esté vacío
+        if not doc.text or not doc.text.strip():
+            continue
+        
+        # Procesar el documento
+        nodes = process_document(
+            doc.text, 
+            doc.metadata,
+            collection_name
+        )
+        
+        # Añadir nodos a la lista para indexación
+        node_data_list.extend(nodes)
+        
+        # Actualizar contadores
+        document_ids.append(doc.metadata.document_id)
+        total_nodes += len(nodes)
+    
+    # Iniciar tarea en segundo plano para indexar documentos
+    if node_data_list:
+        background_tasks.add_task(
+            index_documents_task,
+            node_data_list, 
+            tenant_id,
+            collection_name,
+            agent_id,  # Pasar agent_id a la tarea en segundo plano
+            conversation_id  # Pasar conversation_id a la tarea en segundo plano
+        )
+    
+    return IngestionResponse(
+        document_ids=document_ids,
+        node_count=total_nodes
+    )
 
 @app.post("/ingest-file", response_model=IngestionResponse)
 @handle_service_error_simple
@@ -333,9 +325,10 @@ async def ingest_file(
     """
     # Verificar que el tenant_id coincida con el de la autenticación
     if tenant_id != tenant_info.tenant_id:
-        raise HTTPException(
+        raise ServiceError(
+            message="El ID de tenant no coincide con las credenciales",
             status_code=403,
-            detail="El ID de tenant no coincide con las credenciales"
+            error_code="FORBIDDEN"
         )
     
     # Verificar cuotas del tenant
@@ -349,57 +342,50 @@ async def ingest_file(
         context_desc += f", conversation '{conversation_id}'"
     context_desc += f", collection '{collection_name}', file '{file.filename}'"
     
-    # Usar el contexto apropiado según los parámetros disponibles
-    with get_appropriate_context_manager(tenant_id, agent_id, conversation_id):
-        try:
-            # Leer contenido del archivo
-            content = await file.read()
-            file_text = content.decode("utf-8")
-            
-            # Crear metadatos
-            metadata = DocumentMetadata(
-                source=file.filename,
-                author=author,
-                created_at=None,  # Se rellenará automáticamente
-                document_type=document_type,
-                tenant_id=tenant_id,
-                custom_metadata={"filename": file.filename}
-            )
-            
-            # Generar ID de documento
-            doc_id = str(uuid.uuid4())
-            
-            # Añadir ID de documento a metadatos
-            metadata.custom_metadata = metadata.custom_metadata or {}
-            metadata.custom_metadata["document_id"] = doc_id
-            
-            # Procesar documento para obtener nodos
-            node_data = process_document(
-                doc_text=file_text,
-                metadata=metadata,
-                collection_name=collection_name
-            )
-            
-            # Programar tarea en segundo plano para indexar documentos
-            background_tasks.add_task(
-                index_documents_task,
-                node_data,
-                tenant_id,
-                collection_name,
-                agent_id,
-                conversation_id
-            )
-            
-            logger.info(f"Archivo {file.filename} procesado con {len(node_data)} fragmentos para tenant {tenant_id}")
-            
-            return IngestionResponse(
-                document_ids=[doc_id],
-                node_count=len(node_data)
-            )
-            
-        except Exception as e:
-            logger.error(f"Error al procesar archivo para {context_desc}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error al procesar archivo para {context_desc}: {str(e)}")
+    # Leer contenido del archivo
+    content = await file.read()
+    file_text = content.decode("utf-8")
+    
+    # Crear metadatos
+    metadata = DocumentMetadata(
+        source=file.filename,
+        author=author,
+        created_at=None,  # Se rellenará automáticamente
+        document_type=document_type,
+        tenant_id=tenant_id,
+        custom_metadata={"filename": file.filename}
+    )
+    
+    # Generar ID de documento
+    doc_id = str(uuid.uuid4())
+    
+    # Añadir ID de documento a metadatos
+    metadata.custom_metadata = metadata.custom_metadata or {}
+    metadata.custom_metadata["document_id"] = doc_id
+    
+    # Procesar documento para obtener nodos
+    node_data = process_document(
+        doc_text=file_text,
+        metadata=metadata,
+        collection_name=collection_name
+    )
+    
+    # Programar tarea en segundo plano para indexar documentos
+    background_tasks.add_task(
+        index_documents_task,
+        node_data,
+        tenant_id,
+        collection_name,
+        agent_id,
+        conversation_id
+    )
+    
+    logger.info(f"Archivo {file.filename} procesado con {len(node_data)} fragmentos para tenant {tenant_id}")
+    
+    return IngestionResponse(
+        document_ids=[doc_id],
+        node_count=len(node_data)
+    )
 
 @app.delete("/documents/{tenant_id}/{document_id}", response_model=Dict[str, Any])
 @handle_service_error_simple
@@ -426,9 +412,10 @@ async def delete_document(
     """
     # Verificar que el tenant_id coincida con el de la autenticación
     if tenant_id != tenant_info.tenant_id:
-        raise HTTPException(
+        raise ServiceError(
+            message="El ID de tenant no coincide con las credenciales",
             status_code=403,
-            detail="El ID de tenant no coincide con las credenciales"
+            error_code="FORBIDDEN"
         )
     
     # Construir descripción del contexto para mensajes de error
@@ -438,39 +425,32 @@ async def delete_document(
     if conversation_id:
         context_desc += f", conversation '{conversation_id}'"
     
-    # Usar el contexto apropiado según los parámetros disponibles
-    with get_appropriate_context_manager(tenant_id, agent_id, conversation_id):
-        try:
-            supabase = get_supabase_client()
-            
-            # Eliminar chunks de documento
-            delete_result = await supabase.table("document_chunks").delete() \
-                .eq("tenant_id", tenant_id) \
-                .eq("metadata->>document_id", document_id) \
-                .execute()
-            
-            if delete_result.error:
-                logger.error(f"Error eliminando documento para {context_desc}: {delete_result.error}")
-                raise ServiceError(f"Error eliminando documento: {delete_result.error}")
-            
-            # Actualizar contador de documentos para el tenant
-            await supabase.rpc(
-                "decrement_document_count",
-                {"p_tenant_id": tenant_id, "p_count": 1}
-            ).execute()
-            
-            deleted_count = len(delete_result.data) if delete_result.data else 0
-            logger.info(f"Documento {document_id} eliminado con {deleted_count} chunks para {context_desc}")
-            
-            return {
-                "success": True,
-                "message": f"Documento {document_id} eliminado exitosamente",
-                "deleted_chunks": deleted_count
-            }
-        
-        except Exception as e:
-            logger.error(f"Error eliminando documento para {context_desc}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error eliminando documento: {str(e)}")
+    supabase = get_supabase_client()
+    
+    # Eliminar chunks de documento
+    delete_result = await supabase.table("document_chunks").delete() \
+        .eq("tenant_id", tenant_id) \
+        .eq("metadata->>document_id", document_id) \
+        .execute()
+    
+    if delete_result.error:
+        logger.error(f"Error eliminando documento para {context_desc}: {delete_result.error}")
+        raise ServiceError(f"Error eliminando documento: {delete_result.error}")
+    
+    # Actualizar contador de documentos para el tenant
+    await supabase.rpc(
+        "decrement_document_count",
+        {"p_tenant_id": tenant_id, "p_count": 1}
+    ).execute()
+    
+    deleted_count = len(delete_result.data) if delete_result.data else 0
+    logger.info(f"Documento {document_id} eliminado con {deleted_count} chunks para {context_desc}")
+    
+    return {
+        "success": True,
+        "message": f"Documento {document_id} eliminado exitosamente",
+        "deleted_chunks": deleted_count
+    }
 
 @app.delete("/collections/{tenant_id}/{collection_name}", response_model=Dict[str, Any])
 @handle_service_error_simple
@@ -497,9 +477,10 @@ async def delete_collection(
     """
     # Verificar que el tenant_id coincida con el de la autenticación
     if tenant_id != tenant_info.tenant_id:
-        raise HTTPException(
+        raise ServiceError(
+            message="El ID de tenant no coincide con las credenciales",
             status_code=403,
-            detail="El ID de tenant no coincide con las credenciales"
+            error_code="FORBIDDEN"
         )
     
     # Construir descripción del contexto para mensajes de error
@@ -509,48 +490,41 @@ async def delete_collection(
     if conversation_id:
         context_desc += f", conversation '{conversation_id}'"
     
-    # Usar el contexto apropiado según los parámetros disponibles
-    with get_appropriate_context_manager(tenant_id, agent_id, conversation_id):
-        try:
-            supabase = get_supabase_client()
-            
-            # Eliminar chunks de documento para esta colección
-            delete_result = await supabase.table("document_chunks").delete() \
-                .eq("tenant_id", tenant_id) \
-                .eq("metadata->>collection", collection_name) \
-                .execute()
-            
-            if delete_result.error:
-                logger.error(f"Error eliminando colección para {context_desc}: {delete_result.error}")
-                raise ServiceError(f"Error eliminando colección: {delete_result.error}")
-            
-            # Actualizar contador de documentos para el tenant
-            if delete_result.data and len(delete_result.data) > 0:
-                # Estimar contador de documentos (aproximado)
-                doc_ids = set()
-                for item in delete_result.data:
-                    if "metadata" in item and "document_id" in item["metadata"]:
-                        doc_ids.add(item["metadata"]["document_id"])
-                
-                # Decrementar contador de documentos
-                if doc_ids:
-                    await supabase.rpc(
-                        "decrement_document_count",
-                        {"p_tenant_id": tenant_id, "p_count": len(doc_ids)}
-                    ).execute()
-            
-            deleted_count = len(delete_result.data) if delete_result.data else 0
-            logger.info(f"Colección {collection_name} eliminada con {deleted_count} chunks para {context_desc}")
-            
-            return {
-                "success": True,
-                "message": f"Colección {collection_name} eliminada exitosamente",
-                "deleted_chunks": deleted_count
-            }
+    supabase = get_supabase_client()
+    
+    # Eliminar chunks de documento para esta colección
+    delete_result = await supabase.table("document_chunks").delete() \
+        .eq("tenant_id", tenant_id) \
+        .eq("metadata->>collection", collection_name) \
+        .execute()
+    
+    if delete_result.error:
+        logger.error(f"Error eliminando colección para {context_desc}: {delete_result.error}")
+        raise ServiceError(f"Error eliminando colección: {delete_result.error}")
+    
+    # Actualizar contador de documentos para el tenant
+    if delete_result.data and len(delete_result.data) > 0:
+        # Estimar contador de documentos (aproximado)
+        doc_ids = set()
+        for item in delete_result.data:
+            if "metadata" in item and "document_id" in item["metadata"]:
+                doc_ids.add(item["metadata"]["document_id"])
         
-        except Exception as e:
-            logger.error(f"Error eliminando colección para {context_desc}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error eliminando colección: {str(e)}")
+        # Decrementar contador de documentos
+        if doc_ids:
+            await supabase.rpc(
+                "decrement_document_count",
+                {"p_tenant_id": tenant_id, "p_count": len(doc_ids)}
+            ).execute()
+    
+    deleted_count = len(delete_result.data) if delete_result.data else 0
+    logger.info(f"Colección {collection_name} eliminada con {deleted_count} chunks para {context_desc}")
+    
+    return {
+        "success": True,
+        "message": f"Colección {collection_name} eliminada exitosamente",
+        "deleted_chunks": deleted_count
+    }
 
 @app.get("/status", response_model=HealthResponse)
 @app.get("/health", response_model=HealthResponse)
@@ -562,41 +536,31 @@ async def get_service_status() -> HealthResponse:
     Returns:
         HealthResponse: Estado del servicio
     """
+    # Check if Supabase is available
+    supabase_status = "available"
     try:
-        # Check if Supabase is available
-        supabase_status = "available"
-        try:
-            supabase = get_supabase_client()
-            supabase.table("tenants").select("tenant_id").limit(1).execute()
-        except Exception:
-            supabase_status = "unavailable"
-        
-        # Check if embedding service is available
-        embedding_status = "available"
-        try:
-            response = await http_client.get(f"{settings.embedding_service_url}/status")
-            if response.status_code != 200:
-                embedding_status = "degraded"
-        except Exception:
-            embedding_status = "unavailable"
-        
-        return HealthResponse(
-            status="healthy" if all(s == "available" for s in [supabase_status, embedding_status]) else "degraded",
-            components={
-                "supabase": supabase_status,
-                "embedding_service": embedding_status
-            },
-            version=settings.service_version
-        )
-    except Exception as e:
-        logger.error(f"Error in healthcheck: {str(e)}")
-        return HealthResponse(
-            status="error",
-            components={
-                "error": str(e)
-            },
-            version=settings.service_version
-        )
+        supabase = get_supabase_client()
+        supabase.table("tenants").select("tenant_id").limit(1).execute()
+    except Exception:
+        supabase_status = "unavailable"
+    
+    # Check if embedding service is available
+    embedding_status = "available"
+    try:
+        response = await http_client.get(f"{settings.embedding_service_url}/status")
+        if response.status_code != 200:
+            embedding_status = "degraded"
+    except Exception:
+        embedding_status = "unavailable"
+    
+    return HealthResponse(
+        status="healthy" if all(s == "available" for s in [supabase_status, embedding_status]) else "degraded",
+        components={
+            "supabase": supabase_status,
+            "embedding_service": embedding_status
+        },
+        version=settings.service_version
+    )
 
 if __name__ == "__main__":
     import uvicorn

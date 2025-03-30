@@ -36,13 +36,13 @@ from common.auth import verify_tenant, check_tenant_quotas, validate_model_acces
 from common.supabase import get_supabase_client, init_supabase
 from common.config import Settings, get_settings
 from common.utils import track_usage, sanitize_content, prepare_service_request
-from common.errors import handle_service_error_simple, ServiceError
+from common.errors import handle_service_error, ServiceError, create_error_response
 from common.logging import init_logging
 from common.ollama import get_llm_model, is_using_ollama
 from common.context import (
     TenantContext, FullContext, get_current_tenant_id, get_current_agent_id, 
     get_current_conversation_id, with_tenant_context, with_full_context, 
-    AgentContext
+    AgentContext, get_appropriate_context_manager
 )
 
 # Configuración
@@ -163,43 +163,35 @@ class AgentCallbackHandler(BaseCallbackHandler):
         return "\n".join(steps)
 
 
-# Decorador para manejar errores del servicio
-def handle_service_error(on_error_response=None):
-    """
-    Decorador para manejar errores del servicio de manera consistente.
+# Implementación de un callback handler para streaming
+class StreamingCallbackHandler(BaseCallbackHandler):
+    """Manejador de callback para streaming de respuestas."""
     
-    Args:
-        on_error_response: Respuesta a devolver en caso de error
-        
-    Returns:
-        Decorador configurado
-    """
-    def decorator(func):
-        async def wrapper(*args, **kwargs):
-            try:
-                return await func(*args, **kwargs)
-            except HTTPException:
-                # Re-lanzar excepciones HTTP
-                raise
-            except Exception as e:
-                # Registrar error
-                logging.error(f"Error en {func.__name__}: {e}")
-                
-                # Si hay una respuesta de error personalizada, devolverla
-                if on_error_response is not None:
-                    return JSONResponse(
-                        status_code=500,
-                        content=on_error_response
-                    )
-                
-                # Si no hay respuesta personalizada, devolver error estándar
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Error del servicio: {str(e)}"
-                )
-                
-        return wrapper
-    return decorator
+    def __init__(self):
+        super().__init__()
+        self.tokens = []
+        self.tool_outputs = []
+    
+    def on_llm_new_token(self, token: str, **kwargs):
+        """Captura un nuevo token generado."""
+        self.tokens.append(token)
+    
+    def on_tool_end(self, output: str, **kwargs):
+        """Captura el resultado de una herramienta."""
+        self.tool_outputs.append(output)
+    
+    def get_tokens(self):
+        """Obtiene todos los tokens capturados."""
+        return self.tokens
+    
+    def get_tool_outputs(self):
+        """Obtiene todas las salidas de herramientas."""
+        return self.tool_outputs
+    
+    def get_callback_manager(self):
+        """Devuelve un CallbackManager con este handler."""
+        return CallbackManager([self])
+
 
 # Función para crear una herramienta RAG
 @with_agent_context
@@ -460,122 +452,10 @@ async def initialize_agent_with_tools(tenant_info: TenantInfo, agent_config: Age
     )
 
 
-# Implementación de un callback handler para streaming
-class StreamingCallbackHandler(BaseCallbackHandler):
-    """Manejador de callback para streaming de respuestas."""
-    
-    def __init__(self):
-        super().__init__()
-        self.tokens = []
-        self.tool_outputs = []
-    
-    def on_llm_new_token(self, token: str, **kwargs):
-        """Captura un nuevo token generado."""
-        self.tokens.append(token)
-    
-    def on_tool_end(self, output: str, **kwargs):
-        """Captura el resultado de una herramienta."""
-        self.tool_outputs.append(output)
-    
-    def get_tokens(self) -> List[str]:
-        """Obtiene todos los tokens capturados."""
-        return self.tokens
-    
-    def get_tool_outputs(self) -> List[str]:
-        """Obtiene todas las salidas de herramientas."""
-        return self.tool_outputs
-    
-    def get_callback_manager(self) -> CallbackManager:
-        """Devuelve un CallbackManager con este handler."""
-        return CallbackManager([self])
-
-
-# Función para ejecutar un agente
-@with_full_context
-async def execute_agent(tenant_info: TenantInfo, agent_config: AgentConfig, query: str, session_id: Optional[str] = None, streaming: bool = False) -> Dict[str, Any]:
-    """
-    Ejecuta un agente con la configuración proporcionada.
-    
-    Args:
-        tenant_info: Información del inquilino
-        agent_config: Configuración del agente
-        query: Consulta del usuario
-        session_id: ID de sesión opcional
-        streaming: Si debe transmitirse la respuesta
-        
-    Returns:
-        Respuesta del agente y pasos intermedios
-    """
-    tenant_id = tenant_info.tenant_id
-    
-    with TenantContext(tenant_id):
-        try:
-            # Crear callback handler para streaming si es necesario
-            callback_handler = StreamingCallbackHandler() if streaming else AgentCallbackHandler()
-            
-            # Crear herramientas del agente
-            tools = await create_agent_tools(agent_config, tenant_id)
-            
-            # Inicializar el agente
-            agent_executor = await initialize_agent_with_tools(
-                tenant_info=tenant_info,
-                agent_config=agent_config,
-                tools=tools,
-                callback_handler=callback_handler
-            )
-            
-            # Preparar input para el agente
-            agent_input = {"input": query}
-            
-            # Configurar runnable config si hay streaming
-            config = None
-            if streaming and callback_handler:
-                config = RunnableConfig(
-                    callbacks=callback_handler.get_callback_manager(),
-                )
-            
-            # Ejecutar el agente
-            logging.info(f"Ejecutando agente para {tenant_id} con consulta: {query}")
-            
-            # Ejecutar con o sin config según corresponda
-            response = await agent_executor.ainvoke(agent_input, config=config) if config else await agent_executor.ainvoke(agent_input)
-            
-            # Procesar la respuesta
-            output = response.get("output", "")
-            intermediate_steps = response.get("intermediate_steps", [])
-            
-            # Formatear pasos intermedios para serialización JSON
-            formatted_steps = []
-            for step in intermediate_steps:
-                action = step[0]  # La acción
-                observation = step[1]  # El resultado de la acción
-                
-                formatted_steps.append({
-                    "action": {
-                        "tool": getattr(action, "tool", "unknown"),
-                        "tool_input": getattr(action, "tool_input", {}),
-                        "log": str(action)
-                    },
-                    "observation": str(observation)
-                })
-            
-            return {
-                "output": output,
-                "intermediate_steps": formatted_steps
-            }
-            
-        except Exception as e:
-            logging.error(f"Error al ejecutar el agente: {e}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Error al ejecutar el agente: {str(e)}"
-            )
-
-
 # Endpoint para verificar el estado
 @app.get("/status", response_model=HealthResponse)
 @app.get("/health", response_model=HealthResponse)
-@handle_service_error_simple
+@handle_service_error
 async def get_service_status() -> HealthResponse:
     """
     Verifica el estado del servicio y sus dependencias.
@@ -583,48 +463,40 @@ async def get_service_status() -> HealthResponse:
     Returns:
         HealthResponse: Estado del servicio
     """
+    # Verificar Supabase
+    supabase_status = "available"
     try:
-        # Verificar Supabase
-        supabase_status = "available"
-        try:
-            supabase = get_supabase_client()
-            supabase.table("ai.agent_configs").select("agent_id").limit(1).execute()
-        except Exception:
-            supabase_status = "unavailable"
-        
-        # Verificar servicio de consulta
-        query_service_status = "available"
-        try:
-            response = await http_client.get(f"{settings.query_service_url}/status")
-            if response.status_code != 200:
-                query_service_status = "degraded"
-        except Exception:
-            query_service_status = "unavailable"
-        
-        return HealthResponse(
-            status="healthy" if all(s == "available" for s in [supabase_status, query_service_status]) else "degraded",
-            components={
-                "supabase": supabase_status,
-                "query_service": query_service_status
-            },
-            version=settings.service_version
-        )
-    except Exception as e:
-        logger.error(f"Error in healthcheck: {str(e)}")
-        return HealthResponse(
-            status="error",
-            components={},
-            version=settings.service_version,
-            error=str(e)
-        )
+        supabase = get_supabase_client()
+        supabase.table("ai.agent_configs").select("agent_id").limit(1).execute()
+    except Exception:
+        supabase_status = "unavailable"
+    
+    # Verificar servicio de consulta
+    query_service_status = "available"
+    try:
+        response = await http_client.get(f"{settings.query_service_url}/status")
+        if response.status_code != 200:
+            query_service_status = "degraded"
+    except Exception:
+        query_service_status = "unavailable"
+    
+    return HealthResponse(
+        status="healthy" if all(s == "available" for s in [supabase_status, query_service_status]) else "degraded",
+        components={
+            "supabase": supabase_status,
+            "query_service": query_service_status
+        },
+        version=settings.service_version
+    )
 
 
 # Endpoint para crear un agente
 @app.post("/agents", response_model=AgentResponse)
-@handle_service_error()
+@handle_service_error
+@with_tenant_context
 async def create_agent(request: AgentRequest, tenant_info: TenantInfo = Depends(verify_tenant)) -> AgentResponse:
     """
-    Crea un nuevo agente para un tenant.
+    Crea un nuevo agente para el inquilino.
     
     Args:
         request: Datos para crear el agente
@@ -638,71 +510,62 @@ async def create_agent(request: AgentRequest, tenant_info: TenantInfo = Depends(
     # Construir una descripción del contexto para mensajes de error más informativos
     context_desc = f"tenant '{tenant_id}'"
     
-    # Usar el contexto de tenant para esta operación
-    with get_appropriate_context_manager(tenant_id):
-        try:
-            # Validar acceso al modelo de LLM
-            validate_model_access(tenant_info.subscription_tier, request.llm_model)
-            
-            # Generar ID para el nuevo agente
-            agent_id = str(uuid.uuid4())
-            
-            # Crear objeto de configuración del agente
-            agent_data = {
-                "agent_id": agent_id,
-                "tenant_id": tenant_id,
-                "name": request.name,
-                "description": request.description,
-                "agent_type": request.agent_type or "conversational",
-                "llm_model": request.llm_model,
-                "tools": request.tools or [],
-                "system_prompt": request.system_prompt,
-                "memory_enabled": request.memory_enabled or False,
-                "memory_window": request.memory_window or 10,
-                "is_active": request.is_active if request.is_active is not None else True,
-                "metadata": request.metadata or {}
-            }
-            
-            # Guardar en Supabase
-            supabase = get_supabase_client()
-            result = await supabase.from_("ai.agent_configs").insert(agent_data).single().execute()
-            
-            if result.error:
-                logger.error(f"Error creando agente para {context_desc}: {result.error}")
-                raise ServiceError(f"Error creating agent: {result.error}")
-            
-            # Obtener el agente creado
-            created_agent = result.data
-            
-            # Crear respuesta
-            return AgentResponse(
-                agent_id=created_agent["agent_id"],
-                tenant_id=created_agent["tenant_id"],
-                name=created_agent["name"],
-                description=created_agent["description"],
-                agent_type=created_agent["agent_type"],
-                llm_model=created_agent["llm_model"],
-                tools=created_agent["tools"],
-                system_prompt=created_agent["system_prompt"],
-                memory_enabled=created_agent["memory_enabled"],
-                memory_window=created_agent["memory_window"],
-                is_active=created_agent["is_active"],
-                metadata=created_agent["metadata"],
-                created_at=created_agent["created_at"],
-                updated_at=created_agent["updated_at"]
-            )
-            
-        except HTTPException as e:
-            # Reenviar excepciones HTTP directamente
-            raise e
-        except Exception as e:
-            logger.error(f"Error creando agente para {context_desc}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error creating agent: {str(e)}")
+    # Validar acceso al modelo de LLM
+    validate_model_access(tenant_info.subscription_tier, request.llm_model)
+    
+    # Generar ID para el nuevo agente
+    agent_id = str(uuid.uuid4())
+    
+    # Crear objeto de configuración del agente
+    agent_data = {
+        "agent_id": agent_id,
+        "tenant_id": tenant_id,
+        "name": request.name,
+        "description": request.description,
+        "agent_type": request.agent_type or "conversational",
+        "llm_model": request.llm_model,
+        "tools": request.tools or [],
+        "system_prompt": request.system_prompt,
+        "memory_enabled": request.memory_enabled,
+        "memory_window": request.memory_window,
+        "is_active": request.is_active,
+        "metadata": request.metadata
+    }
+    
+    # Guardar en Supabase
+    supabase = get_supabase_client()
+    result = await supabase.from_("ai.agent_configs").insert(agent_data).single().execute()
+    
+    if result.error:
+        logger.error(f"Error creando agente para {context_desc}: {result.error}")
+        raise ServiceError(f"Error creating agent: {result.error}")
+    
+    # Obtener el agente creado
+    created_agent = result.data
+    
+    # Crear respuesta
+    return AgentResponse(
+        agent_id=created_agent["agent_id"],
+        tenant_id=created_agent["tenant_id"],
+        name=created_agent["name"],
+        description=created_agent["description"],
+        agent_type=created_agent["agent_type"],
+        llm_model=created_agent["llm_model"],
+        tools=created_agent["tools"],
+        system_prompt=created_agent["system_prompt"],
+        memory_enabled=created_agent["memory_enabled"],
+        memory_window=created_agent["memory_window"],
+        is_active=created_agent["is_active"],
+        metadata=created_agent["metadata"],
+        created_at=created_agent["created_at"],
+        updated_at=created_agent["updated_at"]
+    )
 
 
 # Endpoint para obtener un agente
 @app.get("/agents/{agent_id}", response_model=AgentResponse)
-@handle_service_error()
+@handle_service_error
+@with_agent_context
 async def get_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tenant)) -> AgentResponse:
     """
     Obtiene la configuración de un agente existente.
@@ -716,58 +579,50 @@ async def get_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tena
     """
     tenant_id = tenant_info.tenant_id
     
-    # Usar el contexto de agente para esta operación
-    with get_appropriate_context_manager(tenant_id, agent_id):
-        try:
-            supabase = get_supabase_client()
-            
-            # Obtener el agente del tenant
-            result = await supabase.from_("ai.agent_configs") \
-                .select("*") \
-                .eq("tenant_id", tenant_id) \
-                .eq("agent_id", agent_id) \
-                .single() \
-                .execute()
-                
-            if not result.data:
-                logger.warning(f"Intento de acceso a agente no existente: {agent_id} por tenant {tenant_id}")
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Agent with ID {agent_id} not found for this tenant"
-                )
-                
-            # Convertir a AgentResponse
-            agent_data = result.data
-            agent = AgentResponse(
-                agent_id=agent_data["agent_id"],
-                tenant_id=agent_data["tenant_id"],
-                name=agent_data["name"],
-                description=agent_data["description"],
-                agent_type=agent_data["agent_type"],
-                llm_model=agent_data["llm_model"],
-                tools=agent_data["tools"],
-                system_prompt=agent_data["system_prompt"],
-                memory_enabled=agent_data["memory_enabled"],
-                memory_window=agent_data["memory_window"],
-                is_active=agent_data["is_active"],
-                metadata=agent_data["metadata"],
-                created_at=agent_data["created_at"],
-                updated_at=agent_data["updated_at"]
-            )
-            
-            return agent
-                
-        except HTTPException as e:
-            # Reenviar excepciones HTTP directamente
-            raise e
-        except Exception as e:
-            logger.error(f"Error getting agent {agent_id} for tenant {tenant_id}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error getting agent: {str(e)}")
+    supabase = get_supabase_client()
+    
+    # Obtener el agente del tenant
+    result = await supabase.from_("ai.agent_configs") \
+        .select("*") \
+        .eq("tenant_id", tenant_id) \
+        .eq("agent_id", agent_id) \
+        .single() \
+        .execute()
+        
+    if not result.data:
+        logger.warning(f"Intento de acceso a agente no existente: {agent_id} por tenant {tenant_id}")
+        raise ServiceError(
+            message=f"Agent with ID {agent_id} not found for this tenant",
+            status_code=404,
+            error_code="agent_not_found"
+        )
+        
+    # Convertir a AgentResponse
+    agent_data = result.data
+    agent = AgentResponse(
+        agent_id=agent_data["agent_id"],
+        tenant_id=agent_data["tenant_id"],
+        name=agent_data["name"],
+        description=agent_data["description"],
+        agent_type=agent_data["agent_type"],
+        llm_model=agent_data["llm_model"],
+        tools=agent_data["tools"],
+        system_prompt=agent_data["system_prompt"],
+        memory_enabled=agent_data["memory_enabled"],
+        memory_window=agent_data["memory_window"],
+        is_active=agent_data["is_active"],
+        metadata=agent_data["metadata"],
+        created_at=agent_data["created_at"],
+        updated_at=agent_data["updated_at"]
+    )
+    
+    return agent
 
 
 # Endpoint para listar agentes
 @app.get("/agents", response_model=List[AgentResponse])
-@handle_service_error()
+@handle_service_error
+@with_tenant_context
 async def list_agents(tenant_info: TenantInfo = Depends(verify_tenant)) -> List[AgentResponse]:
     """
     Lista todos los agentes de un tenant.
@@ -780,51 +635,45 @@ async def list_agents(tenant_info: TenantInfo = Depends(verify_tenant)) -> List[
     """
     tenant_id = tenant_info.tenant_id
     
-    # Usar solo el contexto de tenant para esta operación de listado
-    with get_appropriate_context_manager(tenant_id):
-        try:
-            supabase = get_supabase_client()
-            
-            # Obtener todos los agentes del tenant
-            result = await supabase.from_("ai.agent_configs") \
-                .select("*") \
-                .eq("tenant_id", tenant_id) \
-                .execute()
-                
-            if not result.data:
-                return []
-                
-            # Convertir a AgentResponse
-            agents = []
-            for agent_data in result.data:
-                agent = AgentResponse(
-                    agent_id=agent_data["agent_id"],
-                    tenant_id=agent_data["tenant_id"],
-                    name=agent_data["name"],
-                    description=agent_data["description"],
-                    agent_type=agent_data["agent_type"],
-                    llm_model=agent_data["llm_model"],
-                    tools=agent_data["tools"],
-                    system_prompt=agent_data["system_prompt"],
-                    memory_enabled=agent_data["memory_enabled"],
-                    memory_window=agent_data["memory_window"],
-                    is_active=agent_data["is_active"],
-                    metadata=agent_data["metadata"],
-                    created_at=agent_data["created_at"],
-                    updated_at=agent_data["updated_at"]
-                )
-                agents.append(agent)
-                
-            return agents
-                
-        except Exception as e:
-            logger.error(f"Error listing agents for tenant {tenant_id}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error listing agents: {str(e)}")
+    supabase = get_supabase_client()
+    
+    # Obtener todos los agentes del tenant
+    result = await supabase.from_("ai.agent_configs") \
+        .select("*") \
+        .eq("tenant_id", tenant_id) \
+        .execute()
+        
+    if not result.data:
+        return []
+        
+    # Convertir a AgentResponse
+    agents = []
+    for agent_data in result.data:
+        agent = AgentResponse(
+            agent_id=agent_data["agent_id"],
+            tenant_id=agent_data["tenant_id"],
+            name=agent_data["name"],
+            description=agent_data["description"],
+            agent_type=agent_data["agent_type"],
+            llm_model=agent_data["llm_model"],
+            tools=agent_data["tools"],
+            system_prompt=agent_data["system_prompt"],
+            memory_enabled=agent_data["memory_enabled"],
+            memory_window=agent_data["memory_window"],
+            is_active=agent_data["is_active"],
+            metadata=agent_data["metadata"],
+            created_at=agent_data["created_at"],
+            updated_at=agent_data["updated_at"]
+        )
+        agents.append(agent)
+    
+    return agents
 
 
 # Endpoint para actualizar un agente
 @app.put("/agents/{agent_id}", response_model=AgentResponse)
-@handle_service_error()
+@handle_service_error
+@with_agent_context
 async def update_agent(
     agent_id: str, 
     request: AgentRequest, 
@@ -844,86 +693,82 @@ async def update_agent(
     tenant_id = tenant_info.tenant_id
     
     # Construir una descripción del contexto para mensajes de error más informativos
-    context_desc = f"tenant '{tenant_id}', agent '{agent_id}'"
+    context_desc = f"tenant '{tenant_id}'"
     
-    # Usar el contexto de agente para esta operación
-    with get_appropriate_context_manager(tenant_id, agent_id):
-        try:
-            supabase = get_supabase_client()
-            
-            # Verificar que el agente exista y pertenezca al tenant
-            agent_check = await supabase.from_("ai.agent_configs") \
-                .select("*") \
-                .eq("tenant_id", tenant_id) \
-                .eq("agent_id", agent_id) \
-                .single() \
-                .execute()
-            
-            if not agent_check.data:
-                logger.warning(f"Intento de actualizar agente no existente: {agent_id} por tenant {tenant_id}")
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Agent with ID {agent_id} not found for this tenant"
-                )
-            
-            # Preparar datos para actualizar
-            update_data = {
-                "name": request.name,
-                "description": request.description,
-                "agent_type": request.agent_type,
-                "llm_model": request.llm_model,
-                "tools": request.tools,
-                "system_prompt": request.system_prompt,
-                "memory_enabled": request.memory_enabled,
-                "memory_window": request.memory_window,
-                "is_active": request.is_active,
-                "metadata": request.metadata,
-                "updated_at": "NOW()"
-            }
-            
-            # Actualizar el agente en la base de datos
-            result = await supabase.from_("ai.agent_configs") \
-                .update(update_data) \
-                .eq("tenant_id", tenant_id) \
-                .eq("agent_id", agent_id) \
-                .single() \
-                .execute()
-            
-            if result.error:
-                logger.error(f"Error actualizando agente para {context_desc}: {result.error}")
-                raise ServiceError(f"Error updating agent: {result.error}")
-            
-            # Preparar respuesta
-            updated_agent = result.data
-            
-            return AgentResponse(
-                agent_id=updated_agent["agent_id"],
-                tenant_id=updated_agent["tenant_id"],
-                name=updated_agent["name"],
-                description=updated_agent["description"],
-                agent_type=updated_agent["agent_type"],
-                llm_model=updated_agent["llm_model"],
-                tools=updated_agent["tools"],
-                system_prompt=updated_agent["system_prompt"],
-                memory_enabled=updated_agent["memory_enabled"],
-                memory_window=updated_agent["memory_window"],
-                is_active=updated_agent["is_active"],
-                metadata=updated_agent["metadata"],
-                created_at=updated_agent["created_at"],
-                updated_at=updated_agent["updated_at"]
-            )
-            
-        except HTTPException as e:
-            # Reenviar excepciones HTTP directamente
-            raise e
-        except Exception as e:
-            logger.error(f"Error actualizando agente para {context_desc}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error updating agent: {str(e)}")
+    supabase = get_supabase_client()
+    
+    # Verificar que el agente exista y pertenezca al tenant
+    agent_check = await supabase.from_("ai.agent_configs") \
+        .select("*") \
+        .eq("tenant_id", tenant_id) \
+        .eq("agent_id", agent_id) \
+        .single() \
+        .execute()
+    
+    if not agent_check.data:
+        logger.warning(f"Intento de actualizar agente no existente: {agent_id} por tenant {tenant_id}")
+        raise ServiceError(
+            message=f"Agent with ID {agent_id} not found for this tenant",
+            status_code=404,
+            error_code="agent_not_found"
+        )
+    
+    # Validar acceso al modelo si ha cambiado
+    if request.llm_model != agent_check.data["llm_model"]:
+        validate_model_access(tenant_info.subscription_tier, request.llm_model)
+    
+    # Preparar datos para actualizar
+    update_data = {
+        "name": request.name,
+        "description": request.description,
+        "agent_type": request.agent_type,
+        "llm_model": request.llm_model,
+        "tools": request.tools,
+        "system_prompt": request.system_prompt,
+        "memory_enabled": request.memory_enabled,
+        "memory_window": request.memory_window,
+        "is_active": request.is_active,
+        "metadata": request.metadata,
+        "updated_at": "NOW()"
+    }
+    
+    # Actualizar el agente en la base de datos
+    result = await supabase.from_("ai.agent_configs") \
+        .update(update_data) \
+        .eq("tenant_id", tenant_id) \
+        .eq("agent_id", agent_id) \
+        .single() \
+        .execute()
+    
+    if result.error:
+        logger.error(f"Error actualizando agente para {context_desc}: {result.error}")
+        raise ServiceError(f"Error updating agent: {result.error}")
+    
+    # Preparar respuesta
+    updated_agent = result.data
+    
+    return AgentResponse(
+        agent_id=updated_agent["agent_id"],
+        tenant_id=updated_agent["tenant_id"],
+        name=updated_agent["name"],
+        description=updated_agent["description"],
+        agent_type=updated_agent["agent_type"],
+        llm_model=updated_agent["llm_model"],
+        tools=updated_agent["tools"],
+        system_prompt=updated_agent["system_prompt"],
+        memory_enabled=updated_agent["memory_enabled"],
+        memory_window=updated_agent["memory_window"],
+        is_active=updated_agent["is_active"],
+        metadata=updated_agent["metadata"],
+        created_at=updated_agent["created_at"],
+        updated_at=updated_agent["updated_at"]
+    )
 
 
 # Endpoint para eliminar un agente
 @app.delete("/agents/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
-@handle_service_error()
+@handle_service_error
+@with_agent_context
 async def delete_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tenant)):
     """
     Elimina un agente existente.
@@ -935,52 +780,42 @@ async def delete_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_t
     tenant_id = tenant_info.tenant_id
     
     # Construir una descripción del contexto para mensajes de error más informativos
-    context_desc = f"tenant '{tenant_id}', agent '{agent_id}'"
+    context_desc = f"tenant '{tenant_id}'"
     
-    # Usar el contexto de agente para esta operación
-    with get_appropriate_context_manager(tenant_id, agent_id):
-        try:
-            supabase = get_supabase_client()
-            
-            # Verificar que el agente exista y pertenezca al tenant
-            agent_check = await supabase.from_("ai.agent_configs") \
-                .select("*") \
-                .eq("tenant_id", tenant_id) \
-                .eq("agent_id", agent_id) \
-                .single() \
-                .execute()
-            
-            if not agent_check.data:
-                logger.warning(f"Intento de eliminar agente no existente: {agent_id} por tenant {tenant_id}")
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Agent with ID {agent_id} not found for this tenant"
-                )
-            
-            # Eliminar el agente de la base de datos
-            delete_result = await supabase.from_("ai.agent_configs") \
-                .delete() \
-                .eq("tenant_id", tenant_id) \
-                .eq("agent_id", agent_id) \
-                .execute()
-            
-            if delete_result.error:
-                logger.error(f"Error eliminando agente para {context_desc}: {delete_result.error}")
-                raise ServiceError(f"Error deleting agent: {delete_result.error}")
-            
-            logger.info(f"Agente {agent_id} eliminado correctamente para {context_desc}")
-            
-        except HTTPException as e:
-            # Reenviar excepciones HTTP directamente
-            raise e
-        except Exception as e:
-            logger.error(f"Error eliminando agente para {context_desc}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error deleting agent for {context_desc}: {str(e)}")
+    # Verificar que el agente exista y pertenezca al tenant
+    supabase = get_supabase_client()
+    agent_check = await supabase.from_("ai.agent_configs") \
+        .select("*") \
+        .eq("tenant_id", tenant_id) \
+        .eq("agent_id", agent_id) \
+        .single() \
+        .execute()
+    
+    if not agent_check.data:
+        logger.warning(f"Intento de eliminar agente no existente: {agent_id} por tenant {tenant_id}")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Agent with ID {agent_id} not found for this tenant"
+        )
+    
+    # Eliminar el agente de la base de datos
+    delete_result = await supabase.from_("ai.agent_configs") \
+        .delete() \
+        .eq("tenant_id", tenant_id) \
+        .eq("agent_id", agent_id) \
+        .execute()
+    
+    if delete_result.error:
+        logger.error(f"Error eliminando agente para {context_desc}: {delete_result.error}")
+        raise ServiceError(f"Error deleting agent: {delete_result.error}")
+    
+    logger.info(f"Agente {agent_id} eliminado correctamente para {context_desc}")
 
 
 # Endpoint para chatear con un agente
 @app.post("/agents/{agent_id}/chat", response_model=ChatResponse)
-@handle_service_error()
+@handle_service_error
+@with_full_context
 async def chat_with_agent(
     agent_id: str,
     request: ChatRequest,
@@ -1013,180 +848,170 @@ async def chat_with_agent(
     if conversation_id:
         context_desc += f", conversation '{conversation_id}'"
     
-    # Seleccionar el nivel de contexto apropiado
-    context_manager = get_appropriate_context_manager(tenant_id, agent_id, conversation_id)
+    # Verificar que el agente existe y pertenece al tenant
+    supabase = get_supabase_client()
+    agent_data = await supabase.from_("ai.agent_configs") \
+        .select("*") \
+        .eq("agent_id", agent_id) \
+        .eq("tenant_id", tenant_id) \
+        .single() \
+        .execute()
+
+    if not agent_data.data:
+        logger.warning(f"Intento de acceso a agente no existente: {agent_id} por tenant {tenant_id}")
+        raise ServiceError(
+            message=f"Agent with ID {agent_id} not found for this tenant",
+            status_code=404,
+            error_code="agent_not_found"
+        )
     
-    with context_manager:
-        try:
-            # Verificar que el agente existe y pertenece al tenant
-            supabase = get_supabase_client()
-            agent_data = await supabase.from_("ai.agent_configs") \
-                .select("*") \
-                .eq("agent_id", agent_id) \
-                .eq("tenant_id", tenant_id) \
-                .single() \
-                .execute()
+    # Convertir datos a AgentConfig
+    agent_config = AgentConfig(
+        agent_id=agent_data.data["agent_id"],
+        tenant_id=agent_data.data["tenant_id"],
+        name=agent_data.data["name"],
+        description=agent_data.data["description"],
+        agent_type=agent_data.data["agent_type"],
+        llm_model=agent_data.data["llm_model"],
+        tools=agent_data.data["tools"],
+        system_prompt=agent_data.data["system_prompt"],
+        memory_enabled=agent_data.data["memory_enabled"],
+        memory_window=agent_data.data["memory_window"],
+        is_active=agent_data.data["is_active"],
+        metadata=agent_data.data["metadata"]
+    )
+    
+    # Verificar que el agente esté activo
+    if not agent_config.is_active:
+        logger.warning(f"Intento de acceso a agente inactivo: {agent_id}")
+        raise HTTPException(
+            status_code=400,
+            detail="This agent is not active"
+        )
+    
+    # Validar acceso al modelo
+    validate_model_access(tenant_info.subscription_tier, agent_config.llm_model)
+    
+    # Si no hay ID de conversación, crear una nueva conversación
+    if not conversation_id:
+        is_new_conversation = True
+            
+        # Crear conversación en Supabase
+        conversation_result = await supabase.rpc(
+            "create_conversation",
+            {
+                "p_tenant_id": tenant_id,
+                "p_agent_id": agent_id,
+                "p_title": f"Conversación con {agent_config.name}",
+                "p_context": json.dumps(request.context) if request.context else "{}",
+                "p_client_reference_id": request.client_reference_id,
+                "p_metadata": "{}"
+            }
+        ).execute()
         
-            if not agent_data.data:
-                logger.warning(f"Intento de acceso a agente no existente: {agent_id} por tenant {tenant_id}")
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Agent with ID {agent_id} not found for this tenant"
-                )
+        if not conversation_result.data:
+            logger.error(f"Error creando conversación para {context_desc}")
+            raise ServiceError(f"Error creating conversation for {context_desc}")
+        
+        conversation_id = conversation_result.data
+        logger.info(f"Creada nueva conversación {conversation_id} para {context_desc}")
             
-            # Convertir datos a AgentConfig
-            agent_config = AgentConfig(
-                agent_id=agent_data.data["agent_id"],
-                tenant_id=agent_data.data["tenant_id"],
-                name=agent_data.data["name"],
-                description=agent_data.data["description"],
-                agent_type=agent_data.data["agent_type"],
-                llm_model=agent_data.data["llm_model"],
-                tools=agent_data.data["tools"],
-                system_prompt=agent_data.data["system_prompt"],
-                memory_enabled=agent_data.data["memory_enabled"],
-                memory_window=agent_data.data["memory_window"],
-                is_active=agent_data.data["is_active"],
-                metadata=agent_data.data["metadata"]
+        # Actualizar el contexto con la nueva conversación
+        # Ahora necesitamos usar el FullContext ya que tenemos un conversation_id
+        updated_context_manager = get_appropriate_context_manager(tenant_id, agent_id, conversation_id)
+            
+        with updated_context_manager:
+            # Ejecutar el agente
+            agent_response = await execute_agent(
+                tenant_info=tenant_info,
+                agent_config=agent_config,
+                query=request.message,
+                session_id=conversation_id,
+                streaming=False
             )
-            
-            # Verificar que el agente esté activo
-            if not agent_config.is_active:
-                logger.warning(f"Intento de acceso a agente inactivo: {agent_id}")
-                raise HTTPException(
-                    status_code=400,
-                    detail="This agent is not active"
-                )
-            
-            # Validar acceso al modelo
-            validate_model_access(tenant_info.subscription_tier, agent_config.llm_model)
-            
-            # Si no hay ID de conversación, crear una nueva conversación
-            if not conversation_id:
-                is_new_conversation = True
-                
-                # Crear conversación en Supabase
-                conversation_result = await supabase.rpc(
-                    "create_conversation",
-                    {
-                        "p_tenant_id": tenant_id,
-                        "p_agent_id": agent_id,
-                        "p_title": f"Conversación con {agent_config.name}",
-                        "p_context": json.dumps(request.context) if request.context else "{}",
-                        "p_client_reference_id": request.client_reference_id,
-                        "p_metadata": "{}"
-                    }
-                ).execute()
-                
-                if not conversation_result.data:
-                    logger.error(f"Error creando conversación para {context_desc}")
-                    raise ServiceError(f"Error creating conversation for {context_desc}")
-                
-                conversation_id = conversation_result.data
-                logger.info(f"Creada nueva conversación {conversation_id} para {context_desc}")
-                
-                # Actualizar el contexto con la nueva conversación
-                # Ahora necesitamos usar el FullContext ya que tenemos un conversation_id
-                updated_context_manager = get_appropriate_context_manager(tenant_id, agent_id, conversation_id)
-                
-                with updated_context_manager:
-                    # Ejecutar el agente
-                    agent_response = await execute_agent(
-                        tenant_info=tenant_info,
-                        agent_config=agent_config,
-                        query=request.message,
-                        session_id=conversation_id,
-                        streaming=False
-                    )
-            else:
-                # Verificar que la conversación existe y pertenece al tenant y agente
-                conv_check = await supabase.from_("ai.conversations") \
-                    .select("*") \
-                    .eq("conversation_id", conversation_id) \
-                    .eq("tenant_id", tenant_id) \
-                    .eq("agent_id", agent_id) \
-                    .single() \
-                    .execute()
-                
-                if not conv_check.data:
-                    logger.warning(f"Intento de acceso a conversación no autorizada: {conversation_id}")
-                    raise HTTPException(
-                        status_code=404,
-                        detail=f"Conversation {conversation_id} not found or not authorized"
-                    )
-                
-                # Ejecutar el agente con la conversación existente
-                agent_response = await execute_agent(
-                    tenant_info=tenant_info,
-                    agent_config=agent_config,
-                    query=request.message,
-                    session_id=conversation_id,
-                    streaming=False
-                )
-            
-            # Calcular tiempo de procesamiento
-            processing_time = time.time() - start_time
-            
-            # Guardar el mensaje en el historial
-            message_result = await supabase.rpc(
-                "add_chat_message",
-                {
-                    "p_conversation_id": conversation_id,
-                    "p_tenant_id": tenant_id,
-                    "p_agent_id": agent_id,
-                    "p_user_message": request.message,
-                    "p_assistant_message": agent_response["answer"],
-                    "p_thinking": agent_response.get("thinking", ""),
-                    "p_tools_used": json.dumps(agent_response.get("tools_used", [])),
-                    "p_processing_time": processing_time,
-                    "p_metadata": "{}"
-                }
-            ).execute()
-            
-            if message_result.error:
-                logger.warning(f"Error guardando mensajes para {context_desc}: {message_result.error}")
-            
-            # Registrar uso para analíticas y facturación
-            background_tasks.add_task(
-                track_usage,
-                tenant_id=tenant_id,
-                operation="agent_query",
-                metadata={
-                    "agent_id": agent_id,
-                    "conversation_id": conversation_id,
-                    "tokens": agent_response.get("tokens", 0),
-                    "response_time_ms": int(processing_time * 1000),
-                    "llm_model": agent_config.llm_model
-                }
+    else:
+        # Verificar que la conversación existe y pertenece al tenant y agente
+        conv_check = await supabase.from_("ai.conversations") \
+            .select("*") \
+            .eq("conversation_id", conversation_id) \
+            .eq("tenant_id", tenant_id) \
+            .eq("agent_id", agent_id) \
+            .single() \
+            .execute()
+        
+        if not conv_check.data:
+            logger.warning(f"Intento de acceso a conversación no autorizada: {conversation_id}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Conversation {conversation_id} not found or not authorized"
             )
-            
-            # Construir respuesta
-            response = ChatResponse(
-                conversation_id=conversation_id,
-                message=ChatMessage(
-                    role="assistant",
-                    content=agent_response["answer"]
-                ),
-                thinking=agent_response.get("thinking", None),
-                tools_used=agent_response.get("tools_used", None),
-                processing_time=processing_time,
-                sources=agent_response.get("sources", None),
-                context=request.context
-            )
-            
-            return response
-            
-        except HTTPException as e:
-            # Reenviar excepciones HTTP directamente
-            raise e
-        except Exception as e:
-            logger.error(f"Error procesando chat para {context_desc}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error processing chat for {context_desc}: {str(e)}")
+        
+        # Ejecutar el agente con la conversación existente
+        agent_response = await execute_agent(
+            tenant_info=tenant_info,
+            agent_config=agent_config,
+            query=request.message,
+            session_id=conversation_id,
+            streaming=False
+        )
+    
+    # Calcular tiempo de procesamiento
+    processing_time = time.time() - start_time
+    
+    # Guardar el mensaje en el historial
+    message_result = await supabase.rpc(
+        "add_chat_message",
+        {
+            "p_conversation_id": conversation_id,
+            "p_tenant_id": tenant_id,
+            "p_agent_id": agent_id,
+            "p_user_message": request.message,
+            "p_assistant_message": agent_response["answer"],
+            "p_thinking": agent_response.get("thinking", ""),
+            "p_tools_used": json.dumps(agent_response.get("tools_used", [])),
+            "p_processing_time": processing_time,
+            "p_metadata": "{}"
+        }
+    ).execute()
+    
+    if message_result.error:
+        logger.warning(f"Error guardando mensajes para {context_desc}: {message_result.error}")
+    
+    # Registrar uso para analíticas y facturación
+    background_tasks.add_task(
+        track_usage,
+        tenant_id=tenant_id,
+        operation="agent_query",
+        metadata={
+            "agent_id": agent_id,
+            "conversation_id": conversation_id,
+            "tokens": agent_response.get("tokens", 0),
+            "response_time_ms": int(processing_time * 1000),
+            "llm_model": agent_config.llm_model
+        }
+    )
+    
+    # Construir respuesta
+    response = ChatResponse(
+        conversation_id=conversation_id,
+        message=ChatMessage(
+            role="assistant",
+            content=agent_response["answer"]
+        ),
+        thinking=agent_response.get("thinking", None),
+        tools_used=agent_response.get("tools_used", None),
+        processing_time=processing_time,
+        sources=agent_response.get("sources", None),
+        context=request.context
+    )
+    
+    return response
 
 
 # Endpoint para chatear con un agente
 @app.post("/chat", response_model=AgentResponse)
 @handle_service_error(on_error_response={"output": "Error procesando la consulta", "intermediate_steps": []})
+@with_tenant_context
 async def chat(chat_request: ChatRequest, request: Request) -> AgentResponse:
     """
     Endpoint para chat con el agente.
@@ -1202,9 +1027,10 @@ async def chat(chat_request: ChatRequest, request: Request) -> AgentResponse:
     tenant_info = await get_tenant_info(tenant_id)
     
     if not tenant_info:
-        raise HTTPException(
+        raise ServiceError(
+            message=f"Inquilino con ID {tenant_id} no encontrado",
             status_code=401,
-            detail=f"Inquilino con ID {tenant_id} no encontrado"
+            error_code="tenant_not_found"
         )
     
     # Determinar el nivel de contexto apropiado
@@ -1218,42 +1044,69 @@ async def chat(chat_request: ChatRequest, request: Request) -> AgentResponse:
     if conversation_id:
         context_desc += f", conversation '{conversation_id}'"
     
-    # Usar el contexto apropiado según los parámetros disponibles
-    with get_appropriate_context_manager(tenant_id, agent_id, conversation_id):
-        try:
-            # Obtener configuración del agente
-            agent_config = chat_request.agent_config
-            
-            if not agent_config:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Configuración del agente no proporcionada"
-                )
-            
-            # Ejecutar agente
-            response = await execute_agent(
-                tenant_info=tenant_info,
-                agent_config=agent_config,
-                query=chat_request.query,
-                session_id=chat_request.session_id,
-                streaming=False
-            )
-            
-            return AgentResponse(
-                output=response.get("output", ""),
-                intermediate_steps=response.get("intermediate_steps", [])
-            )
-        except HTTPException as e:
-            # Reenviar excepciones HTTP directamente
-            raise e
-        except Exception as e:
-            logger.error(f"Error procesando chat para {context_desc}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error processing chat: {str(e)}")
+    # Obtener configuración del agente
+    agent_config = chat_request.agent_config
+    
+    if not agent_config:
+        raise ServiceError(
+            message="Se requiere una configuración de agente",
+            status_code=400,
+            error_code="missing_agent_config" 
+        )
+    
+    # Crear la configuración del agente
+    try:
+        if isinstance(agent_config, str):
+            agent_config = json.loads(agent_config)
+        
+        # Convertir a modelo pydantic
+        agent_config = AgentConfig(**agent_config)
+    except Exception as e:
+        logger.error(f"Error al analizar la configuración del agente: {e}")
+        raise ServiceError(
+            message=f"Formato de configuración de agente inválido: {str(e)}",
+            status_code=400, 
+            error_code="invalid_agent_config"
+        )
+    
+    # Validar acceso al modelo
+    validate_model_access(tenant_info.subscription_tier, agent_config.llm_model)
+    
+    # Ejecutar el agente con o sin streaming según la solicitud
+    result = await execute_agent(
+        tenant_info=tenant_info,
+        agent_config=agent_config,
+        query=chat_request.message,
+        session_id=chat_request.session_id,
+        streaming=False
+    )
+    
+    # Agregar tracking de uso
+    try:
+        await track_usage(
+            tenant_id=tenant_id,
+            operation="agent_query",
+            metadata={
+                "agent_id": agent_id,
+                "conversation_id": conversation_id,
+                "tokens": result.get("tokens", 0),
+                "llm_model": agent_config.llm_model
+            }
+        )
+    except Exception as e:
+        logger.warning(f"Error al registrar uso: {e}")
+    
+    # Devolver resultado
+    return {
+        "output": result["answer"],
+        "intermediate_steps": result.get("intermediate_steps", [])
+    }
 
 
 # Endpoint para streaming de chat con el agente
 @app.post("/chat/stream")
-@handle_service_error()
+@handle_service_error
+@with_tenant_context
 async def chat_stream(chat_request: ChatRequest, request: Request):
     """
     Endpoint para streaming de chat con el agente.
@@ -1285,43 +1138,28 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
     if conversation_id:
         context_desc += f", conversation '{conversation_id}'"
     
-    # Usar el contexto apropiado según los parámetros disponibles
-    with get_appropriate_context_manager(tenant_id, agent_id, conversation_id):
-        try:
-            # Obtener configuración del agente
-            agent_config = chat_request.agent_config
-            
-            if not agent_config:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Configuración del agente no proporcionada"
-                )
-            
-            # Función para generar eventos SSE
-            async def event_generator():
-                try:
-                    async for event in execute_agent_stream(
-                        tenant_info=tenant_info,
-                        agent_config=agent_config,
-                        query=chat_request.query,
-                        session_id=chat_request.session_id
-                    ):
-                        if request.client.disconnected:
-                            logger.info(f"Cliente desconectado para {context_desc}")
-                            break
-                        
-                        yield event
-                except Exception as e:
-                    logger.error(f"Error en streaming para {context_desc}: {str(e)}", exc_info=True)
-                    yield json.dumps({"error": str(e)})
-            
-            return EventSourceResponse(event_generator())
-        except HTTPException as e:
-            # Reenviar excepciones HTTP directamente
-            raise e
-        except Exception as e:
-            logger.error(f"Error preparando chat stream para {context_desc}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error preparing chat stream: {str(e)}")
+    # Obtener configuración del agente
+    agent_config = chat_request.agent_config
+    
+    if not agent_config:
+        raise HTTPException(
+            status_code=400,
+            detail="Configuración del agente no proporcionada"
+        )
+    
+    # Ejecutar agente
+    response = await execute_agent(
+        tenant_info=tenant_info,
+        agent_config=agent_config,
+        query=chat_request.query,
+        session_id=chat_request.session_id,
+        streaming=False
+    )
+    
+    return AgentResponse(
+        output=response.get("output", ""),
+        intermediate_steps=response.get("intermediate_steps", [])
+    )
 
 
 # Función para obtener información del inquilino
@@ -1372,7 +1210,7 @@ async def get_tenant_info(tenant_id: Optional[str] = None) -> Optional[TenantInf
 # Endpoints para gestión de conversaciones
 
 @app.get("/conversations", response_model=ConversationsListResponse)
-@handle_service_error()
+@handle_service_error
 async def list_conversations(
     limit: int = 50,
     offset: int = 0,
@@ -1462,7 +1300,8 @@ async def list_conversations(
             raise ServiceError(f"Error listing conversations: {str(e)}")
 
 @app.get("/conversations/{conversation_id}", response_model=ConversationResponse)
-@handle_service_error()
+@handle_service_error
+@with_full_context
 async def get_conversation(
     conversation_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
@@ -1482,67 +1321,58 @@ async def get_conversation(
     # Construir una descripción del contexto para mensajes de error más informativos
     context_desc = f"tenant '{tenant_id}', conversation '{conversation_id}'"
     
-    # Inicialmente usamos TenantContext, luego actualizaremos si es necesario
-    with get_appropriate_context_manager(tenant_id):
-        try:
-            supabase = get_supabase_client()
-            
-            # Obtener la conversación verificando que pertenezca al tenant
-            result = await supabase.from_("ai.conversations") \
-                .select("*") \
-                .eq("tenant_id", tenant_id) \
-                .eq("conversation_id", conversation_id) \
-                .single() \
-                .execute()
-            
-            if not result.data:
-                logger.warning(f"Intento de acceso a conversación inexistente: {conversation_id} por tenant {tenant_id}")
-                raise HTTPException(
-                    status_code=404, 
-                    detail=f"Conversation with ID {conversation_id} not found"
-                )
-            
-            conversation = result.data
-            agent_id = conversation["agent_id"]
-            
-            # Actualizar a contexto completo ahora que conocemos agent_id
-            context_desc = f"tenant '{tenant_id}', agent '{agent_id}', conversation '{conversation_id}'"
-            
-            # Usar FullContext ahora que conocemos todos los IDs
-            with get_appropriate_context_manager(tenant_id, agent_id, conversation_id):
-                # Obtener información adicional sobre la conversación
-                # Contar mensajes en la conversación
-                messages_count = await supabase.from_("ai.messages") \
-                    .select("*", count="exact") \
-                    .eq("conversation_id", conversation_id) \
-                    .execute()
-                
-                conversation_count = messages_count.count if messages_count.count is not None else 0
-                
-                # Crear respuesta
-                return ConversationResponse(
-                    conversation_id=conversation["conversation_id"],
-                    tenant_id=conversation["tenant_id"],
-                    agent_id=conversation["agent_id"],
-                    title=conversation["title"],
-                    status=conversation["status"],
-                    context=conversation["context"],
-                    client_reference_id=conversation["client_reference_id"],
-                    metadata=conversation["metadata"],
-                    created_at=conversation["created_at"],
-                    updated_at=conversation["updated_at"],
-                    messages_count=conversation_count
-                )
-                
-        except HTTPException as e:
-            # Reenviar excepciones HTTP directamente
-            raise e
-        except Exception as e:
-            logger.error(f"Error obteniendo conversación para {context_desc}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error getting conversation: {str(e)}")
+    supabase = get_supabase_client()
+    
+    # Obtener la conversación verificando que pertenezca al tenant
+    result = await supabase.from_("ai.conversations") \
+        .select("*") \
+        .eq("tenant_id", tenant_id) \
+        .eq("conversation_id", conversation_id) \
+        .single() \
+        .execute()
+    
+    if not result.data:
+        logger.warning(f"Intento de acceso a conversación no existente: {conversation_id} por tenant {tenant_id}")
+        raise ServiceError(
+            message=f"Conversation with ID {conversation_id} not found",
+            status_code=404,
+            error_code="conversation_not_found"
+        )
+    
+    # Convertir a ConversationResponse
+    conversation = result.data
+    agent_id = conversation["agent_id"]
+    
+    # Actualizar descripción del contexto con toda la información
+    context_desc = f"tenant '{tenant_id}', agent '{agent_id}', conversation '{conversation_id}'"
+    
+    # Obtener información adicional sobre la conversación
+    # Contar mensajes en la conversación
+    messages_count = await supabase.from_("ai.messages") \
+        .select("*", count="exact") \
+        .eq("conversation_id", conversation_id) \
+        .execute()
+    
+    conversation_count = messages_count.count if messages_count.count is not None else 0
+    
+    # Crear respuesta
+    return ConversationResponse(
+        conversation_id=conversation["conversation_id"],
+        tenant_id=conversation["tenant_id"],
+        agent_id=conversation["agent_id"],
+        title=conversation["title"],
+        status=conversation["status"],
+        context=conversation["context"],
+        client_reference_id=conversation["client_reference_id"],
+        metadata=conversation["metadata"],
+        created_at=conversation["created_at"],
+        updated_at=conversation["updated_at"],
+        messages_count=conversation_count
+    )
 
 @app.get("/conversations/{conversation_id}/messages", response_model=MessageListResponse)
-@handle_service_error()
+@handle_service_error
+@with_full_context
 async def get_conversation_messages(
     conversation_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant),
@@ -1566,73 +1396,64 @@ async def get_conversation_messages(
     # Descripción del contexto inicial para mensajes de error
     context_desc = f"tenant '{tenant_id}', conversation '{conversation_id}'"
     
-    # Inicialmente usamos contexto de tenant
-    with get_appropriate_context_manager(tenant_id):
-        try:
-            supabase = get_supabase_client()
-            
-            # Verificar que la conversación pertenece al tenant y obtener agent_id
-            conv_result = await supabase.from_("ai.conversations").select(
-                "conversation_id, agent_id"
-            ).eq("conversation_id", conversation_id).eq("tenant_id", tenant_id).single().execute()
-            
-            if not conv_result.data:
-                logger.warning(f"Conversación {conversation_id} no encontrada para tenant {tenant_id}")
-                raise HTTPException(status_code=404, detail="Conversation not found")
-            
-            agent_id = conv_result.data["agent_id"]
-            
-            # Actualizar descripción del contexto con toda la información
-            context_desc = f"tenant '{tenant_id}', agent '{agent_id}', conversation '{conversation_id}'"
-            
-            # Usar contexto completo para operaciones específicas de la conversación
-            with get_appropriate_context_manager(tenant_id, agent_id, conversation_id):
-                # Obtener mensajes de la conversación con paginación
-                messages_query = await supabase.from_("ai.messages") \
-                    .select("*", count="exact") \
-                    .eq("conversation_id", conversation_id) \
-                    .order("created_at").range(offset, offset + limit - 1).execute()
-                
-                # Procesar resultados
-                if not messages_query.data:
-                    messages = []
-                    total = 0
-                else:
-                    messages_data = messages_query.data
-                    total = messages_query.count if messages_query.count is not None else len(messages_data)
-                    
-                    # Convertir a objetos ChatMessage
-                    messages = []
-                    for msg in messages_data:
-                        chat_message = ChatMessage(
-                            role=msg["role"],
-                            content=msg["content"]
-                        )
-                        
-                        # Añadir metadatos si existen
-                        if msg.get("metadata"):
-                            chat_message.metadata = msg["metadata"]
-                        
-                        messages.append(chat_message)
-                
-                # Construir y devolver respuesta
-                return MessageListResponse(
-                    conversation_id=conversation_id,
-                    messages=messages,
-                    total=total,
-                    limit=limit,
-                    offset=offset
-                )
-                
-        except HTTPException as e:
-            # Reenviar excepciones HTTP directamente
-            raise e
-        except Exception as e:
-            logger.error(f"Error obteniendo mensajes para {context_desc}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error getting conversation messages: {str(e)}")
+    supabase = get_supabase_client()
+    
+    # Verificar que la conversación pertenezca al tenant y obtener agent_id
+    conv_check = await supabase.from_("ai.conversations").select(
+        "conversation_id, agent_id"
+    ).eq("conversation_id", conversation_id).eq("tenant_id", tenant_id).single().execute()
+    
+    if not conv_check.data:
+        logger.warning(f"Conversación {conversation_id} no encontrada para tenant {tenant_id}")
+        raise ServiceError(
+            message="Conversation not found",
+            status_code=404,
+            error_code="conversation_not_found"
+        )
+    
+    agent_id = conv_check.data["agent_id"]
+    
+    # Actualizar descripción del contexto con toda la información
+    context_desc = f"tenant '{tenant_id}', agent '{agent_id}', conversation '{conversation_id}'"
+    
+    # Obtener mensajes de la conversación con paginación
+    messages_query = await supabase.from_("ai.messages") \
+        .select("*", count="exact") \
+        .eq("conversation_id", conversation_id) \
+        .order("created_at", options={"ascending": False}) \
+        .range(offset, offset + limit - 1) \
+        .execute()
+    
+    total_count = messages_query.count if messages_query.count is not None else 0
+    
+    # Transformar a modelo de respuesta
+    messages = []
+    for msg in messages_query.data:
+        messages.append(
+            MessageResponse(
+                message_id=msg["message_id"],
+                conversation_id=msg["conversation_id"],
+                user_message=msg["user_message"],
+                assistant_message=msg["assistant_message"],
+                thinking=msg["thinking"],
+                tools_used=msg["tools_used"],
+                processing_time=msg["processing_time"],
+                metadata=msg["metadata"],
+                created_at=msg["created_at"]
+            )
+        )
+    
+    return MessageListResponse(
+        messages=messages,
+        count=len(messages),
+        total=total_count,
+        limit=limit,
+        offset=offset
+    )
 
 @app.post("/conversations", response_model=ConversationResponse)
-@handle_service_error()
+@handle_service_error
+@with_agent_context
 async def create_conversation(
     request: ConversationCreate,
     tenant_info: TenantInfo = Depends(verify_tenant)
@@ -1653,82 +1474,72 @@ async def create_conversation(
     # Construir una descripción del contexto para mensajes de error
     context_desc = f"tenant '{tenant_id}', agent '{agent_id}'"
     
-    # Usar el contexto adecuado para esta operación (AgentContext)
-    # No usamos FullContext porque estamos creando la conversación, no tenemos conversation_id aún
-    with get_appropriate_context_manager(tenant_id, agent_id):
-        try:
-            supabase = get_supabase_client()
-            
-            # Verificar que el agente existe y pertenece al tenant
-            agent_check = await supabase.from_("ai.agent_configs") \
-                .select("*") \
-                .eq("tenant_id", tenant_id) \
-                .eq("agent_id", agent_id) \
-                .single() \
-                .execute()
-            
-            if not agent_check.data:
-                logger.warning(f"Intento de crear conversación para agente inexistente: {agent_id}")
-                raise HTTPException(
-                    status_code=404, 
-                    detail=f"Agent with ID {agent_id} not found"
-                )
-            
-            # Generar ID para la nueva conversación
-            conversation_id = str(uuid.uuid4())
-            
-            # Preparar datos de la conversación
-            conversation_data = {
-                "conversation_id": conversation_id,
-                "tenant_id": tenant_id,
-                "agent_id": agent_id,
-                "title": request.title,
-                "status": request.status or "active",
-                "context": request.context or {},
-                "client_reference_id": request.client_reference_id,
-                "metadata": request.metadata or {}
-            }
-            
-            # Crear conversación en la base de datos
-            result = await supabase.from_("ai.conversations") \
-                .insert(conversation_data) \
-                .single() \
-                .execute()
-            
-            if result.error:
-                logger.error(f"Error creando conversación para {context_desc}: {result.error}")
-                raise ServiceError(f"Error creating conversation: {result.error}")
-            
-            created_conversation = result.data
-            
-            # Actualizar contexto_desc con el nuevo conversation_id
-            context_desc = f"tenant '{tenant_id}', agent '{agent_id}', conversation '{conversation_id}'"
-            logger.info(f"Conversación creada exitosamente: {context_desc}")
-            
-            # Crear respuesta
-            return ConversationResponse(
-                conversation_id=created_conversation["conversation_id"],
-                tenant_id=created_conversation["tenant_id"],
-                agent_id=created_conversation["agent_id"],
-                title=created_conversation["title"],
-                status=created_conversation["status"],
-                context=created_conversation["context"],
-                client_reference_id=created_conversation["client_reference_id"],
-                metadata=created_conversation["metadata"],
-                created_at=created_conversation["created_at"],
-                updated_at=created_conversation["updated_at"],
-                messages_count=0
-            )
-            
-        except HTTPException as e:
-            # Reenviar excepciones HTTP directamente
-            raise e
-        except Exception as e:
-            logger.error(f"Error creando conversación para {context_desc}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error creating conversation: {str(e)}")
+    supabase = get_supabase_client()
+    
+    # Verificar que el agente existe y pertenece al tenant
+    agent_check = await supabase.from_("ai.agent_configs") \
+        .select("*") \
+        .eq("tenant_id", tenant_id) \
+        .eq("agent_id", agent_id) \
+        .single() \
+        .execute()
+    
+    if not agent_check.data:
+        logger.warning(f"Intento de crear conversación para agente inexistente: {agent_id}")
+        raise ServiceError(
+            message=f"Agent with ID {agent_id} not found",
+            status_code=404, 
+            error_code="agent_not_found"
+        )
+    
+    # Generar ID para la nueva conversación
+    conversation_id = str(uuid.uuid4())
+    
+    # Preparar datos de la conversación
+    conversation_data = {
+        "conversation_id": conversation_id,
+        "tenant_id": tenant_id,
+        "agent_id": agent_id,
+        "title": request.title,
+        "status": request.status or "active",
+        "context": request.context or {},
+        "client_reference_id": request.client_reference_id,
+        "metadata": request.metadata or {}
+    }
+    
+    # Crear conversación en la base de datos
+    result = await supabase.from_("ai.conversations") \
+        .insert(conversation_data) \
+        .single() \
+        .execute()
+    
+    if result.error:
+        logger.error(f"Error creando conversación para {context_desc}: {result.error}")
+        raise ServiceError(f"Error creating conversation: {result.error}")
+    
+    created_conversation = result.data
+    
+    # Actualizar contexto_desc con el nuevo conversation_id
+    context_desc = f"tenant '{tenant_id}', agent '{agent_id}', conversation '{conversation_id}'"
+    logger.info(f"Conversación creada exitosamente: {context_desc}")
+    
+    # Crear respuesta
+    return ConversationResponse(
+        conversation_id=created_conversation["conversation_id"],
+        tenant_id=created_conversation["tenant_id"],
+        agent_id=created_conversation["agent_id"],
+        title=created_conversation["title"],
+        status=created_conversation["status"],
+        context=created_conversation["context"],
+        client_reference_id=created_conversation["client_reference_id"],
+        metadata=created_conversation["metadata"],
+        created_at=created_conversation["created_at"],
+        updated_at=created_conversation["updated_at"]
+    )
 
 @app.patch("/conversations/{conversation_id}", response_model=ConversationResponse)
-@handle_service_error()
+@handle_service_error
+@with_full_context
 async def update_conversation(
     conversation_id: str,
     update_data: Dict[str, Any],
@@ -1757,138 +1568,121 @@ async def update_conversation(
             detail="No valid fields to update. Allowed fields: title, status, context, client_reference_id, metadata"
         )
     
-    # Usar el contexto del tenant para toda la operación
-    with get_appropriate_context_manager(tenant_id):
-        try:
-            supabase = get_supabase_client()
-            
-            # Verificar que la conversación existe y pertenece al tenant
-            conv_result = await supabase.from_("ai.conversations").select(
-                "*"
-            ).eq("conversation_id", conversation_id).eq("tenant_id", tenant_id).single().execute()
-            
-            if not conv_result.data:
-                logger.warning(f"Conversación {conversation_id} no encontrada para tenant {tenant_id}")
-                raise HTTPException(status_code=404, detail="Conversation not found")
-            
-            # Obtener el ID del agente para usar el contexto completo
-            agent_id = conv_result.data["agent_id"]
-            
-            # Actualizar descripción del contexto con toda la información
-            context_desc = f"tenant '{tenant_id}', agent '{agent_id}', conversation '{conversation_id}'"
-            
-            # Usar el contexto completo para operaciones específicas de la conversación
-            with get_appropriate_context_manager(tenant_id, agent_id, conversation_id):
-                # Preparar datos para actualizar
-                if "context" in update_fields and isinstance(update_fields["context"], dict):
-                    update_fields["context"] = json.dumps(update_fields["context"])
-                
-                if "metadata" in update_fields and isinstance(update_fields["metadata"], dict):
-                    update_fields["metadata"] = json.dumps(update_fields["metadata"])
-                
-                # Actualizar conversación
-                update_result = await supabase.from_("ai.conversations").update(
-                    update_fields
-                ).eq("conversation_id", conversation_id).execute()
-                
-                if not update_result.data:
-                    raise ServiceError("Error updating conversation")
-                
-                # Obtener detalles actualizados
-                result = await supabase.from_("ai.conversations").select(
-                    "*"
-                ).eq("conversation_id", conversation_id).single().execute()
-                
-                conv = result.data
-                
-                # Obtener conteo de mensajes
-                count_result = await supabase.from_("ai.chat_history").select(
-                    "*", count="exact"
-                ).eq("conversation_id", conversation_id).execute()
-                
-                messages_count = count_result.count if count_result.count is not None else 0
-                
-                return ConversationResponse(
-                    conversation_id=conv["conversation_id"],
-                    tenant_id=conv["tenant_id"],
-                    agent_id=conv["agent_id"],
-                    title=conv["title"],
-                    status=conv["status"],
-                    context=conv["context"],
-                    client_reference_id=conv["client_reference_id"],
-                    metadata=conv["metadata"],
-                    created_at=conv["created_at"],
-                    updated_at=conv["updated_at"],
-                    last_message_at=conv["last_message_at"],
-                    messages_count=messages_count
-                )
-                
-        except HTTPException:
-            # Propagar errores HTTP
-            raise
-        except Exception as e:
-            logger.error(f"Error al actualizar conversación {conversation_id} para tenant {tenant_id}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error updating conversation for {context_desc}: {str(e)}")
+    supabase = get_supabase_client()
+    
+    # Verificar que la conversación existe y pertenece al tenant
+    conv_result = await supabase.from_("ai.conversations").select(
+        "*"
+    ).eq("conversation_id", conversation_id).eq("tenant_id", tenant_id).single().execute()
+    
+    if not conv_result.data:
+        logger.warning(f"Conversación {conversation_id} no encontrada para tenant {tenant_id}")
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    
+    # Obtener el ID del agente para usar el contexto completo
+    agent_id = conv_result.data["agent_id"]
+    
+    # Actualizar descripción del contexto con toda la información
+    context_desc = f"tenant '{tenant_id}', agent '{agent_id}', conversation '{conversation_id}'"
+    
+    # Preparar datos para actualizar
+    if "context" in update_fields and isinstance(update_fields["context"], dict):
+        update_fields["context"] = json.dumps(update_fields["context"])
+    
+    if "metadata" in update_fields and isinstance(update_fields["metadata"], dict):
+        update_fields["metadata"] = json.dumps(update_fields["metadata"])
+    
+    # Actualizar conversación
+    update_result = await supabase.from_("ai.conversations").update(
+        update_fields
+    ).eq("conversation_id", conversation_id).execute()
+    
+    if not update_result.data:
+        raise ServiceError("Error updating conversation")
+    
+    # Obtener detalles actualizados
+    result = await supabase.from_("ai.conversations").select(
+        "*"
+    ).eq("conversation_id", conversation_id).single().execute()
+    
+    conv = result.data
+    
+    # Obtener conteo de mensajes
+    count_result = await supabase.from_("ai.chat_history").select(
+        "*", count="exact"
+    ).eq("conversation_id", conversation_id).execute()
+    
+    messages_count = count_result.count if count_result.count is not None else 0
+    
+    return ConversationResponse(
+        conversation_id=conv["conversation_id"],
+        tenant_id=conv["tenant_id"],
+        agent_id=conv["agent_id"],
+        title=conv["title"],
+        status=conv["status"],
+        context=conv["context"],
+        client_reference_id=conv["client_reference_id"],
+        metadata=conv["metadata"],
+        created_at=conv["created_at"],
+        updated_at=conv["updated_at"],
+        last_message_at=conv["last_message_at"],
+        messages_count=messages_count
+    )
 
 @app.delete("/conversations/{conversation_id}")
-@handle_service_error()
+@handle_service_error
+@with_full_context
 async def delete_conversation(
     conversation_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
-):
+) -> JSONResponse:
     """
-    Elimina una conversación y todos sus mensajes.
+    Elimina una conversación y todos sus mensajes asociados.
     
     Args:
         conversation_id: ID de la conversación
         tenant_info: Información del tenant (inyectada por Depends)
         
     Returns:
-        JSONResponse: Confirmación de eliminación
+        JSONResponse: Confirmación de éxito
     """
     tenant_id = tenant_info.tenant_id
     
     # Descripción inicial del contexto para mensajes de error
     context_desc = f"tenant '{tenant_id}', conversation '{conversation_id}'"
     
-    # Inicialmente usamos el contexto de tenant
-    with get_appropriate_context_manager(tenant_id):
-        try:
-            supabase = get_supabase_client()
-            
-            # Verificar que la conversación existe y pertenece al tenant
-            conv_result = await supabase.from_("ai.conversations").select(
-                "conversation_id, agent_id"
-            ).eq("conversation_id", conversation_id).eq("tenant_id", tenant_id).single().execute()
-            
-            if not conv_result.data:
-                logger.warning(f"Conversación {conversation_id} no encontrada para tenant {tenant_id}")
-                raise HTTPException(status_code=404, detail="Conversation not found")
-            
-            agent_id = conv_result.data["agent_id"]
-            
-            # Eliminar mensajes primero
-            await supabase.from_("ai.messages").delete().eq(
-                "conversation_id", conversation_id
-            ).execute()
-            
-            # Luego eliminar la conversación
-            await supabase.from_("ai.conversations").delete().eq(
-                "conversation_id", conversation_id
-            ).execute()
-            
-            # Invalidar caché
-            from common.cache import invalidate_conversation_cache
-            await invalidate_conversation_cache(tenant_id, agent_id, conversation_id)
-            
-            return JSONResponse(
-                status_code=200,
-                content={"message": f"Conversation {conversation_id} deleted successfully"}
-            )
-            
-        except HTTPException:
-            # Propagar errores HTTP
-            raise
-        except Exception as e:
-            logger.error(f"Error al eliminar conversación {conversation_id} para tenant {tenant_id}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error deleting conversation for {context_desc}: {str(e)}")
+    supabase = get_supabase_client()
+    
+    # Verificar que la conversación existe y pertenece al tenant
+    conv_result = await supabase.from_("ai.conversations").select(
+        "conversation_id, agent_id"
+    ).eq("conversation_id", conversation_id).eq("tenant_id", tenant_id).single().execute()
+    
+    if not conv_result.data:
+        logger.warning(f"Conversación {conversation_id} no encontrada para tenant {tenant_id}")
+        raise ServiceError(
+            message="Conversation not found",
+            status_code=404,
+            error_code="conversation_not_found"
+        )
+    
+    agent_id = conv_result.data["agent_id"]
+    
+    # Eliminar mensajes primero
+    await supabase.from_("ai.messages").delete().eq(
+        "conversation_id", conversation_id
+    ).execute()
+    
+    # Luego eliminar la conversación
+    await supabase.from_("ai.conversations").delete().eq(
+        "conversation_id", conversation_id
+    ).execute()
+    
+    # Invalidar caché
+    from common.cache import invalidate_conversation_cache
+    await invalidate_conversation_cache(tenant_id, agent_id, conversation_id)
+    
+    return JSONResponse(
+        status_code=200,
+        content={"message": f"Conversation {conversation_id} deleted successfully"}
+    )

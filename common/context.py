@@ -299,3 +299,101 @@ def with_full_context(func):
         )
     
     return wrapper
+
+
+class AgentContext:
+    """
+    Administrador de contexto para establecer ID de tenant y agente
+    durante la ejecución de un bloque de código.
+    
+    Ejemplo:
+        ```python
+        with AgentContext(tenant_id="tenant123", agent_id="agent456"):
+            # Código que ejecutará en el contexto del tenant123 y agent456
+            result = await async_function()
+        ```
+    """
+    
+    def __init__(self, tenant_id: str, agent_id: Optional[str]):
+        self.tenant_id = tenant_id
+        self.agent_id = agent_id
+        self.tokens = ContextTokens()
+    
+    def __enter__(self):
+        # Guardar tokens para restaurar después
+        tenant_token = set_current_tenant_id(self.tenant_id)
+        agent_token = set_current_agent_id(self.agent_id) if self.agent_id is not None else None
+        
+        self.tokens = ContextTokens(
+            tenant_token=tenant_token,
+            agent_token=agent_token
+        )
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Restaurar contexto previo
+        if self.tokens.agent_token:
+            reset_agent_context(self.tokens.agent_token)
+        if self.tokens.tenant_token:
+            reset_tenant_context(self.tokens.tenant_token)
+
+
+def with_agent_context(func):
+    """
+    Decorador para propagar el ID del tenant y agente a través de funciones asíncronas.
+    
+    Ejemplo:
+        ```python
+        @with_agent_context
+        async def my_async_function(arg1, arg2):
+            # tenant_id y agent_id se propagan automáticamente
+            # El contexto es accesible con get_current_tenant_id() y get_current_agent_id()
+            pass
+        ```
+    """
+    async def wrapper(*args, **kwargs):
+        # Capturar el contexto actual
+        tenant_id = get_current_tenant_id()
+        agent_id = get_current_agent_id()
+        
+        # Establecer tokens para cada nivel
+        tokens = ContextTokens(
+            tenant_token=set_current_tenant_id(tenant_id),
+            agent_token=set_current_agent_id(agent_id)
+        )
+        
+        try:
+            return await func(*args, **kwargs)
+        finally:
+            # Restaurar contexto previo
+            if tokens.agent_token:
+                reset_agent_context(tokens.agent_token)
+            if tokens.tenant_token:
+                reset_tenant_context(tokens.tenant_token)
+    
+    return wrapper
+
+
+def get_appropriate_context_manager(tenant_id: str, agent_id: Optional[str] = None, conversation_id: Optional[str] = None):
+    """
+    Retorna el administrador de contexto apropiado según los IDs proporcionados.
+    
+    Esta función centralizada selecciona el nivel correcto de contexto:
+    - FullContext si se proporcionan tenant_id, agent_id y conversation_id
+    - AgentContext si se proporcionan tenant_id y agent_id
+    - TenantContext si solo se proporciona tenant_id
+    
+    Args:
+        tenant_id: ID del tenant (obligatorio)
+        agent_id: ID del agente (opcional)
+        conversation_id: ID de la conversación (opcional)
+        
+    Returns:
+        El administrador de contexto apropiado (TenantContext, AgentContext o FullContext)
+    """
+    if conversation_id and agent_id:
+        return FullContext(tenant_id, agent_id, conversation_id)
+    elif agent_id:
+        return AgentContext(tenant_id, agent_id)
+    else:
+        return TenantContext(tenant_id)

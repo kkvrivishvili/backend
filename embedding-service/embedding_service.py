@@ -9,7 +9,7 @@ import uuid
 import logging
 from typing import List, Dict, Any, Optional
 
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 # LlamaIndex imports - versión monolítica (actualizada para 0.12.26)
@@ -250,9 +250,10 @@ async def generate_embeddings(
     # Check metadata validity
     metadata = request.metadata or []
     if metadata and len(metadata) != len(request.texts):
-        raise HTTPException(
+        raise ServiceError(
+            message="Si se proporciona metadata, debe tener la misma longitud que texts",
             status_code=400,
-            detail="If metadata is provided, it must have the same length as texts"
+            error_code="INVALID_METADATA"
         )
     
     # Pad metadata if needed
@@ -453,52 +454,42 @@ async def get_service_status() -> HealthResponse:
     Returns:
         HealthResponse: Estado del servicio
     """
+    # Para el health check no necesitamos un contexto específico
+    # Check if Redis is available
+    redis_status = "available" if redis_client and redis_client.ping() else "unavailable"
+    
+    # Check if Supabase is available
+    supabase_status = "available"
     try:
-        # Para el health check no necesitamos un contexto específico
-        # Check if Redis is available
-        redis_status = "available" if redis_client and redis_client.ping() else "unavailable"
-        
-        # Check if Supabase is available
-        supabase_status = "available"
-        try:
-            from common.supabase import get_supabase_client
-            supabase = get_supabase_client()
-            supabase.table("tenants").select("tenant_id").limit(1).execute()
-        except Exception:
-            supabase_status = "unavailable"
-        
-        # Check if OpenAI is available
-        openai_status = "available"
-        try:
-            # Quick test - generate a simple embedding
-            embed_model = OpenAIEmbedding(
-                model_name=settings.default_embedding_model,
-                api_key=settings.openai_api_key
-            )
-            test_result = embed_model._get_text_embedding("test")
-            if not test_result or len(test_result) < 10:
-                openai_status = "degraded"
-        except Exception:
-            openai_status = "unavailable"
-        
-        return HealthResponse(
-            status="healthy" if all(s == "available" for s in [redis_status, supabase_status, openai_status]) else "degraded",
-            components={
-                "redis": redis_status,
-                "supabase": supabase_status,
-                "openai": openai_status
-            },
-            version=settings.service_version
+        from common.supabase import get_supabase_client
+        supabase = get_supabase_client()
+        supabase.table("tenants").select("tenant_id").limit(1).execute()
+    except Exception:
+        supabase_status = "unavailable"
+    
+    # Check if OpenAI is available
+    openai_status = "available"
+    try:
+        # Quick test - generate a simple embedding
+        embed_model = OpenAIEmbedding(
+            model_name=settings.default_embedding_model,
+            api_key=settings.openai_api_key
         )
-    except Exception as e:
-        logger.error(f"Error in healthcheck: {str(e)}")
-        return HealthResponse(
-            status="error",
-            components={
-                "error": str(e)
-            },
-            version=settings.service_version
-        )
+        test_result = embed_model._get_text_embedding("test")
+        if not test_result or len(test_result) < 10:
+            openai_status = "degraded"
+    except Exception:
+        openai_status = "unavailable"
+    
+    return HealthResponse(
+        status="healthy" if all(s == "available" for s in [redis_status, supabase_status, openai_status]) else "degraded",
+        components={
+            "redis": redis_status,
+            "supabase": supabase_status,
+            "openai": openai_status
+        },
+        version=settings.service_version
+    )
 
 
 @app.get("/cache/stats", response_model=Dict[str, Any])

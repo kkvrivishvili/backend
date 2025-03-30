@@ -116,65 +116,10 @@ def setup_error_handling(app: FastAPI) -> None:
             raise
 
 
-# Decorator with tenacity for retries
-def handle_service_error(
-    max_attempts: int = 3,
-    min_wait_seconds: int = 1,
-    max_wait_seconds: int = 10,
-    on_error_response=None
-):
+# Decorador para manejar errores del servicio
+def handle_service_error(on_error_response=None):
     """
-    Decorator para manejar errores en funciones de servicio con reintentos.
-    
-    Args:
-        max_attempts: Número máximo de intentos
-        min_wait_seconds: Tiempo mínimo de espera entre intentos
-        max_wait_seconds: Tiempo máximo de espera entre intentos
-        on_error_response: Respuesta a devolver en caso de error
-    """
-    def decorator(func):
-        @retry(
-            stop=stop_after_attempt(max_attempts),
-            wait=wait_exponential(multiplier=1, min=min_wait_seconds, max=max_wait_seconds),
-            retry=retry_if_exception_type((ConnectionError, TimeoutError))
-        )
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            try:
-                return await func(*args, **kwargs)
-            except (ConnectionError, TimeoutError) as e:
-                # Estas excepciones serán retentadas por tenacity
-                logger.warning(f"Temporary error in {func.__name__}: {str(e)}. Retrying...")
-                raise
-            except Exception as e:
-                logger.error(f"Error in {func.__name__}: {str(e)}")
-                logger.error(traceback.format_exc())
-                
-                # Si es un ServiceError, dejarlo pasar
-                if isinstance(e, ServiceError):
-                    if on_error_response:
-                        return on_error_response
-                    raise
-                
-                # Convertir a ServiceError para manejo consistente
-                error = ServiceError(
-                    message=f"Error in service operation: {str(e)}",
-                    status_code=500,
-                    error_code="service_operation_failed",
-                    details={"operation": func.__name__}
-                )
-                
-                if on_error_response:
-                    return on_error_response
-                raise error
-        return wrapper
-    return decorator
-
-
-# Versión simple sin reintentos, para compatibilidad con código existente
-def handle_service_error_simple(on_error_response=None):
-    """
-    Decorador simplificado para manejar errores en servicios.
+    Decorador para manejar errores en servicios.
     Captura excepciones y devuelve una respuesta de error estandarizada.
     
     Args:
@@ -189,39 +134,48 @@ def handle_service_error_simple(on_error_response=None):
             try:
                 return await func(*args, **kwargs)
             except Exception as e:
-                context_info = ""
-                try:
-                    tenant_id = get_current_tenant_id()
-                    if tenant_id:
-                        context_info = f" [Tenant: {tenant_id}]"
-                except:
-                    pass
-                    
-                logger.error(f"Error en {func.__name__}{context_info}: {str(e)}")
+                logger.error(f"Error in {func.__name__}: {str(e)}")
+                logger.error(traceback.format_exc())
                 
-                # Si es un error de HTTP, obtenemos su código de estado
+                # Manejo específico para HTTPException de FastAPI
                 if isinstance(e, HTTPException):
-                    status_code = e.status_code
-                    detail = str(e.detail)
-                elif isinstance(e, ServiceError):
-                    status_code = 500
-                    detail = str(e)
-                else:
-                    status_code = 500
-                    detail = f"Error interno del servidor: {str(e)}"
+                    raise
                 
+                # Crear respuesta de error para ServiceError con su código de estado
+                if isinstance(e, ServiceError):
+                    error_response = create_error_response(
+                        message=e.message,
+                        status_code=e.status_code,
+                        error_detail=e.details
+                    )
+                    raise HTTPException(
+                        status_code=e.status_code,
+                        detail=error_response
+                    )
+                
+                # Para cualquier otra excepción, usar respuesta genérica
                 if on_error_response:
-                    return on_error_response
+                    return JSONResponse(
+                        status_code=500,
+                        content=on_error_response
+                    )
                 
-                # Usar la función para crear respuesta estandarizada
-                return create_error_response(
-                    message=detail,
-                    status_code=status_code,
-                    error_detail={"function": func.__name__}
+                # Si no hay respuesta personalizada, crear una estándar
+                error_response = create_error_response(
+                    message=f"Error interno del servidor: {str(e)}",
+                    status_code=500
                 )
                 
+                raise HTTPException(
+                    status_code=500,
+                    detail=error_response
+                )
         return wrapper
     return decorator
+
+
+# Alias para mantener compatibilidad con el código existente
+handle_service_error_simple = handle_service_error
 
 
 def sanitize_content(content: str) -> str:
