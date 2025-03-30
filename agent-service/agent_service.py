@@ -42,7 +42,7 @@ from common.ollama import get_llm_model, is_using_ollama
 from common.context import (
     TenantContext, FullContext, get_current_tenant_id, get_current_agent_id, 
     get_current_conversation_id, with_tenant_context, with_full_context, 
-    AgentContext, get_appropriate_context_manager
+    AgentContext,
 )
 
 # Configuración
@@ -546,7 +546,8 @@ async def get_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tena
     Returns:
         AgentResponse: Datos del agente
     """
-    tenant_id = tenant_info.tenant_id
+    tenant_id = get_current_tenant_id()
+    agent_id = get_current_agent_id()
     
     supabase = get_supabase_client()
     
@@ -602,7 +603,7 @@ async def list_agents(tenant_info: TenantInfo = Depends(verify_tenant)) -> List[
     Returns:
         List[AgentResponse]: Lista de agentes
     """
-    tenant_id = tenant_info.tenant_id
+    tenant_id = get_current_tenant_id()
     
     supabase = get_supabase_client()
     
@@ -659,7 +660,8 @@ async def update_agent(
     Returns:
         AgentResponse: Datos del agente actualizado
     """
-    tenant_id = tenant_info.tenant_id
+    tenant_id = get_current_tenant_id()
+    agent_id = get_current_agent_id()
     
     supabase = get_supabase_client()
     
@@ -743,7 +745,8 @@ async def delete_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_t
         agent_id: ID del agente
         tenant_info: Información del tenant (inyectada por Depends)
     """
-    tenant_id = tenant_info.tenant_id
+    tenant_id = get_current_tenant_id()
+    agent_id = get_current_agent_id()
     
     # Verificar que el agente exista y pertenezca al tenant
     supabase = get_supabase_client()
@@ -803,7 +806,7 @@ async def chat_with_agent(
     # Validar cuotas del tenant
     await check_tenant_quotas(tenant_info)
     
-    tenant_id = tenant_info.tenant_id
+    tenant_id = get_current_tenant_id()
     conversation_id = request.conversation_id
     is_new_conversation = False
     
@@ -983,7 +986,7 @@ async def chat(chat_request: ChatRequest, request: Request) -> AgentResponse:
     Returns:
         Respuesta del agente
     """
-    tenant_id = chat_request.tenant_id
+    tenant_id = get_current_tenant_id()
     # El tenant_id debe obtenerse del contexto aquí, no necesitamos pasarlo explícitamente
     tenant_info = await get_tenant_info()
     
@@ -1072,7 +1075,7 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
     Returns:
         Flujo de eventos SSE con la respuesta del agente
     """
-    tenant_id = chat_request.tenant_id
+    tenant_id = get_current_tenant_id()
     # El tenant_id debe obtenerse del contexto, no necesitamos pasarlo explícitamente
     tenant_info = await get_tenant_info()
     
@@ -1178,7 +1181,7 @@ async def list_conversations(
     Returns:
         ConversationsListResponse: Lista de conversaciones
     """
-    tenant_id = tenant_info.tenant_id
+    tenant_id = get_current_tenant_id()
     
     # El contexto ya está establecido por el decorador @with_tenant_context
     supabase = get_supabase_client()
@@ -1249,7 +1252,7 @@ async def get_conversation(
     Returns:
         ConversationResponse: Detalles de la conversación
     """
-    tenant_id = tenant_info.tenant_id
+    tenant_id = get_current_tenant_id()
     
     supabase = get_supabase_client()
     
@@ -1318,7 +1321,7 @@ async def get_conversation_messages(
     Returns:
         MessageListResponse: Lista de mensajes
     """
-    tenant_id = tenant_info.tenant_id
+    tenant_id = get_current_tenant_id()
     
     supabase = get_supabase_client()
     
@@ -1387,8 +1390,8 @@ async def create_conversation(
     Returns:
         ConversationResponse: Detalles de la conversación creada
     """
-    tenant_id = tenant_info.tenant_id
-    agent_id = request.agent_id
+    tenant_id = get_current_tenant_id()
+    agent_id = get_current_agent_id()
     
     supabase = get_supabase_client()
     
@@ -1468,19 +1471,9 @@ async def update_conversation(
     Returns:
         ConversationResponse: Detalles de la conversación actualizada
     """
-    tenant_id = tenant_info.tenant_id
+    tenant_id = get_current_tenant_id()
     
-    # Limitar los campos que se pueden actualizar
-    allowed_fields = ["title", "status", "context", "client_reference_id", "metadata"]
-    update_fields = {k: v for k, v in update_data.items() if k in allowed_fields}
-    
-    if not update_fields:
-        raise ServiceError(
-            message="No valid fields to update. Allowed fields: title, status, context, client_reference_id, metadata",
-            status_code=400,
-            error_code="no_valid_fields"
-        )
-    
+    # El contexto ya está establecido por el decorador @with_full_context
     supabase = get_supabase_client()
     
     # Verificar que la conversación existe y pertenece al tenant
@@ -1494,6 +1487,17 @@ async def update_conversation(
             message="Conversation not found",
             status_code=404,
             error_code="conversation_not_found"
+        )
+    
+    # Limitar los campos que se pueden actualizar
+    allowed_fields = ["title", "status", "context", "client_reference_id", "metadata"]
+    update_fields = {k: v for k, v in update_data.items() if k in allowed_fields}
+    
+    if not update_fields:
+        raise ServiceError(
+            message="No valid fields to update. Allowed fields: title, status, context, client_reference_id, metadata",
+            status_code=400,
+            error_code="no_valid_fields"
         )
     
     # Preparar datos para actualizar

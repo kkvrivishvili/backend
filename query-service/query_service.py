@@ -30,10 +30,10 @@ from common.ollama import get_llm_model
 from common.config import get_settings
 from common.logging import init_logging
 from common.context import (
-    TenantContext, AgentContext, ConversationContext, FullContext,
+    TenantContext, AgentContext, FullContext,
     get_current_tenant_id, get_current_agent_id, get_current_conversation_id,
-    with_tenant_context, with_agent_context, with_conversation_context, with_full_context,
-    get_appropriate_context_manager
+    with_tenant_context, with_full_context,
+    
 )
 from common.models import (
     TenantInfo, QueryRequest, QueryResponse, QueryContextItem,

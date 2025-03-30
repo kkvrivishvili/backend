@@ -33,8 +33,8 @@ from common.utils import prepare_service_request
 from common.context import (
     TenantContext, AgentContext, FullContext, 
     get_current_tenant_id, get_current_agent_id, get_current_conversation_id,
-    with_tenant_context, with_agent_context, with_full_context, 
-    get_appropriate_context_manager
+    with_tenant_context, with_full_context, 
+    
 )
 
 # Inicializar logging usando la configuración centralizada

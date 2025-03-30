@@ -21,10 +21,10 @@ from common.ollama import get_embedding_model
 
 # Importar nuestras clases de contexto
 from common.context import (
-    TenantContext, AgentContext, ConversationContext, FullContext,
+    TenantContext, AgentContext, FullContext,
     get_current_tenant_id, get_current_agent_id, get_current_conversation_id,
-    with_tenant_context, with_agent_context, with_conversation_context, with_full_context,
-    get_appropriate_context_manager
+    with_tenant_context, with_full_context,
+    
 )
 
 # Importar nuestra biblioteca común
