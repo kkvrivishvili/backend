@@ -984,7 +984,7 @@ async def delete_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_t
             raise e
         except Exception as e:
             logger.error(f"Error eliminando agente para {context_desc}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error deleting agent: {str(e)}")
+            raise ServiceError(f"Error deleting agent for {context_desc}: {str(e)}")
 
 
 # Endpoint para chatear con un agente
@@ -1283,95 +1283,54 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
             detail=f"Inquilino con ID {tenant_id} no encontrado"
         )
     
-    with TenantContext(tenant_id):
-        # Obtener configuración del agente
-        agent_config = chat_request.agent_config
-        
-        if not agent_config:
-            raise HTTPException(
-                status_code=400,
-                detail="Configuración del agente no proporcionada"
-            )
-        
-        # Configurar streaming
-        agent_config.streaming = True
-        
-        # Generador de eventos para streaming
-        async def event_generator():
-            try:
-                # Crear callback handler personalizado
-                callback_handler = StreamingCallbackHandler()
-                
-                # Crear herramientas
-                tools = await create_agent_tools(agent_config, tenant_id)
-                
-                # Inicializar agente
-                agent_executor = await initialize_agent_with_tools(
-                    tenant_info=tenant_info,
-                    agent_config=agent_config,
-                    tools=tools,
-                    callback_handler=callback_handler
+    # Determinar el nivel de contexto apropiado
+    agent_id = chat_request.agent_config.get("agent_id") if chat_request.agent_config else None
+    conversation_id = chat_request.session_id  # session_id se usa como conversation_id
+    
+    # Construir descripción del contexto para mensajes de error
+    context_desc = f"tenant '{tenant_id}'"
+    if agent_id:
+        context_desc += f", agent '{agent_id}'"
+    if conversation_id:
+        context_desc += f", conversation '{conversation_id}'"
+    
+    # Usar el contexto apropiado según los parámetros disponibles
+    with get_appropriate_context_manager(tenant_id, agent_id, conversation_id):
+        try:
+            # Obtener configuración del agente
+            agent_config = chat_request.agent_config
+            
+            if not agent_config:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Configuración del agente no proporcionada"
                 )
-                
-                # Input para el agente
-                agent_input = {"input": chat_request.query}
-                
-                # Configuración para streaming
-                config = RunnableConfig(
-                    callbacks=callback_handler.get_callback_manager(),
-                )
-                
-                # Ejecutar agente de forma asíncrona
-                task = asyncio.create_task(agent_executor.ainvoke(agent_input, config=config))
-                
-                # Contadores para tokens y herramientas ya enviados
-                sent_tokens_count = 0
-                sent_tools_count = 0
-                
-                # Bucle mientras el agente esté procesando
-                while not task.done():
-                    await asyncio.sleep(0.1)  # Esperar un poco
-                    
-                    # Enviar nuevos tokens si hay
-                    tokens = callback_handler.get_tokens()
-                    if len(tokens) > sent_tokens_count:
-                        new_tokens = tokens[sent_tokens_count:]
-                        yield {
-                            "event": "token",
-                            "data": json.dumps({"tokens": new_tokens})
-                        }
-                        sent_tokens_count = len(tokens)
-                    
-                    # Enviar nuevas salidas de herramientas si hay
-                    tool_outputs = callback_handler.get_tool_outputs()
-                    if len(tool_outputs) > sent_tools_count:
-                        new_outputs = tool_outputs[sent_tools_count:]
-                        yield {
-                            "event": "tool",
-                            "data": json.dumps({"outputs": new_outputs})
-                        }
-                        sent_tools_count = len(tool_outputs)
-                
-                # Obtener resultado final
-                result = task.result()
-                
-                # Enviar evento final con resultado completo
-                yield {
-                    "event": "end",
-                    "data": json.dumps({
-                        "output": result.get("output", ""),
-                        "intermediate_steps": result.get("intermediate_steps", [])
-                    })
-                }
-                
-            except Exception as e:
-                logging.error(f"Error en streaming: {e}")
-                yield {
-                    "event": "error",
-                    "data": json.dumps({"error": str(e)})
-                }
-        
-        return StreamingResponse(event_generator(), media_type="text/event-stream")
+            
+            # Función para generar eventos SSE
+            async def event_generator():
+                try:
+                    async for event in execute_agent_stream(
+                        tenant_info=tenant_info,
+                        agent_config=agent_config,
+                        query=chat_request.query,
+                        session_id=chat_request.session_id
+                    ):
+                        if request.client.disconnected:
+                            logger.info(f"Cliente desconectado para {context_desc}")
+                            break
+                        
+                        yield event
+                except Exception as e:
+                    logger.error(f"Error en streaming para {context_desc}: {str(e)}", exc_info=True)
+                    yield json.dumps({"error": str(e)})
+            
+            return EventSourceResponse(event_generator())
+        except HTTPException as e:
+            # Reenviar excepciones HTTP directamente
+            raise e
+        except Exception as e:
+            logger.error(f"Error preparando chat stream para {context_desc}: {str(e)}", exc_info=True)
+            raise ServiceError(f"Error preparing chat stream: {str(e)}")
 
 
 # Función para obtener información del inquilino
@@ -1940,4 +1899,4 @@ async def delete_conversation(
             raise
         except Exception as e:
             logger.error(f"Error al eliminar conversación {conversation_id} para tenant {tenant_id}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error deleting conversation: {str(e)}")
+            raise ServiceError(f"Error deleting conversation for {context_desc}: {str(e)}")
