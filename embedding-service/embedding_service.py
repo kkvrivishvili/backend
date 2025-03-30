@@ -1,4 +1,4 @@
-# backend/server-llama/embedding-service/embedding_service.py
+# backend/embedding-service/embedding_service.py
 """
 Servicio de embeddings para la plataforma Linktree AI con multitenancy.
 """
@@ -76,13 +76,11 @@ class CachedOpenAIEmbedding:
     Soporta contexto multinivel (tenant, agente, conversación).
     """
     
+    @with_full_context
     def __init__(
         self,
         model_name: str = settings.default_embedding_model,
         embed_batch_size: int = settings.embedding_batch_size,
-        tenant_id: str = None,
-        agent_id: str = None,
-        conversation_id: str = None,
         api_key: Optional[str] = None
     ):
         # Inicialización sin llamar a super() ya que no heredamos de BaseEmbedding
@@ -90,10 +88,10 @@ class CachedOpenAIEmbedding:
         self.api_key = api_key or settings.openai_api_key
         self.embed_batch_size = embed_batch_size
         
-        # Obtener valores de contexto actual si no se proporcionan
-        self.tenant_id = tenant_id or get_current_tenant_id()
-        self.agent_id = agent_id or get_current_agent_id()
-        self.conversation_id = conversation_id or get_current_conversation_id()
+        # Obtener valores de contexto actual
+        self.tenant_id = get_current_tenant_id()
+        self.agent_id = get_current_agent_id()
+        self.conversation_id = get_current_conversation_id()
         
         # Usar Ollama o OpenAI según configuración centralizada
         if settings.use_ollama:
@@ -107,21 +105,26 @@ class CachedOpenAIEmbedding:
                 embed_batch_size=embed_batch_size
             )
     
-    @handle_service_error_simple()
+    @handle_service_error_simple
+    @with_full_context
     async def _aget_text_embedding(self, text: str) -> List[float]:
         """Get embedding with caching."""
         if not text.strip():
             # Return zero vector for empty text
             return [0.0] * settings.default_embedding_dimension
         
-        # Check cache first if tenant_id is provided
-        if self.tenant_id and redis_client:
+        # Check cache first if tenant_id is available in context
+        tenant_id = get_current_tenant_id()
+        agent_id = get_current_agent_id()
+        conversation_id = get_current_conversation_id()
+        
+        if tenant_id and redis_client:
             cached_embedding = get_cached_embedding(
                 text, 
-                self.tenant_id, 
+                tenant_id, 
                 self.model_name, 
-                self.agent_id, 
-                self.conversation_id
+                agent_id, 
+                conversation_id
             )
             if cached_embedding:
                 return cached_embedding
@@ -133,19 +136,20 @@ class CachedOpenAIEmbedding:
             embedding = await self.embedder.get_embedding(text)
         
         # Store in cache if tenant_id provided
-        if self.tenant_id and redis_client:
+        if tenant_id and redis_client:
             cache_embedding(
                 text, 
                 embedding, 
-                self.tenant_id, 
+                tenant_id, 
                 self.model_name, 
-                self.agent_id, 
-                self.conversation_id
+                agent_id, 
+                conversation_id
             )
         
         return embedding
     
-    @handle_service_error_simple()
+    @handle_service_error_simple
+    @with_full_context
     async def _aget_text_embedding_batch(self, texts: List[str]) -> List[List[float]]:
         """Get embeddings for a batch of texts with caching."""
         if not texts:
@@ -156,6 +160,11 @@ class CachedOpenAIEmbedding:
         original_indices = []
         cache_hits = {}
         
+        # Obtener IDs del contexto actual
+        tenant_id = get_current_tenant_id()
+        agent_id = get_current_agent_id()
+        conversation_id = get_current_conversation_id()
+        
         # Check which texts are in cache
         for i, text in enumerate(texts):
             if not text.strip():
@@ -163,13 +172,13 @@ class CachedOpenAIEmbedding:
                 cache_hits[i] = [0.0] * settings.default_embedding_dimension
                 continue
             
-            if self.tenant_id and redis_client:
+            if tenant_id and redis_client:
                 cached_embedding = get_cached_embedding(
                     text, 
-                    self.tenant_id, 
+                    tenant_id, 
                     self.model_name, 
-                    self.agent_id, 
-                    self.conversation_id
+                    agent_id, 
+                    conversation_id
                 )
                 if cached_embedding:
                     cache_hits[i] = cached_embedding
@@ -189,16 +198,16 @@ class CachedOpenAIEmbedding:
             embeddings = await self.embedder.get_batch_embeddings(non_empty_texts)
         
         # Store new embeddings in cache
-        if self.tenant_id and redis_client:
+        if tenant_id and redis_client:
             for idx, embedding in zip(original_indices, embeddings):
                 text = texts[idx]
                 cache_embedding(
                     text, 
                     embedding, 
-                    self.tenant_id, 
+                    tenant_id, 
                     self.model_name, 
-                    self.agent_id, 
-                    self.conversation_id
+                    agent_id, 
+                    conversation_id
                 )
         
         # Combine cached and new embeddings
@@ -234,8 +243,10 @@ async def generate_embeddings(
     """
     start_time = time.time()
     tenant_id = tenant_info.tenant_id
-    agent_id = request.agent_id
-    conversation_id = request.conversation_id
+    
+    # Los IDs de agent y conversation ya están disponibles en el contexto gracias al decorador
+    agent_id = get_current_agent_id()
+    conversation_id = get_current_conversation_id()
     
     # Check quotas
     await check_tenant_quotas(tenant_info)
@@ -262,7 +273,7 @@ async def generate_embeddings(
     
     # Add context info to metadata
     for meta in metadata:
-        meta["tenant_id"] = request.tenant_id
+        meta["tenant_id"] = tenant_id
         if agent_id:
             meta["agent_id"] = agent_id
         if conversation_id:
@@ -272,15 +283,12 @@ async def generate_embeddings(
     cache_hits = 0
     if redis_client:
         for text in request.texts:
-            if get_cached_embedding(text, request.tenant_id, model_name, agent_id, conversation_id):
+            if get_cached_embedding(text, tenant_id, model_name, agent_id, conversation_id):
                 cache_hits += 1
     
-    # Initialize embedding model
+    # Initialize embedding model - no es necesario pasar los IDs explícitamente
     embed_model = CachedOpenAIEmbedding(
-        model_name=model_name,
-        tenant_id=request.tenant_id,
-        agent_id=agent_id,
-        conversation_id=conversation_id
+        model_name=model_name
     )
     
     # Generate embeddings
@@ -288,7 +296,7 @@ async def generate_embeddings(
     
     # Track usage
     await track_embedding_usage(
-        request.tenant_id,
+        tenant_id,
         request.texts,
         model_name,
         cache_hits,
@@ -325,8 +333,10 @@ async def batch_generate_embeddings(
     """
     start_time = time.time()
     tenant_id = tenant_info.tenant_id
-    agent_id = request.agent_id
-    conversation_id = request.conversation_id
+    
+    # Los IDs de agent y conversation ya están disponibles en el contexto gracias al decorador
+    agent_id = get_current_agent_id()
+    conversation_id = get_current_conversation_id()
     
     # Check quotas
     await check_tenant_quotas(tenant_info)
@@ -344,7 +354,7 @@ async def batch_generate_embeddings(
     
     # Add context info to metadata
     for meta in metadata:
-        meta["tenant_id"] = request.tenant_id
+        meta["tenant_id"] = tenant_id
         if agent_id:
             meta["agent_id"] = agent_id
         if conversation_id:
@@ -354,15 +364,12 @@ async def batch_generate_embeddings(
     cache_hits = 0
     if redis_client:
         for text in texts:
-            if get_cached_embedding(text, request.tenant_id, model_name, agent_id, conversation_id):
+            if get_cached_embedding(text, tenant_id, model_name, agent_id, conversation_id):
                 cache_hits += 1
     
-    # Initialize embedding model
+    # Initialize embedding model - no es necesario pasar los IDs explícitamente
     embed_model = CachedOpenAIEmbedding(
-        model_name=model_name,
-        tenant_id=request.tenant_id,
-        agent_id=agent_id,
-        conversation_id=conversation_id
+        model_name=model_name
     )
     
     # Generate embeddings
@@ -370,7 +377,7 @@ async def batch_generate_embeddings(
     
     # Track usage
     await track_embedding_usage(
-        request.tenant_id,
+        tenant_id,
         texts,
         model_name,
         cache_hits,
@@ -496,22 +503,22 @@ async def get_service_status() -> HealthResponse:
 @handle_service_error_simple
 @with_full_context
 async def get_cache_stats(
-    tenant_info: TenantInfo = Depends(verify_tenant),
-    agent_id: Optional[str] = None,
-    conversation_id: Optional[str] = None
+    tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> Dict[str, Any]:
     """
     Obtiene estadísticas sobre el uso de caché.
     
     Args:
         tenant_info: Información del tenant (inyectada)
-        agent_id: ID del agente para filtrar estadísticas (opcional)
-        conversation_id: ID de la conversación para filtrar estadísticas (opcional)
         
     Returns:
         dict: Estadísticas de caché
     """
     tenant_id = tenant_info.tenant_id
+    
+    # Los IDs de agent y conversation ya están disponibles en el contexto gracias al decorador
+    agent_id = get_current_agent_id()
+    conversation_id = get_current_conversation_id()
     
     if not redis_client:
         return {
@@ -557,36 +564,28 @@ async def get_cache_stats(
     }
 
 
-@app.delete("/cache/clear/{tenant_id}", response_model=Dict[str, Any])
+@app.delete("/cache/clear", response_model=Dict[str, Any])
 @handle_service_error_simple
 @with_tenant_context
 async def clear_cache(
-    tenant_id: str,
     cache_type: str = "embeddings",
-    agent_id: Optional[str] = None,
-    conversation_id: Optional[str] = None,
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> Dict[str, Any]:
     """
-    Limpia la caché para un tenant específico.
+    Limpia la caché para el tenant actual.
     
     Args:
-        tenant_id: ID del tenant
         cache_type: Tipo de caché (ej: 'embed', 'query') o None para todo
-        agent_id: ID del agente para limpiar solo la caché de ese agente
-        conversation_id: ID de la conversación para limpiar solo esa conversación
         tenant_info: Información del tenant (inyectada)
         
     Returns:
         dict: Resultado de la operación
     """
-    # Verificar que el usuario está limpiando su propia caché
-    if tenant_id != tenant_info.tenant_id:
-        raise ServiceError(
-            status_code=403,
-            error_code="FORBIDDEN",
-            message="No puedes limpiar la caché de otro tenant"
-        )
+    tenant_id = tenant_info.tenant_id
+    
+    # Los IDs de agent y conversation podrían estar disponibles en el contexto si se llamó con ellos
+    agent_id = get_current_agent_id()
+    conversation_id = get_current_conversation_id()
     
     if not redis_client:
         return {

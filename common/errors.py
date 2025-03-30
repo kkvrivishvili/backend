@@ -7,7 +7,7 @@ import logging
 import traceback
 import sys
 import re
-from typing import Callable, Dict, Any, Optional, Union
+from typing import Callable, Dict, Any, Optional, Union, TypeVar, Awaitable
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -15,14 +15,24 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 from functools import wraps
 from pydantic import ValidationError
-from .context import get_current_tenant_id
+from .context import get_current_tenant_id, get_current_agent_id, get_current_conversation_id
 
 logger = logging.getLogger(__name__)
+
+# Tipo para funciones asíncronas para el decorador
+T = TypeVar('T')
+Func = Callable[..., Awaitable[T]]
 
 
 class ServiceError(Exception):
     """
     Excepción personalizada para errores de servicio.
+    
+    Attributes:
+        message: Mensaje descriptivo del error
+        status_code: Código de estado HTTP
+        error_code: Código de error específico para identificar el tipo de error
+        details: Detalles adicionales sobre el error
     """
     def __init__(
         self, 
@@ -47,19 +57,42 @@ def setup_error_handling(app: FastAPI) -> None:
     """
     @app.exception_handler(ServiceError)
     async def service_error_handler(request: Request, exc: ServiceError):
-        logger.error(f"Service error: {exc.message}")
+        # Obtener información de contexto para logging enriquecido
+        context_info = get_context_info()
+        
+        if context_info:
+            context_str = ", ".join([f"{k}='{v}'" for k, v in context_info.items() if v])
+            logger.error(f"Service error [{context_str}]: {exc.message}")
+        else:
+            logger.error(f"Service error: {exc.message}")
+        
+        # Crear respuesta detallada
+        error_response = {
+            "error": exc.error_code,
+            "message": exc.message,
+            "details": exc.details
+        }
+        
+        # Incluir información de contexto en la respuesta si existe
+        if context_info:
+            error_response["context"] = context_info
+        
         return JSONResponse(
             status_code=exc.status_code,
-            content={
-                "error": exc.error_code,
-                "message": exc.message,
-                "details": exc.details
-            }
+            content=error_response
         )
     
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-        logger.warning(f"HTTP error {exc.status_code}: {exc.detail}")
+        context_info = get_context_info()
+        
+        if context_info:
+            context_str = ", ".join([f"{k}='{v}'" for k, v in context_info.items() if v])
+            logger.warning(f"HTTP error {exc.status_code} [{context_str}]: {exc.detail}")
+        else:
+            logger.warning(f"HTTP error {exc.status_code}: {exc.detail}")
+        
+        # Devolver la respuesta estándar de FastAPI para HTTPException
         return JSONResponse(
             status_code=exc.status_code,
             content={
@@ -70,7 +103,15 @@ def setup_error_handling(app: FastAPI) -> None:
     
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError):
-        logger.warning(f"Validation error: {str(exc)}")
+        context_info = get_context_info()
+        
+        if context_info:
+            context_str = ", ".join([f"{k}='{v}'" for k, v in context_info.items() if v])
+            logger.warning(f"Validation error [{context_str}]: {str(exc)}")
+        else:
+            logger.warning(f"Validation error: {str(exc)}")
+        
+        # Devolver detalles completos de la validación para facilitar depuración
         return JSONResponse(
             status_code=422,
             content={
@@ -83,31 +124,46 @@ def setup_error_handling(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def generic_exception_handler(request: Request, exc: Exception):
         error_id = f"error_{id(exc)}"
-        logger.error(f"Unhandled exception {error_id}: {str(exc)}")
+        context_info = get_context_info()
+        
+        if context_info:
+            context_str = ", ".join([f"{k}='{v}'" for k, v in context_info.items() if v])
+            logger.error(f"Unhandled exception {error_id} [{context_str}]: {str(exc)}")
+        else:
+            logger.error(f"Unhandled exception {error_id}: {str(exc)}")
+            
         logger.error(traceback.format_exc())
         
         # En producción, no devolver el traceback
+        response = {
+            "error": "server_error",
+            "message": "An unexpected error occurred",
+            "error_id": error_id
+        }
+        
+        # Incluir información de contexto en la respuesta si existe
+        if context_info:
+            response["context"] = context_info
+        
         return JSONResponse(
             status_code=500,
-            content={
-                "error": "server_error",
-                "message": "An unexpected error occurred",
-                "error_id": error_id
-            }
+            content=response
         )
     
     # Middleware para logging de peticiones y respuestas
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
         try:
-            # Log request
-            logger.debug(f"Request: {request.method} {request.url.path}")
+            # Log request with tenant_id if available in headers
+            tenant_id = request.headers.get("X-Tenant-ID")
+            log_prefix = f"[tenant_id={tenant_id}]" if tenant_id else ""
+            logger.debug(f"{log_prefix} Request: {request.method} {request.url.path}")
             
             # Process request
             response = await call_next(request)
             
             # Log response
-            logger.debug(f"Response: {request.method} {request.url.path} - Status: {response.status_code}")
+            logger.debug(f"{log_prefix} Response: {request.method} {request.url.path} - Status: {response.status_code}")
             return response
         except Exception as e:
             # Manejar excepciones no capturadas
@@ -116,11 +172,44 @@ def setup_error_handling(app: FastAPI) -> None:
             raise
 
 
-# Decorador para manejar errores del servicio
-def handle_service_error(on_error_response=None):
+def get_context_info() -> Dict[str, str]:
     """
-    Decorador para manejar errores en servicios.
-    Captura excepciones y devuelve una respuesta de error estandarizada.
+    Obtiene información del contexto actual para enriquecer logs y respuestas de error.
+    
+    Returns:
+        Dict con información de contexto disponible
+    """
+    context_info = {}
+    
+    # Intentar obtener IDs de contexto sin fallar si no están disponibles
+    try:
+        tenant_id = get_current_tenant_id()
+        if tenant_id:
+            context_info["tenant_id"] = tenant_id
+    except:
+        pass
+    
+    try:
+        agent_id = get_current_agent_id()
+        if agent_id:
+            context_info["agent_id"] = agent_id
+    except:
+        pass
+    
+    try:
+        conversation_id = get_current_conversation_id()
+        if conversation_id:
+            context_info["conversation_id"] = conversation_id
+    except:
+        pass
+        
+    return context_info
+
+
+def handle_service_error_simple(on_error_response: Optional[Dict[str, Any]] = None) -> Callable[[Func], Func]:
+    """
+    Decorador unificado para manejar errores en servicios.
+    Captura excepciones y las convierte en ServiceError o las propaga adecuadamente.
     
     Args:
         on_error_response: Respuesta personalizada opcional en caso de error
@@ -128,54 +217,63 @@ def handle_service_error(on_error_response=None):
     Returns:
         Decorador para funciones asíncronas
     """
-    def decorator(func):
+    def decorator(func: Func) -> Func:
         @wraps(func)
         async def wrapper(*args, **kwargs):
             try:
                 return await func(*args, **kwargs)
+            except ServiceError:
+                # Propagar ServiceError directamente, ya que tiene toda la información necesaria
+                # y será capturada por el manejador de excepciones global
+                raise
+            except StarletteHTTPException:
+                # Propagar HTTPException directamente
+                raise
+            except ValidationError as e:
+                # Convertir errores de validación de Pydantic a ServiceError
+                raise ServiceError(
+                    message="Error de validación de datos",
+                    status_code=422,
+                    error_code="validation_error",
+                    details={"errors": e.errors()}
+                )
             except Exception as e:
-                logger.error(f"Error in {func.__name__}: {str(e)}")
+                # Obtener información de contexto para errores genéricos
+                context_info = get_context_info()
+                context_str = ""
+                if context_info:
+                    context_str = ", ".join([f"{k}='{v}'" for k, v in context_info.items() if v])
+                    context_str = f" [{context_str}]"
+                
+                # Log detallado del error con contexto
+                logger.error(f"Error in {func.__name__}{context_str}: {str(e)}")
                 logger.error(traceback.format_exc())
                 
-                # Manejo específico para HTTPException de FastAPI
-                if isinstance(e, HTTPException):
-                    raise
-                
-                # Crear respuesta de error para ServiceError con su código de estado
-                if isinstance(e, ServiceError):
-                    error_response = create_error_response(
-                        message=e.message,
-                        status_code=e.status_code,
-                        error_detail=e.details
-                    )
-                    raise HTTPException(
-                        status_code=e.status_code,
-                        detail=error_response
-                    )
-                
-                # Para cualquier otra excepción, usar respuesta genérica
+                # Si se proporciona una respuesta personalizada, usarla
                 if on_error_response:
-                    return JSONResponse(
+                    # En lugar de devolver JSONResponse, lanzar ServiceError con la respuesta personalizada
+                    raise ServiceError(
+                        message=str(e),
                         status_code=500,
-                        content=on_error_response
+                        error_code="service_error",
+                        details=on_error_response
                     )
                 
-                # Si no hay respuesta personalizada, crear una estándar
-                error_response = create_error_response(
+                # Para cualquier otra excepción, convertir a ServiceError
+                raise ServiceError(
                     message=f"Error interno del servidor: {str(e)}",
-                    status_code=500
-                )
-                
-                raise HTTPException(
                     status_code=500,
-                    detail=error_response
+                    error_code="internal_error"
                 )
         return wrapper
+    
+    # Permitir usar el decorador con o sin paréntesis
+    if callable(on_error_response):
+        func = on_error_response
+        on_error_response = None
+        return decorator(func)
+    
     return decorator
-
-
-# Alias para mantener compatibilidad con el código existente
-handle_service_error_simple = handle_service_error
 
 
 def sanitize_content(content: str) -> str:
@@ -212,6 +310,8 @@ def sanitize_content(content: str) -> str:
 def create_error_response(message: str, status_code: int = 500, error_detail: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Crea una respuesta de error estandarizada.
+    Esta función es principalmente para compatibilidad con código existente.
+    Se recomienda usar ServiceError directamente para nuevos desarrollos.
     
     Args:
         message: Mensaje de error principal
@@ -232,12 +332,9 @@ def create_error_response(message: str, status_code: int = 500, error_detail: Op
     if error_detail:
         response["metadata"]["error_detail"] = error_detail
     
-    # Añadir tenant_id si está disponible en el contexto
-    try:
-        tenant_id = get_current_tenant_id()
-        if tenant_id:
-            response["metadata"]["tenant_id"] = tenant_id
-    except:
-        pass
+    # Añadir información de contexto si está disponible
+    context_info = get_context_info()
+    if context_info:
+        response["metadata"]["context"] = context_info
         
     return response

@@ -10,7 +10,7 @@ import uuid
 import httpx
 from typing import List, Dict, Any, Optional
 
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, UploadFile, File, Form
+from fastapi import FastAPI, Depends, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 
 # LlamaIndex imports - versión monolítica
@@ -32,8 +32,9 @@ from common.logging import init_logging
 from common.utils import prepare_service_request
 from common.context import (
     TenantContext, AgentContext, FullContext, 
-    get_current_tenant_id, with_tenant_context, 
-    get_appropriate_context_manager, with_full_context
+    get_current_tenant_id, get_current_agent_id, get_current_conversation_id,
+    with_tenant_context, with_agent_context, with_full_context, 
+    get_appropriate_context_manager
 )
 
 # Inicializar logging usando la configuración centralizada
@@ -63,13 +64,13 @@ app.add_middleware(
 )
 
 # Función para generar embeddings a través del servicio de embeddings
-async def generate_embeddings(texts: List[str], tenant_id: str) -> List[List[float]]:
+@with_tenant_context
+async def generate_embeddings(texts: List[str]) -> List[List[float]]:
     """
     Genera embeddings para una lista de textos.
     
     Args:
         texts: Lista de textos
-        tenant_id: ID del tenant
         
     Returns:
         List[List[float]]: Lista de vectores embedding
@@ -77,33 +78,34 @@ async def generate_embeddings(texts: List[str], tenant_id: str) -> List[List[flo
     if not texts:
         return []
     
-    # Usar el contexto del tenant en la llamada al servicio de embeddings
-    with TenantContext(tenant_id):
-        try:
-            settings = get_settings()
-            model = settings.default_embedding_model
-            
-            # Usar la función auxiliar para preparar la solicitud con contexto de tenant
-            payload = {
-                "model": model,
-                "texts": texts
-            }
-            
-            # tenant_id se propaga automáticamente
-            result = await prepare_service_request(
-                f"{settings.embedding_service_url}/embed",
-                payload,
-                tenant_id
-            )
-            
-            return result["embeddings"]
-            
-        except ServiceError as e:
-            logger.error(f"Error específico del servicio de embeddings para tenant {tenant_id}: {str(e)}")
-            raise ServiceError(f"Error al generar embeddings: {str(e)}")
-        except Exception as e:
-            logger.error(f"Error inesperado al generar embeddings para tenant {tenant_id}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error al generar embeddings: {str(e)}")
+    # El tenant_id ya está disponible en el contexto gracias al decorador
+    tenant_id = get_current_tenant_id()
+    
+    try:
+        settings = get_settings()
+        model = settings.default_embedding_model
+        
+        # Usar la función auxiliar para preparar la solicitud con contexto de tenant
+        payload = {
+            "model": model,
+            "texts": texts
+        }
+        
+        # tenant_id se propaga automáticamente
+        result = await prepare_service_request(
+            f"{settings.embedding_service_url}/embed",
+            payload,
+            tenant_id
+        )
+        
+        return result["embeddings"]
+        
+    except ServiceError as e:
+        logger.error(f"Error específico del servicio de embeddings: {str(e)}")
+        raise ServiceError(f"Error al generar embeddings: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error inesperado al generar embeddings: {str(e)}", exc_info=True)
+        raise ServiceError(f"Error al generar embeddings: {str(e)}")
 
 # Procesar documento y crear nodos
 def process_document(
@@ -162,55 +164,49 @@ def process_document(
 # Background task para indexar documentos
 @handle_service_error_simple
 @with_full_context
-async def index_documents_task(
-    node_data_list: List[Dict[str, Any]],
-    tenant_id: str,
-    collection_name: str,
-    agent_id: Optional[str] = None,
-    conversation_id: Optional[str] = None
-):
+async def index_documents_task(node_data_list: List[Dict[str, Any]], collection_name: str):
     """
     Tarea en segundo plano para indexar documentos.
     
     Args:
         node_data_list: Lista de nodos a indexar
-        tenant_id: ID del tenant
         collection_name: Nombre de la colección
-        agent_id: ID del agente (opcional)
-        conversation_id: ID de la conversación (opcional)
     """
     try:
-        # Usar el contexto del tenant durante la indexación
-        with get_appropriate_context_manager(tenant_id, agent_id, conversation_id):
-            # Obtener vector store para este tenant
-            vector_store = get_tenant_vector_store(tenant_id, collection_name)
-            
-            logger.info(f"Indexando {len(node_data_list)} nodos para tenant {tenant_id} en colección {collection_name}")
-            
-            # Convertir nodos a documentos de LlamaIndex
-            documents = []
-            for node_data in node_data_list:
-                # Crear documento
-                doc = Document(
-                    text=node_data["text"],
-                    metadata=node_data["metadata"]
-                )
-                documents.append(doc)
-            
-            # Generar textos para embeddings
-            texts = [doc.get_content(metadata_mode=MetadataMode.NONE) for doc in documents]
-            
-            # Generar embeddings
-            embeddings = await generate_embeddings(texts, tenant_id)
-            
-            # Indexar documentos en la base de datos vectorial
-            for i, doc in enumerate(documents):
-                vector_store.add(
-                    documents=[doc],
-                    embeddings=[embeddings[i]] if embeddings else None
-                )
-            
-            logger.info(f"Indexación completada para {len(node_data_list)} nodos en colección {collection_name}")
+        # Los IDs de contexto ya están disponibles gracias al decorador
+        tenant_id = get_current_tenant_id()
+        agent_id = get_current_agent_id()
+        conversation_id = get_current_conversation_id()
+        
+        # Obtener vector store para este tenant
+        vector_store = get_tenant_vector_store(tenant_id, collection_name)
+        
+        logger.info(f"Indexando {len(node_data_list)} nodos en colección {collection_name}")
+        
+        # Convertir nodos a documentos de LlamaIndex
+        documents = []
+        for node_data in node_data_list:
+            # Crear documento
+            doc = Document(
+                text=node_data["text"],
+                metadata=node_data["metadata"]
+            )
+            documents.append(doc)
+        
+        # Generar textos para embeddings
+        texts = [doc.get_content(metadata_mode=MetadataMode.NONE) for doc in documents]
+        
+        # Generar embeddings
+        embeddings = await generate_embeddings(texts)
+        
+        # Indexar documentos en la base de datos vectorial
+        for i, doc in enumerate(documents):
+            vector_store.add(
+                documents=[doc],
+                embeddings=[embeddings[i]] if embeddings else None
+            )
+        
+        logger.info(f"Indexación completada para {len(node_data_list)} nodos en colección {collection_name}")
     
     except Exception as e:
         logger.error(f"Error en la tarea de indexación: {str(e)}", exc_info=True)
@@ -237,20 +233,7 @@ async def ingest_documents(
     # Verificar cuotas del tenant
     await check_tenant_quotas(tenant_info)
     
-    tenant_id = tenant_info.tenant_id
     collection_name = request.collection_name or "default"
-    
-    # Para ingestión, el agent_id y conversation_id son opcionales
-    agent_id = request.agent_id
-    conversation_id = request.conversation_id
-    
-    # Construir descripción del contexto para mensajes de error
-    context_desc = f"tenant '{tenant_id}'"
-    if agent_id:
-        context_desc += f", agent '{agent_id}'"
-    if conversation_id:
-        context_desc += f", conversation '{conversation_id}'"
-    context_desc += f", collection '{collection_name}'"
     
     total_nodes = 0
     document_ids = []
@@ -281,10 +264,7 @@ async def ingest_documents(
         background_tasks.add_task(
             index_documents_task,
             node_data_list, 
-            tenant_id,
-            collection_name,
-            agent_id,  # Pasar agent_id a la tarea en segundo plano
-            conversation_id  # Pasar conversation_id a la tarea en segundo plano
+            collection_name
         )
     
     return IngestionResponse(
@@ -298,12 +278,9 @@ async def ingest_documents(
 async def ingest_file(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    tenant_id: str = Form(...),
     collection_name: str = Form("default"),
     document_type: str = Form(...),
     author: Optional[str] = Form(None),
-    agent_id: Optional[str] = Form(None),
-    conversation_id: Optional[str] = Form(None),
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> IngestionResponse:
     """
@@ -312,35 +289,21 @@ async def ingest_file(
     Args:
         background_tasks: Tareas en segundo plano
         file: Archivo a ingerir
-        tenant_id: ID del tenant
         collection_name: Nombre de la colección
         document_type: Tipo de documento
         author: Autor del documento
-        agent_id: ID del agente (opcional)
-        conversation_id: ID de la conversación (opcional)
         tenant_info: Información del tenant (inyectada)
         
     Returns:
         dict: Respuesta con ID de documento y contador de nodos
     """
-    # Verificar que el tenant_id coincida con el de la autenticación
-    if tenant_id != tenant_info.tenant_id:
-        raise ServiceError(
-            message="El ID de tenant no coincide con las credenciales",
-            status_code=403,
-            error_code="FORBIDDEN"
-        )
+    # Los IDs de contexto ya están disponibles gracias al decorador
+    tenant_id = tenant_info.tenant_id
+    agent_id = get_current_agent_id()
+    conversation_id = get_current_conversation_id()
     
     # Verificar cuotas del tenant
     await check_tenant_quotas(tenant_info)
-    
-    # Construir descripción del contexto para mensajes de error
-    context_desc = f"tenant '{tenant_id}'"
-    if agent_id:
-        context_desc += f", agent '{agent_id}'"
-    if conversation_id:
-        context_desc += f", conversation '{conversation_id}'"
-    context_desc += f", collection '{collection_name}', file '{file.filename}'"
     
     # Leer contenido del archivo
     content = await file.read()
@@ -374,56 +337,35 @@ async def ingest_file(
     background_tasks.add_task(
         index_documents_task,
         node_data,
-        tenant_id,
-        collection_name,
-        agent_id,
-        conversation_id
+        collection_name
     )
     
-    logger.info(f"Archivo {file.filename} procesado con {len(node_data)} fragmentos para tenant {tenant_id}")
+    logger.info(f"Archivo {file.filename} procesado con {len(node_data)} fragmentos")
     
     return IngestionResponse(
         document_ids=[doc_id],
         node_count=len(node_data)
     )
 
-@app.delete("/documents/{tenant_id}/{document_id}", response_model=Dict[str, Any])
+@app.delete("/documents/{document_id}", response_model=Dict[str, Any])
 @handle_service_error_simple
 @with_full_context
 async def delete_document(
-    tenant_id: str,
     document_id: str,
-    agent_id: Optional[str] = None,
-    conversation_id: Optional[str] = None,
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> Dict[str, Any]:
     """
     Elimina un documento específico.
     
     Args:
-        tenant_id: ID del tenant
         document_id: ID del documento
-        agent_id: ID del agente (opcional)
-        conversation_id: ID de la conversación (opcional)
         tenant_info: Información del tenant (inyectada)
         
     Returns:
         dict: Resultado de la operación
     """
-    # Verificar que el tenant_id coincida con el de la autenticación
-    if tenant_id != tenant_info.tenant_id:
-        raise ServiceError(
-            message="El ID de tenant no coincide con las credenciales",
-            status_code=403,
-            error_code="FORBIDDEN"
-        )
-    
-    # Construir descripción del contexto para mensajes de error
-    context_desc = f"tenant '{tenant_id}', document '{document_id}'"
-    if agent_id:
-        context_desc += f", agent '{agent_id}'"
-    if conversation_id:
-        context_desc += f", conversation '{conversation_id}'"
+    # Los IDs de contexto ya están disponibles gracias al decorador
+    tenant_id = tenant_info.tenant_id
     
     supabase = get_supabase_client()
     
@@ -434,8 +376,12 @@ async def delete_document(
         .execute()
     
     if delete_result.error:
-        logger.error(f"Error eliminando documento para {context_desc}: {delete_result.error}")
-        raise ServiceError(f"Error eliminando documento: {delete_result.error}")
+        logger.error(f"Error eliminando documento {document_id}: {delete_result.error}")
+        raise ServiceError(
+            message=f"Error eliminando documento: {delete_result.error}",
+            status_code=500,
+            error_code="DELETE_FAILED"
+        )
     
     # Actualizar contador de documentos para el tenant
     await supabase.rpc(
@@ -444,7 +390,7 @@ async def delete_document(
     ).execute()
     
     deleted_count = len(delete_result.data) if delete_result.data else 0
-    logger.info(f"Documento {document_id} eliminado con {deleted_count} chunks para {context_desc}")
+    logger.info(f"Documento {document_id} eliminado con {deleted_count} chunks")
     
     return {
         "success": True,
@@ -452,43 +398,25 @@ async def delete_document(
         "deleted_chunks": deleted_count
     }
 
-@app.delete("/collections/{tenant_id}/{collection_name}", response_model=Dict[str, Any])
+@app.delete("/collections/{collection_name}", response_model=Dict[str, Any])
 @handle_service_error_simple
 @with_tenant_context
 async def delete_collection(
-    tenant_id: str,
     collection_name: str,
-    agent_id: Optional[str] = None,
-    conversation_id: Optional[str] = None,
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> Dict[str, Any]:
     """
     Elimina una colección completa de documentos.
     
     Args:
-        tenant_id: ID del tenant
         collection_name: Nombre de la colección
-        agent_id: ID del agente (opcional)
-        conversation_id: ID de la conversación (opcional)
         tenant_info: Información del tenant (inyectada)
         
     Returns:
         dict: Resultado de la operación
     """
-    # Verificar que el tenant_id coincida con el de la autenticación
-    if tenant_id != tenant_info.tenant_id:
-        raise ServiceError(
-            message="El ID de tenant no coincide con las credenciales",
-            status_code=403,
-            error_code="FORBIDDEN"
-        )
-    
-    # Construir descripción del contexto para mensajes de error
-    context_desc = f"tenant '{tenant_id}', collection '{collection_name}'"
-    if agent_id:
-        context_desc += f", agent '{agent_id}'"
-    if conversation_id:
-        context_desc += f", conversation '{conversation_id}'"
+    # El tenant_id ya está disponible en el contexto gracias al decorador
+    tenant_id = tenant_info.tenant_id
     
     supabase = get_supabase_client()
     
@@ -499,8 +427,12 @@ async def delete_collection(
         .execute()
     
     if delete_result.error:
-        logger.error(f"Error eliminando colección para {context_desc}: {delete_result.error}")
-        raise ServiceError(f"Error eliminando colección: {delete_result.error}")
+        logger.error(f"Error eliminando colección {collection_name}: {delete_result.error}")
+        raise ServiceError(
+            message=f"Error eliminando colección: {delete_result.error}",
+            status_code=500,
+            error_code="DELETE_FAILED"
+        )
     
     # Actualizar contador de documentos para el tenant
     if delete_result.data and len(delete_result.data) > 0:
@@ -518,7 +450,7 @@ async def delete_collection(
             ).execute()
     
     deleted_count = len(delete_result.data) if delete_result.data else 0
-    logger.info(f"Colección {collection_name} eliminada con {deleted_count} chunks para {context_desc}")
+    logger.info(f"Colección {collection_name} eliminada con {deleted_count} chunks")
     
     return {
         "success": True,

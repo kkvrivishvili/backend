@@ -9,8 +9,9 @@ import logging
 import time
 import httpx
 from typing import List, Dict, Any, Optional
+from datetime import datetime, timedelta
 
-from fastapi import FastAPI, HTTPException, Depends, Request, Query
+from fastapi import FastAPI, Depends, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 # LlamaIndex imports - versión monolítica
@@ -94,21 +95,13 @@ class ResponseSynthesizer:
             return CompactAndRefine(llm=llm, callback_manager=callback_manager, **kwargs)
 
 # Obtener embedding a través del servicio de embeddings
-@with_full_context  # Utiliza el decorador con el nivel más alto que maneja todos los casos
-async def generate_embedding(
-    text: str, 
-    tenant_id: str, 
-    agent_id: Optional[str] = None, 
-    conversation_id: Optional[str] = None
-) -> List[float]:
+@with_full_context
+async def generate_embedding(text: str) -> List[float]:
     """
     Genera un embedding para un texto a través del servicio de embeddings.
     
     Args:
         text: Texto para generar embedding
-        tenant_id: ID del tenant
-        agent_id: ID del agente (opcional)
-        conversation_id: ID de la conversación (opcional)
         
     Returns:
         List[float]: Vector embedding
@@ -117,22 +110,20 @@ async def generate_embedding(
         logger.warning("Attempted to generate embedding for empty text")
         return []
     
+    # Los IDs de contexto ya están disponibles gracias al decorador
+    tenant_id = get_current_tenant_id()
+    agent_id = get_current_agent_id()
+    conversation_id = get_current_conversation_id()
+    
     try:
         settings = get_settings()
         model = settings.default_embedding_model
         
         # Incluir agent_id y conversation_id en la solicitud si están disponibles
         payload = {
-            "tenant_id": tenant_id,
             "model": model,
             "texts": [text]
         }
-        
-        if agent_id:
-            payload["agent_id"] = agent_id
-        
-        if conversation_id:
-            payload["conversation_id"] = conversation_id
         
         # El tenant_id se propaga automáticamente
         result = await prepare_service_request(
@@ -144,18 +135,19 @@ async def generate_embedding(
         if result.get("embeddings") and len(result["embeddings"]) > 0:
             return result["embeddings"][0]
         else:
-            logger.error(f"No embeddings received from service for tenant {tenant_id}")
+            logger.error("No embeddings received from service")
             return []
         
     except ServiceError as e:
-        logger.error(f"Error específico del servicio de embeddings para tenant {tenant_id}: {str(e)}")
+        logger.error(f"Error específico del servicio de embeddings: {str(e)}")
         raise ServiceError(f"Error generating embedding: {str(e)}")
     except Exception as e:
-        logger.error(f"Error inesperado al generar embedding para tenant {tenant_id}: {str(e)}", exc_info=True)
+        logger.error(f"Error inesperado al generar embedding: {str(e)}", exc_info=True)
         raise ServiceError(f"Error generating embedding: {str(e)}")
 
 
 # Crear LLM basado en el tier del tenant
+@with_tenant_context
 def get_llm_for_tenant(tenant_info: TenantInfo, requested_model: Optional[str] = None) -> Any:
     """
     Obtiene el LLM adecuado según nivel de suscripción del tenant.
@@ -167,37 +159,36 @@ def get_llm_for_tenant(tenant_info: TenantInfo, requested_model: Optional[str] =
     Returns:
         Any: Cliente LLM configurado (OpenAI o Ollama)
     """
-    # Usar el contexto del tenant para facilitar la propagación
-    with TenantContext(tenant_info.tenant_id):
-        settings = get_settings()
-        
-        # Determinar modelo basado en tier del tenant y solicitud
-        model_name = validate_model_access(
-            tenant_info, 
-            requested_model or settings.default_llm_model,
-            model_type="llm"
+    settings = get_settings()
+    
+    # Determinar modelo basado en tier del tenant y solicitud
+    model_name = validate_model_access(
+        tenant_info, 
+        requested_model or settings.default_llm_model,
+        model_type="llm"
+    )
+    
+    # Configurar el LLM según si usamos Ollama u OpenAI
+    if settings.use_ollama:
+        return get_llm_model(model_name)
+    else:
+        return OpenAI(
+            model=model_name,
+            api_key=settings.openai_api_key,
+            temperature=settings.llm_temperature,
+            max_tokens=settings.llm_max_tokens
         )
-        
-        # Configurar el LLM según si usamos Ollama u OpenAI
-        if settings.use_ollama:
-            return get_llm_model(model_name)
-        else:
-            return OpenAI(
-                model=model_name,
-                api_key=settings.openai_api_key,
-                temperature=settings.llm_temperature,
-                max_tokens=settings.llm_max_tokens
-            )
 
 
 # Crear motor de consulta para el tenant
+@with_tenant_context
 async def create_query_engine(
     tenant_info: TenantInfo,
     collection_name: str,
     llm_model: Optional[str] = None,
     similarity_top_k: int = 4,
     response_mode: str = "compact"
-) -> RetrieverQueryEngine:
+) -> tuple:
     """
     Crea un motor de consulta para recuperar y generar respuestas.
     
@@ -209,52 +200,51 @@ async def create_query_engine(
         response_mode: Modo de síntesis de respuesta
         
     Returns:
-        RetrieverQueryEngine: Motor de consulta configurado
+        tuple: Motor de consulta configurado y debug handler
     """
-    tenant_id = tenant_info.tenant_id
+    # El tenant_id ya está disponible en el contexto gracias al decorador
+    tenant_id = get_current_tenant_id()
     
-    # Usar el contexto del tenant para toda la operación
-    with TenantContext(tenant_id):
-        # Configurar callback para depuración
-        debug_handler = LlamaDebugHandler()
-        callback_manager = CallbackManager([debug_handler])
-        
-        # Obtener vector store para el tenant
-        vector_store = get_tenant_vector_store(tenant_id, collection_name)
-        
-        # Crear índice sobre el vector store
-        index = VectorStoreIndex.from_vector_store(vector_store)
-        
-        # Configurar recuperador
-        retriever = VectorIndexRetriever(
-            index=index,
-            similarity_top_k=similarity_top_k
-        )
-        
-        # Configurar postprocesador de similitud
-        node_postprocessor = SimilarityPostprocessor(
-            similarity_cutoff=0.7
-        )
-        
-        # Obtener LLM adecuado para el tenant
-        llm = get_llm_for_tenant(tenant_info, llm_model)
-        
-        # Crear sintetizador de respuesta
-        response_synthesizer = ResponseSynthesizer.from_args(
-            response_mode=response_mode,
-            llm=llm,
-            callback_manager=callback_manager
-        )
-        
-        # Crear motor de consulta
-        query_engine = RetrieverQueryEngine(
-            retriever=retriever,
-            response_synthesizer=response_synthesizer,
-            node_postprocessors=[node_postprocessor],
-            callback_manager=callback_manager
-        )
-        
-        return query_engine, debug_handler
+    # Configurar callback para depuración
+    debug_handler = LlamaDebugHandler()
+    callback_manager = CallbackManager([debug_handler])
+    
+    # Obtener vector store para el tenant
+    vector_store = get_tenant_vector_store(tenant_id, collection_name)
+    
+    # Crear índice sobre el vector store
+    index = VectorStoreIndex.from_vector_store(vector_store)
+    
+    # Configurar recuperador
+    retriever = VectorIndexRetriever(
+        index=index,
+        similarity_top_k=similarity_top_k
+    )
+    
+    # Configurar postprocesador de similitud
+    node_postprocessor = SimilarityPostprocessor(
+        similarity_cutoff=0.7
+    )
+    
+    # Obtener LLM adecuado para el tenant
+    llm = get_llm_for_tenant(tenant_info, llm_model)
+    
+    # Crear sintetizador de respuesta
+    response_synthesizer = ResponseSynthesizer.from_args(
+        response_mode=response_mode,
+        llm=llm,
+        callback_manager=callback_manager
+    )
+    
+    # Crear motor de consulta
+    query_engine = RetrieverQueryEngine(
+        retriever=retriever,
+        response_synthesizer=response_synthesizer,
+        node_postprocessors=[node_postprocessor],
+        callback_manager=callback_manager
+    )
+    
+    return query_engine, debug_handler
 
 @app.post("/query", response_model=QueryResponse)
 @handle_service_error_simple
@@ -279,8 +269,6 @@ async def process_query(
     await check_tenant_quotas(tenant_info)
     
     tenant_id = tenant_info.tenant_id
-    agent_id = request.agent_id
-    conversation_id = request.conversation_id
     query_text = request.query.strip()
     collection_name = request.collection_name or "default"
     
@@ -290,13 +278,6 @@ async def process_query(
             status_code=400,
             error_code="empty_query"
         )
-    
-    # Construir una descripción del contexto actual para mensajes de error más informativos
-    context_description = f"tenant '{tenant_id}'"
-    if agent_id:
-        context_description += f", agent '{agent_id}'"
-    if conversation_id:
-        context_description += f", conversation '{conversation_id}'"
     
     # Crear motor de consulta para el tenant
     query_engine, debug_handler = await create_query_engine(
@@ -329,6 +310,10 @@ async def process_query(
             }
             sources.append(source)
     
+    # Los IDs de contexto ya están disponibles gracias al decorador
+    agent_id = get_current_agent_id()
+    conversation_id = get_current_conversation_id()
+    
     # Registrar uso
     await track_query(
         tenant_id=tenant_id,
@@ -355,21 +340,19 @@ async def process_query(
         collection_name=collection_name
     )
 
-@app.get("/documents/{tenant_id}", response_model=DocumentsListResponse)
+@app.get("/documents", response_model=DocumentsListResponse)
 @handle_service_error_simple
 @with_tenant_context
 async def list_documents(
-    tenant_id: str,
     collection_name: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> DocumentsListResponse:
     """
-    Lista documentos para un tenant con filtrado opcional por colección.
+    Lista documentos para el tenant actual con filtrado opcional por colección.
     
     Args:
-        tenant_id: ID del tenant
         collection_name: Filtrar por colección
         limit: Límite de resultados
         offset: Desplazamiento para paginación
@@ -378,13 +361,8 @@ async def list_documents(
     Returns:
         DocumentsListResponse: Lista de documentos paginada
     """
-    # Verificar que el usuario solo puede ver sus propios documentos
-    if tenant_id != tenant_info.tenant_id:
-        raise ServiceError(
-            status_code=403,
-            error_code="FORBIDDEN",
-            message="No puedes acceder a documentos de otro tenant"
-        )
+    # El tenant_id ya está disponible en el contexto gracias al decorador
+    tenant_id = tenant_info.tenant_id
     
     # Inicializar Supabase
     supabase = get_supabase_client()
@@ -410,30 +388,23 @@ async def list_documents(
     )
 
 
-@app.get("/collections/{tenant_id}", response_model=Dict[str, Any])
+@app.get("/collections", response_model=Dict[str, Any])
 @handle_service_error_simple
 @with_tenant_context
 async def list_collections(
-    tenant_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> Dict[str, Any]:
     """
-    Lista todas las colecciones para un tenant.
+    Lista todas las colecciones para el tenant actual.
     
     Args:
-        tenant_id: ID del tenant
         tenant_info: Información del tenant (inyectada)
         
     Returns:
         dict: Colecciones con estadísticas
     """
-    # Verificar que el usuario solo puede ver sus propias colecciones
-    if tenant_id != tenant_info.tenant_id:
-        raise ServiceError(
-            status_code=403,
-            error_code="FORBIDDEN",
-            message="No puedes acceder a colecciones de otro tenant"
-        )
+    # El tenant_id ya está disponible en el contexto gracias al decorador
+    tenant_id = tenant_info.tenant_id
     
     # Obtener colecciones del tenant
     supabase = get_supabase_client()
@@ -454,30 +425,23 @@ async def list_collections(
     }
 
 
-@app.get("/llm/models/{tenant_id}", response_model=Dict[str, Any])
+@app.get("/llm/models", response_model=Dict[str, Any])
 @handle_service_error_simple
 @with_tenant_context
 async def list_llm_models(
-    tenant_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> Dict[str, Any]:
     """
-    Obtiene los modelos LLM disponibles para un tenant según su nivel de suscripción.
+    Obtiene los modelos LLM disponibles para el tenant actual según su nivel de suscripción.
     
     Args:
-        tenant_id: ID del tenant
         tenant_info: Información del tenant (inyectada)
         
     Returns:
         dict: Modelos disponibles y configuración
     """
-    # Verificar que el usuario solo puede ver sus propios modelos
-    if tenant_id != tenant_info.tenant_id:
-        raise ServiceError(
-            status_code=403,
-            error_code="FORBIDDEN",
-            message="No puedes acceder a recursos de otro tenant"
-        )
+    # El tenant_id ya está disponible en el contexto gracias al decorador
+    tenant_id = tenant_info.tenant_id
     
     # Obtener modelos según nivel de suscripción
     tier = tenant_info.subscription_tier
@@ -524,30 +488,23 @@ async def list_llm_models(
     return result
 
 
-@app.get("/stats/{tenant_id}", response_model=Dict[str, Any])
+@app.get("/stats", response_model=Dict[str, Any])
 @handle_service_error_simple
 @with_tenant_context
 async def get_tenant_stats(
-    tenant_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> Dict[str, Any]:
     """
-    Obtiene estadísticas de uso para un tenant.
+    Obtiene estadísticas de uso para el tenant actual.
     
     Args:
-        tenant_id: ID del tenant
         tenant_info: Información del tenant (inyectada)
         
     Returns:
         dict: Estadísticas de uso
     """
-    # Verificar que el usuario solo puede ver sus propias estadísticas
-    if tenant_id != tenant_info.tenant_id:
-        raise ServiceError(
-            status_code=403,
-            error_code="FORBIDDEN",
-            message="No puedes acceder a estadísticas de otro tenant"
-        )
+    # El tenant_id ya está disponible en el contexto gracias al decorador
+    tenant_id = tenant_info.tenant_id
     
     try:
         # Obtener stats del tenant
@@ -584,7 +541,11 @@ async def get_tenant_stats(
         
     except Exception as e:
         logger.error(f"Error getting tenant stats: {str(e)}")
-        raise ServiceError(f"Error getting tenant stats: {str(e)}")
+        raise ServiceError(
+            message=f"Error getting tenant stats: {str(e)}",
+            status_code=500,
+            error_code="STATS_ERROR"
+        )
 
 
 @app.get("/status", response_model=HealthResponse)
@@ -655,16 +616,14 @@ async def get_service_status() -> HealthResponse:
 @handle_service_error_simple
 @with_tenant_context
 async def create_collection(
-    tenant_id: str,
     name: str,
     description: Optional[str] = None,
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> Dict[str, Any]:
     """
-    Crea una nueva colección para un tenant.
+    Crea una nueva colección para el tenant actual.
     
     Args:
-        tenant_id: ID del tenant
         name: Nombre de la colección
         description: Descripción opcional
         tenant_info: Información del tenant (inyectada)
@@ -672,12 +631,8 @@ async def create_collection(
     Returns:
         dict: Datos de la colección creada
     """
-    # Verificar que el tenant es el correcto
-    if tenant_id != tenant_info.tenant_id:
-        raise HTTPException(
-            status_code=403,
-            detail="You can only create collections for your own tenant"
-        )
+    # El tenant_id ya está disponible en el contexto gracias al decorador
+    tenant_id = tenant_info.tenant_id
     
     # Verificar que la colección no existe ya
     supabase = get_supabase_client()
@@ -687,9 +642,10 @@ async def create_collection(
         .execute()
     
     if collection_result.data:
-        raise HTTPException(
+        raise ServiceError(
+            message=f"Collection {name} already exists for this tenant",
             status_code=400,
-            detail=f"Collection {name} already exists for this tenant"
+            error_code="COLLECTION_EXISTS"
         )
     
     # Crear colección
@@ -701,16 +657,20 @@ async def create_collection(
     }).execute()
     
     if not result.data:
-        raise ServiceError("Error creating collection in database", status_code=500)
+        raise ServiceError(
+            message="Error creating collection in database",
+            status_code=500,
+            error_code="CREATION_FAILED"
+        )
     
     return result.data[0]
 
 
 @app.put("/collections/{collection_id}", response_model=Dict[str, Any])
 @handle_service_error_simple
+@with_tenant_context
 async def update_collection(
     collection_id: str,
-    tenant_id: str,
     name: str,
     description: Optional[str] = None,
     is_active: bool = True,
@@ -721,7 +681,6 @@ async def update_collection(
     
     Args:
         collection_id: ID de la colección
-        tenant_id: ID del tenant
         name: Nombre de la colección
         description: Descripción opcional
         is_active: Si la colección está activa
@@ -730,12 +689,8 @@ async def update_collection(
     Returns:
         dict: Datos de la colección actualizada
     """
-    # Verificar que el tenant es el correcto
-    if tenant_id != tenant_info.tenant_id:
-        raise HTTPException(
-            status_code=403,
-            detail="You can only update your own collections"
-        )
+    # El tenant_id ya está disponible en el contexto gracias al decorador
+    tenant_id = tenant_info.tenant_id
     
     # Verificar que la colección existe
     supabase = get_supabase_client()
@@ -744,13 +699,18 @@ async def update_collection(
         .execute()
     
     if not collection_result.data:
-        raise HTTPException(status_code=404, detail=f"Collection {collection_id} not found")
+        raise ServiceError(
+            message=f"Collection {collection_id} not found",
+            status_code=404,
+            error_code="NOT_FOUND"
+        )
     
     # Verificar pertenencia al tenant
     if collection_result.data[0]["tenant_id"] != tenant_id:
-        raise HTTPException(
+        raise ServiceError(
+            message="You can only update your own collections",
             status_code=403,
-            detail="You can only update your own collections"
+            error_code="FORBIDDEN"
         )
     
     # Actualizar colección
@@ -762,7 +722,11 @@ async def update_collection(
     }).eq("id", collection_id).execute()
     
     if not result.data:
-        raise ServiceError("Error updating collection in database", status_code=500)
+        raise ServiceError(
+            message="Error updating collection in database",
+            status_code=500,
+            error_code="UPDATE_FAILED"
+        )
     
     return result.data[0]
 
@@ -772,7 +736,6 @@ async def update_collection(
 @with_tenant_context
 async def get_collection_stats(
     collection_id: str,
-    tenant_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> Dict[str, Any]:
     """
@@ -780,19 +743,13 @@ async def get_collection_stats(
     
     Args:
         collection_id: ID de la colección
-        tenant_id: ID del tenant
         tenant_info: Información del tenant (inyectada)
         
     Returns:
         dict: Estadísticas de la colección
     """
-    # Verificar que el tenant es el correcto
-    if tenant_id != tenant_info.tenant_id:
-        raise ServiceError(
-            message="Solo puedes ver estadísticas de tus propias colecciones",
-            status_code=403,
-            error_code="FORBIDDEN"
-        )
+    # El tenant_id ya está disponible en el contexto gracias al decorador
+    tenant_id = tenant_info.tenant_id
     
     # Verificar que la colección existe
     supabase = get_supabase_client()
@@ -866,7 +823,6 @@ async def get_collection_stats(
 @with_tenant_context
 async def get_collection_tool(
     collection_id: str,
-    tenant_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> Dict[str, Any]:
     """
@@ -875,19 +831,13 @@ async def get_collection_tool(
     
     Args:
         collection_id: ID de la colección
-        tenant_id: ID del tenant
         tenant_info: Información del tenant (inyectada)
         
     Returns:
         AgentTool: Configuración de herramienta
     """
-    # Verificar que el tenant es el correcto
-    if tenant_id != tenant_info.tenant_id:
-        raise ServiceError(
-            message="Solo puedes acceder a tus propias colecciones",
-            status_code=403,
-            error_code="FORBIDDEN"
-        )
+    # El tenant_id ya está disponible en el contexto gracias al decorador
+    tenant_id = tenant_info.tenant_id
     
     # Verificar que la colección existe
     supabase = get_supabase_client()

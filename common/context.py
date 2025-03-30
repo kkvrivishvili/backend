@@ -6,9 +6,13 @@ conversation_id a través de operaciones asíncronas y llamadas entre servicios.
 import asyncio
 import contextvars
 import logging
-from typing import Optional, Dict, Any, Tuple, NamedTuple
+from typing import Optional, Dict, Any, Tuple, NamedTuple, Callable, Awaitable, TypeVar
 
 logger = logging.getLogger(__name__)
+
+# Tipo para funciones asíncronas para los decoradores
+T = TypeVar('T')
+AsyncFunc = Callable[..., Awaitable[T]]
 
 # Contexto para el ID del tenant actual
 current_tenant_id = contextvars.ContextVar("current_tenant_id", default="default")
@@ -25,6 +29,21 @@ def get_current_tenant_id() -> str:
         str: ID del tenant o "default" si no está definido
     """
     return current_tenant_id.get()
+
+def get_required_tenant_id() -> str:
+    """
+    Obtiene el ID del tenant del contexto actual, lanzando error si no está disponible.
+    
+    Returns:
+        str: ID del tenant
+        
+    Raises:
+        ValueError: Si no hay un tenant_id válido en el contexto actual
+    """
+    tenant_id = get_current_tenant_id()
+    if not tenant_id or tenant_id == "default":
+        raise ValueError("No tenant_id available in current context")
+    return tenant_id
 
 def get_current_agent_id() -> Optional[str]:
     """
@@ -56,6 +75,21 @@ def get_full_context() -> Dict[str, Any]:
         "agent_id": get_current_agent_id(),
         "conversation_id": get_current_conversation_id()
     }
+
+def debug_context() -> str:
+    """
+    Retorna una representación del contexto actual para depuración.
+    
+    Returns:
+        str: Representación legible del contexto actual con niveles activos
+    """
+    context = get_full_context()
+    active_levels = [f"{k}='{v}'" for k, v in context.items() if v is not None and v != "default"]
+    
+    if active_levels:
+        return f"Context active levels: {', '.join(active_levels)}"
+    else:
+        return "No active context levels"
 
 def set_current_tenant_id(tenant_id: str) -> contextvars.Token:
     """
@@ -127,7 +161,14 @@ def reset_conversation_context(token: contextvars.Token) -> None:
     current_conversation_id.reset(token)
 
 class ContextTokens(NamedTuple):
-    """Tokens para restaurar el contexto completo."""
+    """
+    Tokens para restaurar el contexto completo.
+    
+    Attributes:
+        tenant_token: Token para restaurar el tenant_id
+        agent_token: Token para restaurar el agent_id
+        conversation_token: Token para restaurar el conversation_id
+    """
     tenant_token: Optional[contextvars.Token] = None
     agent_token: Optional[contextvars.Token] = None
     conversation_token: Optional[contextvars.Token] = None
@@ -203,7 +244,7 @@ class FullContext:
         if self.tokens.tenant_token:
             reset_tenant_context(self.tokens.tenant_token)
 
-async def run_with_tenant(tenant_id: str, coro):
+async def run_with_tenant(tenant_id: str, coro: Awaitable[T]) -> T:
     """
     Ejecuta una corrutina con un ID de tenant específico en el contexto.
     
@@ -220,7 +261,34 @@ async def run_with_tenant(tenant_id: str, coro):
     finally:
         reset_tenant_context(token)
 
-async def run_with_full_context(tenant_id: str, agent_id: Optional[str], conversation_id: Optional[str], coro):
+async def run_with_agent_context(tenant_id: str, agent_id: Optional[str], coro: Awaitable[T]) -> T:
+    """
+    Ejecuta una corrutina con un contexto de tenant y agente específicos.
+    
+    Args:
+        tenant_id: ID del tenant
+        agent_id: ID del agente (opcional)
+        coro: Corrutina a ejecutar
+        
+    Returns:
+        Any: Resultado de la corrutina
+    """
+    # Guardar tokens para restaurar después
+    tokens = ContextTokens(
+        tenant_token=set_current_tenant_id(tenant_id),
+        agent_token=set_current_agent_id(agent_id) if agent_id is not None else None
+    )
+    
+    try:
+        return await coro
+    finally:
+        # Restaurar contexto previo
+        if tokens.agent_token:
+            reset_agent_context(tokens.agent_token)
+        if tokens.tenant_token:
+            reset_tenant_context(tokens.tenant_token)
+
+async def run_with_full_context(tenant_id: str, agent_id: Optional[str], conversation_id: Optional[str], coro: Awaitable[T]) -> T:
     """
     Ejecuta una corrutina con un contexto completo específico.
     
@@ -251,7 +319,7 @@ async def run_with_full_context(tenant_id: str, agent_id: Optional[str], convers
         if tokens.tenant_token:
             reset_tenant_context(tokens.tenant_token)
 
-def with_tenant_context(func):
+def with_tenant_context(func: AsyncFunc) -> AsyncFunc:
     """
     Decorador para propagar el ID del tenant a través de funciones asíncronas.
     
@@ -261,8 +329,15 @@ def with_tenant_context(func):
         async def my_async_function(arg1, arg2):
             # tenant_id se propaga automáticamente
             # El contexto es accesible con get_current_tenant_id()
-            pass
+            tenant_id = get_current_tenant_id()
+            # Resto del código...
         ```
+    
+    Args:
+        func: Función asíncrona a decorar
+        
+    Returns:
+        Función asíncrona decorada que mantiene el contexto del tenant
     """
     async def wrapper(*args, **kwargs):
         # Capturar el contexto actual
@@ -273,7 +348,38 @@ def with_tenant_context(func):
     
     return wrapper
 
-def with_full_context(func):
+def with_agent_context(func: AsyncFunc) -> AsyncFunc:
+    """
+    Decorador para propagar el ID del tenant y agente a través de funciones asíncronas.
+    
+    Ejemplo:
+        ```python
+        @with_agent_context
+        async def my_async_function(arg1, arg2):
+            # tenant_id y agent_id se propagan automáticamente
+            tenant_id = get_current_tenant_id()
+            agent_id = get_current_agent_id()
+            # Resto del código...
+        ```
+    
+    Args:
+        func: Función asíncrona a decorar
+        
+    Returns:
+        Función asíncrona decorada que mantiene el contexto del tenant y agente
+    """
+    async def wrapper(*args, **kwargs):
+        # Capturar el contexto actual
+        tenant_id = get_current_tenant_id()
+        agent_id = get_current_agent_id()
+        
+        # Ejecutar con el mismo contexto
+        return await run_with_agent_context(tenant_id, agent_id, func(*args, **kwargs))
+    
+    return wrapper
+
+
+def with_full_context(func: AsyncFunc) -> AsyncFunc:
     """
     Decorador para propagar el contexto completo a través de funciones asíncronas.
     
@@ -282,9 +388,17 @@ def with_full_context(func):
         @with_full_context
         async def my_async_function(arg1, arg2):
             # El contexto completo se propaga automáticamente
-            # Accesible con get_current_tenant_id(), get_current_agent_id(), etc.
-            pass
+            tenant_id = get_current_tenant_id()
+            agent_id = get_current_agent_id()
+            conversation_id = get_current_conversation_id()
+            # Resto del código...
         ```
+    
+    Args:
+        func: Función asíncrona a decorar
+        
+    Returns:
+        Función asíncrona decorada que mantiene el contexto completo
     """
     async def wrapper(*args, **kwargs):
         # Capturar el contexto actual
@@ -338,42 +452,6 @@ class AgentContext:
             reset_tenant_context(self.tokens.tenant_token)
 
 
-def with_agent_context(func):
-    """
-    Decorador para propagar el ID del tenant y agente a través de funciones asíncronas.
-    
-    Ejemplo:
-        ```python
-        @with_agent_context
-        async def my_async_function(arg1, arg2):
-            # tenant_id y agent_id se propagan automáticamente
-            # El contexto es accesible con get_current_tenant_id() y get_current_agent_id()
-            pass
-        ```
-    """
-    async def wrapper(*args, **kwargs):
-        # Capturar el contexto actual
-        tenant_id = get_current_tenant_id()
-        agent_id = get_current_agent_id()
-        
-        # Establecer tokens para cada nivel
-        tokens = ContextTokens(
-            tenant_token=set_current_tenant_id(tenant_id),
-            agent_token=set_current_agent_id(agent_id)
-        )
-        
-        try:
-            return await func(*args, **kwargs)
-        finally:
-            # Restaurar contexto previo
-            if tokens.agent_token:
-                reset_agent_context(tokens.agent_token)
-            if tokens.tenant_token:
-                reset_tenant_context(tokens.tenant_token)
-    
-    return wrapper
-
-
 def get_appropriate_context_manager(tenant_id: str, agent_id: Optional[str] = None, conversation_id: Optional[str] = None):
     """
     Retorna el administrador de contexto apropiado según los IDs proporcionados.
@@ -382,6 +460,14 @@ def get_appropriate_context_manager(tenant_id: str, agent_id: Optional[str] = No
     - FullContext si se proporcionan tenant_id, agent_id y conversation_id
     - AgentContext si se proporcionan tenant_id y agent_id
     - TenantContext si solo se proporciona tenant_id
+    
+    Ejemplo:
+        ```python
+        context_manager = get_appropriate_context_manager(tenant_id="t123", agent_id="a456")
+        with context_manager:
+            # Código que se ejecutará con el contexto apropiado
+            result = await function_that_needs_context()
+        ```
     
     Args:
         tenant_id: ID del tenant (obligatorio)

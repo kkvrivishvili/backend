@@ -211,68 +211,62 @@ async def create_rag_tool(tool_config: AgentTool, tenant_id: str, agent_id: Opti
     similarity_top_k = tool_config.metadata.get("similarity_top_k", 4)
     response_mode = tool_config.metadata.get("response_mode", "compact")
     
-    # Usar el contexto adecuado para esta operación
-    context_manager = get_appropriate_context_manager(tenant_id, agent_id)
-    
     async def query_tool(query: str) -> str:
         """Herramienta para consultar documentos usando RAG."""
         start_time = time.time()
         logger.info(f"RAG consulta: {query}")
         
-        with context_manager:
-            try:
-                # Preparar solicitud para el servicio de consultas
-                query_request = {
-                    "query": query,
-                    "collection_name": collection_name,
-                    "similarity_top_k": similarity_top_k,
-                    "response_mode": response_mode,
-                }
+        # El contexto ya está establecido por el decorador @with_agent_context
+        try:
+            # Preparar solicitud para el servicio de consultas
+            query_request = {
+                "query": query,
+                "collection_name": collection_name,
+                "similarity_top_k": similarity_top_k,
+                "response_mode": response_mode,
+            }
+            
+            # Incluir agent_id en la solicitud si está disponible
+            if agent_id:
+                query_request["agent_id"] = agent_id
+            
+            # Obtener URL del servicio de consultas desde configuración
+            settings = get_settings()
+            query_service_url = settings.query_service_url or "http://query-service:8001"
+            
+            # Realizar solicitud al servicio de consultas
+            async with http_client.post(
+                f"{query_service_url}/query",
+                json=query_request,
+                headers={"X-Tenant-ID": tenant_id},
+                timeout=30.0
+            ) as response:
+                if response.status_code != 200:
+                    error_text = await response.text()
+                    logger.error(f"Error en consulta RAG: {error_text}")
+                    return f"Error consultando documentos: {error_text}"
                 
-                # Incluir agent_id en la solicitud si está disponible
-                if agent_id:
-                    query_request["agent_id"] = agent_id
+                response_data = await response.json()
                 
-                # No incluimos conversation_id ya que esto es una herramienta general
-                # que no está asociada a una conversación específica
+                # Preparar respuesta
+                rag_response = response_data.get("response", "")
+                sources = response_data.get("sources", [])
                 
-                # Obtener URL del servicio de consultas desde configuración
-                settings = get_settings()
-                query_service_url = settings.query_service_url or "http://query-service:8001"
+                # Formatear fuentes si están disponibles
+                if sources:
+                    rag_response += "\n\nFuentes:"
+                    for i, source in enumerate(sources, 1):
+                        source_text = source.get("text", "")
+                        source_metadata = source.get("metadata", {})
+                        source_name = source_metadata.get("source") or source_metadata.get("filename", f"Fuente {i}")
+                        rag_response += f"\n[{i}] {source_name}: {source_text[:200]}..."
                 
-                # Realizar solicitud al servicio de consultas
-                async with http_client.post(
-                    f"{query_service_url}/query",
-                    json=query_request,
-                    headers={"X-Tenant-ID": tenant_id},
-                    timeout=30.0
-                ) as response:
-                    if response.status_code != 200:
-                        error_text = await response.text()
-                        logger.error(f"Error en consulta RAG: {error_text}")
-                        return f"Error consultando documentos: {error_text}"
-                    
-                    response_data = await response.json()
-                    
-                    # Preparar respuesta
-                    rag_response = response_data.get("response", "")
-                    sources = response_data.get("sources", [])
-                    
-                    # Formatear fuentes si están disponibles
-                    if sources:
-                        rag_response += "\n\nFuentes:"
-                        for i, source in enumerate(sources, 1):
-                            source_text = source.get("text", "")
-                            source_metadata = source.get("metadata", {})
-                            source_name = source_metadata.get("source") or source_metadata.get("filename", f"Fuente {i}")
-                            rag_response += f"\n[{i}] {source_name}: {source_text[:200]}..."
-                    
-                    logger.info(f"RAG respuesta generada en {time.time() - start_time:.2f}s")
-                    return rag_response
-                    
-            except Exception as e:
-                logger.error(f"Error ejecutando herramienta RAG: {str(e)}", exc_info=True)
-                return f"Error consultando documentos: {str(e)}"
+                logger.info(f"RAG respuesta generada en {time.time() - start_time:.2f}s")
+                return rag_response
+                
+        except Exception as e:
+            logger.error(f"Error ejecutando herramienta RAG: {str(e)}", exc_info=True)
+            return f"Error consultando documentos: {str(e)}"
     
     # Crear herramienta LangChain con la función RAG
     return Tool(
@@ -284,21 +278,18 @@ async def create_rag_tool(tool_config: AgentTool, tenant_id: str, agent_id: Opti
 
 # Función para crear las herramientas del agente
 @with_tenant_context
-async def create_agent_tools(agent_config: AgentConfig, tenant_id: Optional[str] = None) -> List[Tool]:
+async def create_agent_tools(agent_config: AgentConfig) -> List[Tool]:
     """
     Crea herramientas para el agente LangChain.
     
     Args:
         agent_config: Configuración del agente
-        tenant_id: ID del inquilino (opcional, usa el contexto actual si no se especifica)
         
     Returns:
         Lista de herramientas de LangChain
     """
-    # Si no se proporciona tenant_id, usar el del contexto actual
-    if tenant_id is None:
-        tenant_id = get_current_tenant_id()
-        
+    # El tenant_id ya está disponible en el contexto gracias al decorador
+    tenant_id = get_current_tenant_id()
     tools = []
     
     # Crear herramientas basadas en la configuración
@@ -322,10 +313,7 @@ async def create_agent_tools(agent_config: AgentConfig, tenant_id: Optional[str]
 @with_full_context
 async def query_rag(
     query: str, 
-    rag_config: RAGConfig, 
-    tenant_id: Optional[str] = None,
-    agent_id: Optional[str] = None,
-    conversation_id: Optional[str] = None
+    rag_config: RAGConfig
 ) -> str:
     """
     Consulta el sistema RAG.
@@ -333,71 +321,55 @@ async def query_rag(
     Args:
         query: Consulta del usuario
         rag_config: Configuración RAG
-        tenant_id: ID del inquilino (opcional, usa el contexto actual si no se especifica)
-        agent_id: ID del agente (opcional)
-        conversation_id: ID de la conversación (opcional)
         
     Returns:
         Resultados de la consulta
     """
-    # Utilizar ID de tenant del contexto si no se proporciona explícitamente
-    if not tenant_id:
-        tenant_id = get_current_tenant_id()
-        if not tenant_id:
-            raise ValueError("No tenant ID specified or found in context")
+    # Los IDs de contexto ya están disponibles gracias al decorador @with_full_context
+    tenant_id = get_current_tenant_id()
+    agent_id = get_current_agent_id()
+    conversation_id = get_current_conversation_id()
     
-    # Obtener el ID del agente del contexto si no se proporciona
-    if not agent_id:
-        agent_id = get_current_agent_id()
-    
-    # Obtener el ID de la conversación del contexto si no se proporciona
-    if not conversation_id:
-        conversation_id = get_current_conversation_id()
-    
-    # Seleccionar el contexto apropiado
-    context_manager = get_appropriate_context_manager(tenant_id, agent_id, conversation_id)
-    
-    with context_manager:
-        try:
-            settings = get_settings()
+    try:
+        settings = get_settings()
+        
+        # Preparar payload para el servicio de consultas
+        payload = {
+            "query": query,
+            "collection_name": rag_config.collection_name,
+            "similarity_top_k": rag_config.similarity_top_k,
+            "response_mode": rag_config.response_mode
+        }
+        
+        # Añadir IDs de contexto si están disponibles
+        if agent_id:
+            payload["agent_id"] = agent_id
+        if conversation_id:
+            payload["conversation_id"] = conversation_id
+        
+        # Realizar petición al servicio de consultas
+        response = await prepare_service_request(
+            f"{settings.query_service_url}/query", 
+            payload,
+            tenant_id
+        )
+        
+        if response.status_code != 200:
+            logger.error(f"Error del servicio de consulta: {response.text}")
+            return f"Error realizando la consulta: {response.status_code}"
+        
+        result = response.json()
+        return result.get("response", "No hay resultados disponibles para esta consulta")
+        
+    except Exception as e:
+        context_desc = f"tenant '{tenant_id}'"
+        if agent_id:
+            context_desc += f", agent '{agent_id}'"
+        if conversation_id:
+            context_desc += f", conversation '{conversation_id}'"
             
-            # Preparar payload para el servicio de consultas
-            payload = {
-                "query": query,
-                "collection_name": rag_config.collection_name,
-                "similarity_top_k": rag_config.similarity_top_k,
-                "response_mode": rag_config.response_mode
-            }
-            
-            # Añadir IDs de contexto si están disponibles
-            if agent_id:
-                payload["agent_id"] = agent_id
-            if conversation_id:
-                payload["conversation_id"] = conversation_id
-            
-            # Realizar petición al servicio de consultas
-            response = await prepare_service_request(
-                f"{settings.query_service_url}/query", 
-                payload,
-                tenant_id
-            )
-            
-            if response.status_code != 200:
-                logger.error(f"Error del servicio de consulta: {response.text}")
-                return f"Error realizando la consulta: {response.status_code}"
-            
-            result = response.json()
-            return result.get("response", "No hay resultados disponibles para esta consulta")
-            
-        except Exception as e:
-            context_desc = f"tenant '{tenant_id}'"
-            if agent_id:
-                context_desc += f", agent '{agent_id}'"
-            if conversation_id:
-                context_desc += f", conversation '{conversation_id}'"
-                
-            logger.error(f"Error en consulta RAG para {context_desc}: {str(e)}", exc_info=True)
-            return f"Error realizando la consulta: {str(e)}"
+        logger.error(f"Error en consulta RAG para {context_desc}: {str(e)}", exc_info=True)
+        return f"Error realizando la consulta: {str(e)}"
 
 
 # Función para inicializar un agente LangChain
@@ -507,9 +479,6 @@ async def create_agent(request: AgentRequest, tenant_info: TenantInfo = Depends(
     """
     tenant_id = tenant_info.tenant_id
     
-    # Construir una descripción del contexto para mensajes de error más informativos
-    context_desc = f"tenant '{tenant_id}'"
-    
     # Validar acceso al modelo de LLM
     validate_model_access(tenant_info.subscription_tier, request.llm_model)
     
@@ -537,7 +506,7 @@ async def create_agent(request: AgentRequest, tenant_info: TenantInfo = Depends(
     result = await supabase.from_("ai.agent_configs").insert(agent_data).single().execute()
     
     if result.error:
-        logger.error(f"Error creando agente para {context_desc}: {result.error}")
+        logger.error(f"Error creando agente para tenant '{tenant_id}': {result.error}")
         raise ServiceError(f"Error creating agent: {result.error}")
     
     # Obtener el agente creado
@@ -692,9 +661,6 @@ async def update_agent(
     """
     tenant_id = tenant_info.tenant_id
     
-    # Construir una descripción del contexto para mensajes de error más informativos
-    context_desc = f"tenant '{tenant_id}'"
-    
     supabase = get_supabase_client()
     
     # Verificar que el agente exista y pertenezca al tenant
@@ -741,7 +707,7 @@ async def update_agent(
         .execute()
     
     if result.error:
-        logger.error(f"Error actualizando agente para {context_desc}: {result.error}")
+        logger.error(f"Error actualizando agente para tenant '{tenant_id}': {result.error}")
         raise ServiceError(f"Error updating agent: {result.error}")
     
     # Preparar respuesta
@@ -779,9 +745,6 @@ async def delete_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_t
     """
     tenant_id = tenant_info.tenant_id
     
-    # Construir una descripción del contexto para mensajes de error más informativos
-    context_desc = f"tenant '{tenant_id}'"
-    
     # Verificar que el agente exista y pertenezca al tenant
     supabase = get_supabase_client()
     agent_check = await supabase.from_("ai.agent_configs") \
@@ -793,9 +756,10 @@ async def delete_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_t
     
     if not agent_check.data:
         logger.warning(f"Intento de eliminar agente no existente: {agent_id} por tenant {tenant_id}")
-        raise HTTPException(
+        raise ServiceError(
+            message=f"Agent with ID {agent_id} not found for this tenant",
             status_code=404,
-            detail=f"Agent with ID {agent_id} not found for this tenant"
+            error_code="agent_not_found"
         )
     
     # Eliminar el agente de la base de datos
@@ -806,10 +770,10 @@ async def delete_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_t
         .execute()
     
     if delete_result.error:
-        logger.error(f"Error eliminando agente para {context_desc}: {delete_result.error}")
+        logger.error(f"Error eliminando agente para tenant '{tenant_id}': {delete_result.error}")
         raise ServiceError(f"Error deleting agent: {delete_result.error}")
     
-    logger.info(f"Agente {agent_id} eliminado correctamente para {context_desc}")
+    logger.info(f"Agente {agent_id} eliminado correctamente para tenant '{tenant_id}'")
 
 
 # Endpoint para chatear con un agente
@@ -842,11 +806,6 @@ async def chat_with_agent(
     tenant_id = tenant_info.tenant_id
     conversation_id = request.conversation_id
     is_new_conversation = False
-    
-    # Construir una descripción del contexto para mensajes de error más informativos
-    context_desc = f"tenant '{tenant_id}', agent '{agent_id}'"
-    if conversation_id:
-        context_desc += f", conversation '{conversation_id}'"
     
     # Verificar que el agente existe y pertenece al tenant
     supabase = get_supabase_client()
@@ -884,9 +843,10 @@ async def chat_with_agent(
     # Verificar que el agente esté activo
     if not agent_config.is_active:
         logger.warning(f"Intento de acceso a agente inactivo: {agent_id}")
-        raise HTTPException(
+        raise ServiceError(
+            message="This agent is not active",
             status_code=400,
-            detail="This agent is not active"
+            error_code="agent_inactive"
         )
     
     # Validar acceso al modelo
@@ -910,25 +870,24 @@ async def chat_with_agent(
         ).execute()
         
         if not conversation_result.data:
-            logger.error(f"Error creando conversación para {context_desc}")
-            raise ServiceError(f"Error creating conversation for {context_desc}")
+            logger.error(f"Error creando conversación para tenant {tenant_id}, agent {agent_id}")
+            raise ServiceError(
+                message="Error creating conversation",
+                status_code=500,
+                error_code="conversation_creation_failed"
+            )
         
         conversation_id = conversation_result.data
-        logger.info(f"Creada nueva conversación {conversation_id} para {context_desc}")
+        logger.info(f"Creada nueva conversación {conversation_id} para tenant {tenant_id}, agent {agent_id}")
             
-        # Actualizar el contexto con la nueva conversación
-        # Ahora necesitamos usar el FullContext ya que tenemos un conversation_id
-        updated_context_manager = get_appropriate_context_manager(tenant_id, agent_id, conversation_id)
-            
-        with updated_context_manager:
-            # Ejecutar el agente
-            agent_response = await execute_agent(
-                tenant_info=tenant_info,
-                agent_config=agent_config,
-                query=request.message,
-                session_id=conversation_id,
-                streaming=False
-            )
+        # Ejecutar el agente
+        agent_response = await execute_agent(
+            tenant_info=tenant_info,
+            agent_config=agent_config,
+            query=request.message,
+            session_id=conversation_id,
+            streaming=False
+        )
     else:
         # Verificar que la conversación existe y pertenece al tenant y agente
         conv_check = await supabase.from_("ai.conversations") \
@@ -941,9 +900,10 @@ async def chat_with_agent(
         
         if not conv_check.data:
             logger.warning(f"Intento de acceso a conversación no autorizada: {conversation_id}")
-            raise HTTPException(
+            raise ServiceError(
+                message=f"Conversation {conversation_id} not found or not authorized",
                 status_code=404,
-                detail=f"Conversation {conversation_id} not found or not authorized"
+                error_code="conversation_not_found"
             )
         
         # Ejecutar el agente con la conversación existente
@@ -975,7 +935,7 @@ async def chat_with_agent(
     ).execute()
     
     if message_result.error:
-        logger.warning(f"Error guardando mensajes para {context_desc}: {message_result.error}")
+        logger.warning(f"Error guardando mensajes para conversación {conversation_id}: {message_result.error}")
     
     # Registrar uso para analíticas y facturación
     background_tasks.add_task(
@@ -1024,7 +984,8 @@ async def chat(chat_request: ChatRequest, request: Request) -> AgentResponse:
         Respuesta del agente
     """
     tenant_id = chat_request.tenant_id
-    tenant_info = await get_tenant_info(tenant_id)
+    # El tenant_id debe obtenerse del contexto aquí, no necesitamos pasarlo explícitamente
+    tenant_info = await get_tenant_info()
     
     if not tenant_info:
         raise ServiceError(
@@ -1036,13 +997,6 @@ async def chat(chat_request: ChatRequest, request: Request) -> AgentResponse:
     # Determinar el nivel de contexto apropiado
     agent_id = chat_request.agent_config.get("agent_id") if chat_request.agent_config else None
     conversation_id = chat_request.session_id  # session_id se usa como conversation_id
-    
-    # Construir descripción del contexto para mensajes de error
-    context_desc = f"tenant '{tenant_id}'"
-    if agent_id:
-        context_desc += f", agent '{agent_id}'"
-    if conversation_id:
-        context_desc += f", conversation '{conversation_id}'"
     
     # Obtener configuración del agente
     agent_config = chat_request.agent_config
@@ -1119,32 +1073,28 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
         Flujo de eventos SSE con la respuesta del agente
     """
     tenant_id = chat_request.tenant_id
-    tenant_info = await get_tenant_info(tenant_id)
+    # El tenant_id debe obtenerse del contexto, no necesitamos pasarlo explícitamente
+    tenant_info = await get_tenant_info()
     
     if not tenant_info:
-        raise HTTPException(
+        raise ServiceError(
+            message=f"Inquilino con ID {tenant_id} no encontrado",
             status_code=401,
-            detail=f"Inquilino con ID {tenant_id} no encontrado"
+            error_code="tenant_not_found"
         )
     
     # Determinar el nivel de contexto apropiado
     agent_id = chat_request.agent_config.get("agent_id") if chat_request.agent_config else None
     conversation_id = chat_request.session_id  # session_id se usa como conversation_id
     
-    # Construir descripción del contexto para mensajes de error
-    context_desc = f"tenant '{tenant_id}'"
-    if agent_id:
-        context_desc += f", agent '{agent_id}'"
-    if conversation_id:
-        context_desc += f", conversation '{conversation_id}'"
-    
     # Obtener configuración del agente
     agent_config = chat_request.agent_config
     
     if not agent_config:
-        raise HTTPException(
+        raise ServiceError(
+            message="Configuración del agente no proporcionada",
             status_code=400,
-            detail="Configuración del agente no proporcionada"
+            error_code="missing_agent_config"
         )
     
     # Ejecutar agente
@@ -1164,19 +1114,15 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
 
 # Función para obtener información del inquilino
 @with_tenant_context
-async def get_tenant_info(tenant_id: Optional[str] = None) -> Optional[TenantInfo]:
+async def get_tenant_info() -> Optional[TenantInfo]:
     """
     Obtiene información del inquilino desde Supabase.
     
-    Args:
-        tenant_id: ID del inquilino (opcional, usa el contexto actual si no se especifica)
-        
     Returns:
         Optional[TenantInfo]: Información del inquilino o None si no se encuentra
     """
-    # Si no se proporciona tenant_id, usar el del contexto actual
-    if tenant_id is None:
-        tenant_id = get_current_tenant_id()
+    # El tenant_id ya está disponible en el contexto gracias al decorador
+    tenant_id = get_current_tenant_id()
         
     try:
         # Inicializar cliente de Supabase
@@ -1211,6 +1157,7 @@ async def get_tenant_info(tenant_id: Optional[str] = None) -> Optional[TenantInf
 
 @app.get("/conversations", response_model=ConversationsListResponse)
 @handle_service_error_simple
+@with_tenant_context
 async def list_conversations(
     limit: int = 50,
     offset: int = 0,
@@ -1233,71 +1180,57 @@ async def list_conversations(
     """
     tenant_id = tenant_info.tenant_id
     
-    # Construir una descripción del contexto para mensajes de error más informativos
-    context_desc = f"tenant '{tenant_id}'"
+    # El contexto ya está establecido por el decorador @with_tenant_context
+    supabase = get_supabase_client()
+    
+    # Crear query base
+    query = supabase.from_("ai.conversations").select(
+        "*", count="exact"
+    ).eq("tenant_id", tenant_id).order("created_at", ascending=False)
+    
+    # Aplicar filtros
     if agent_id:
-        context_desc += f", agent '{agent_id}'"
+        query = query.eq("agent_id", agent_id)
     
-    # Seleccionar el nivel de contexto adecuado según los parámetros
-    # Si se proporciona agent_id, usamos AgentContext, de lo contrario TenantContext
-    context_manager = get_appropriate_context_manager(tenant_id, agent_id)
+    if status:
+        query = query.eq("status", status)
     
-    with context_manager:
-        try:
-            supabase = get_supabase_client()
+    # Aplicar paginación
+    query = query.range(offset, offset + limit - 1)
+    
+    # Ejecutar consulta
+    result = await query.execute()
+    
+    # Procesar resultados
+    if not result.data:
+        conversations = []
+        total = 0
+    else:
+        conversations = result.data
+        total = result.count
             
-            # Crear query base
-            query = supabase.from_("ai.conversations").select(
-                "*", count="exact"
-            ).eq("tenant_id", tenant_id).order("created_at", ascending=False)
-            
-            # Aplicar filtros
-            if agent_id:
-                query = query.eq("agent_id", agent_id)
-            
-            if status:
-                query = query.eq("status", status)
-            
-            # Aplicar paginación
-            query = query.range(offset, offset + limit - 1)
-            
-            # Ejecutar consulta
-            result = await query.execute()
-            
-            # Procesar resultados
-            if not result.data:
-                conversations = []
-                total = 0
-            else:
-                conversations = result.data
-                total = result.count
-                
-                # Convertir a objetos ConversationResponse
-                conversations = [
-                    ConversationResponse(
-                        conversation_id=conv["conversation_id"],
-                        tenant_id=conv["tenant_id"],
-                        agent_id=conv["agent_id"],
-                        title=conv["title"],
-                        status=conv["status"],
-                        context=conv["context"],
-                        client_reference_id=conv["client_reference_id"],
-                        metadata=conv["metadata"],
-                        created_at=conv["created_at"],
-                        updated_at=conv["updated_at"]
-                    ) for conv in conversations
-                ]
-            
-            return ConversationsListResponse(
-                conversations=conversations,
-                total=total,
-                limit=limit,
-                offset=offset
-            )
-            
-        except Exception as e:
-            logger.error(f"Error listando conversaciones para {context_desc}: {str(e)}", exc_info=True)
-            raise ServiceError(f"Error listing conversations: {str(e)}")
+        # Convertir a objetos ConversationResponse
+        conversations = [
+            ConversationResponse(
+                conversation_id=conv["conversation_id"],
+                tenant_id=conv["tenant_id"],
+                agent_id=conv["agent_id"],
+                title=conv["title"],
+                status=conv["status"],
+                context=conv["context"],
+                client_reference_id=conv["client_reference_id"],
+                metadata=conv["metadata"],
+                created_at=conv["created_at"],
+                updated_at=conv["updated_at"]
+            ) for conv in conversations
+        ]
+    
+    return ConversationsListResponse(
+        conversations=conversations,
+        total=total,
+        limit=limit,
+        offset=offset
+    )
 
 @app.get("/conversations/{conversation_id}", response_model=ConversationResponse)
 @handle_service_error_simple
@@ -1317,9 +1250,6 @@ async def get_conversation(
         ConversationResponse: Detalles de la conversación
     """
     tenant_id = tenant_info.tenant_id
-    
-    # Construir una descripción del contexto para mensajes de error más informativos
-    context_desc = f"tenant '{tenant_id}', conversation '{conversation_id}'"
     
     supabase = get_supabase_client()
     
@@ -1342,9 +1272,6 @@ async def get_conversation(
     # Convertir a ConversationResponse
     conversation = result.data
     agent_id = conversation["agent_id"]
-    
-    # Actualizar descripción del contexto con toda la información
-    context_desc = f"tenant '{tenant_id}', agent '{agent_id}', conversation '{conversation_id}'"
     
     # Obtener información adicional sobre la conversación
     # Contar mensajes en la conversación
@@ -1393,9 +1320,6 @@ async def get_conversation_messages(
     """
     tenant_id = tenant_info.tenant_id
     
-    # Descripción del contexto inicial para mensajes de error
-    context_desc = f"tenant '{tenant_id}', conversation '{conversation_id}'"
-    
     supabase = get_supabase_client()
     
     # Verificar que la conversación pertenezca al tenant y obtener agent_id
@@ -1410,11 +1334,6 @@ async def get_conversation_messages(
             status_code=404,
             error_code="conversation_not_found"
         )
-    
-    agent_id = conv_check.data["agent_id"]
-    
-    # Actualizar descripción del contexto con toda la información
-    context_desc = f"tenant '{tenant_id}', agent '{agent_id}', conversation '{conversation_id}'"
     
     # Obtener mensajes de la conversación con paginación
     messages_query = await supabase.from_("ai.messages") \
@@ -1471,9 +1390,6 @@ async def create_conversation(
     tenant_id = tenant_info.tenant_id
     agent_id = request.agent_id
     
-    # Construir una descripción del contexto para mensajes de error
-    context_desc = f"tenant '{tenant_id}', agent '{agent_id}'"
-    
     supabase = get_supabase_client()
     
     # Verificar que el agente existe y pertenece al tenant
@@ -1514,14 +1430,10 @@ async def create_conversation(
         .execute()
     
     if result.error:
-        logger.error(f"Error creando conversación para {context_desc}: {result.error}")
+        logger.error(f"Error creando conversación para tenant '{tenant_id}', agent '{agent_id}': {result.error}")
         raise ServiceError(f"Error creating conversation: {result.error}")
     
     created_conversation = result.data
-    
-    # Actualizar contexto_desc con el nuevo conversation_id
-    context_desc = f"tenant '{tenant_id}', agent '{agent_id}', conversation '{conversation_id}'"
-    logger.info(f"Conversación creada exitosamente: {context_desc}")
     
     # Crear respuesta
     return ConversationResponse(
@@ -1563,9 +1475,10 @@ async def update_conversation(
     update_fields = {k: v for k, v in update_data.items() if k in allowed_fields}
     
     if not update_fields:
-        raise HTTPException(
+        raise ServiceError(
+            message="No valid fields to update. Allowed fields: title, status, context, client_reference_id, metadata",
             status_code=400,
-            detail="No valid fields to update. Allowed fields: title, status, context, client_reference_id, metadata"
+            error_code="no_valid_fields"
         )
     
     supabase = get_supabase_client()
@@ -1577,13 +1490,11 @@ async def update_conversation(
     
     if not conv_result.data:
         logger.warning(f"Conversación {conversation_id} no encontrada para tenant {tenant_id}")
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    
-    # Obtener el ID del agente para usar el contexto completo
-    agent_id = conv_result.data["agent_id"]
-    
-    # Actualizar descripción del contexto con toda la información
-    context_desc = f"tenant '{tenant_id}', agent '{agent_id}', conversation '{conversation_id}'"
+        raise ServiceError(
+            message="Conversation not found",
+            status_code=404,
+            error_code="conversation_not_found"
+        )
     
     # Preparar datos para actualizar
     if "context" in update_fields and isinstance(update_fields["context"], dict):
@@ -1598,7 +1509,11 @@ async def update_conversation(
     ).eq("conversation_id", conversation_id).execute()
     
     if not update_result.data:
-        raise ServiceError("Error updating conversation")
+        raise ServiceError(
+            message="Error updating conversation",
+            status_code=500,
+            error_code="update_failed"
+        )
     
     # Obtener detalles actualizados
     result = await supabase.from_("ai.conversations").select(
@@ -1625,64 +1540,6 @@ async def update_conversation(
         metadata=conv["metadata"],
         created_at=conv["created_at"],
         updated_at=conv["updated_at"],
-        last_message_at=conv["last_message_at"],
+        last_message_at=conv.get("last_message_at"),
         messages_count=messages_count
-    )
-
-@app.delete("/conversations/{conversation_id}")
-@handle_service_error_simple
-@with_full_context
-async def delete_conversation(
-    conversation_id: str,
-    tenant_info: TenantInfo = Depends(verify_tenant)
-) -> JSONResponse:
-    """
-    Elimina una conversación y todos sus mensajes asociados.
-    
-    Args:
-        conversation_id: ID de la conversación
-        tenant_info: Información del tenant (inyectada por Depends)
-        
-    Returns:
-        JSONResponse: Confirmación de éxito
-    """
-    tenant_id = tenant_info.tenant_id
-    
-    # Descripción inicial del contexto para mensajes de error
-    context_desc = f"tenant '{tenant_id}', conversation '{conversation_id}'"
-    
-    supabase = get_supabase_client()
-    
-    # Verificar que la conversación existe y pertenece al tenant
-    conv_result = await supabase.from_("ai.conversations").select(
-        "conversation_id, agent_id"
-    ).eq("conversation_id", conversation_id).eq("tenant_id", tenant_id).single().execute()
-    
-    if not conv_result.data:
-        logger.warning(f"Conversación {conversation_id} no encontrada para tenant {tenant_id}")
-        raise ServiceError(
-            message="Conversation not found",
-            status_code=404,
-            error_code="conversation_not_found"
-        )
-    
-    agent_id = conv_result.data["agent_id"]
-    
-    # Eliminar mensajes primero
-    await supabase.from_("ai.messages").delete().eq(
-        "conversation_id", conversation_id
-    ).execute()
-    
-    # Luego eliminar la conversación
-    await supabase.from_("ai.conversations").delete().eq(
-        "conversation_id", conversation_id
-    ).execute()
-    
-    # Invalidar caché
-    from common.cache import invalidate_conversation_cache
-    await invalidate_conversation_cache(tenant_id, agent_id, conversation_id)
-    
-    return JSONResponse(
-        status_code=200,
-        content={"message": f"Conversation {conversation_id} deleted successfully"}
     )
