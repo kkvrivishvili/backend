@@ -17,28 +17,34 @@ Authorization: Bearer {tenant_api_key}
 
 ## Standard Response Format
 
-Todas las respuestas siguen este formato estándar:
+Todas las respuestas siguen el formato estandarizado `BaseResponse`:
 
 ```json
 {
   "success": true,          // boolean, indica si la operación fue exitosa
-  "message": "string",      // string, opcional, mensaje descriptivo
-  "error": "string",        // string, opcional, detalles del error (si ocurrió)
-  "data": {},               // object, opcional, datos específicos de la respuesta
-  "metadata": {}            // object, opcional, metadatos adicionales
+  "message": "string",      // string, mensaje descriptivo sobre el resultado
+  "error": null,            // string, presente solo si hay un error
+  "error_code": null,       // string, código de error estandarizado (ej. NOT_FOUND)
+  // Campos específicos según el tipo de respuesta
 }
 ```
 
 ## Error Codes
 
-| Status Code | Description                                   |
-|-------------|-----------------------------------------------|
-| 400         | Bad Request - Error en los parámetros         |
-| 401         | Unauthorized - API key inválida               |
-| 403         | Forbidden - No tiene permisos                 |
-| 404         | Not Found - Recurso no encontrado             |
-| 429         | Too Many Requests - Rate limit excedido       |
-| 500         | Internal Server Error - Error del servidor    |
+El servicio utiliza códigos de error estandarizados:
+
+| Error Code | Description                                   |
+|------------|-----------------------------------------------|
+| NOT_FOUND | Recurso no encontrado |
+| DOCUMENT_NOT_FOUND | Documento no encontrado |
+| COLLECTION_NOT_FOUND | Colección no encontrada |
+| PERMISSION_DENIED | No tiene permisos para la operación |
+| VALIDATION_ERROR | Error en datos de entrada |
+| QUOTA_EXCEEDED | Límite de cuota alcanzado |
+| FILE_PROCESSING_ERROR | Error procesando el archivo |
+| UNSUPPORTED_FILE_TYPE | Tipo de archivo no soportado |
+| SERVICE_UNAVAILABLE | Servicio no disponible |
+| INTERNAL_ERROR | Error interno del servidor |
 
 ## Endpoints
 
@@ -128,6 +134,19 @@ Elimina una colección completa y todos sus documentos.
 
 ---
 
+### Processor Configuration
+
+#### Get Processing Config
+```
+GET /processing-config
+```
+
+Obtiene la configuración actual de procesamiento de documentos.
+
+**Response:** [ProcessingConfigResponse](#model-processingconfigresponse)
+
+---
+
 ### Health Check
 
 #### Service Status
@@ -151,14 +170,11 @@ Verifica el estado del servicio y sus dependencias.
 {
   "success": true,
   "message": "Documentos procesados exitosamente",
-  "error": null,
-  "document_ids": ["string"],
-  "collection_name": "string",
-  "document_count": 1,
-  "node_count": 5,
-  "metadata": {
-    "processing_time": 1.5
-  }
+  "document_ids": ["doc_12345", "doc_67890"],
+  "collection_name": "manuales_tecnicos",
+  "document_count": 2,
+  "node_count": 15,
+  "processing_time": 1.5
 }
 ```
 
@@ -169,11 +185,10 @@ Verifica el estado del servicio y sus dependencias.
 {
   "success": true,
   "message": "Documento eliminado exitosamente",
-  "error": null,
-  "document_id": "string",
+  "document_id": "doc_12345",
   "deleted": true,
-  "collection_name": "string",
-  "deleted_chunks": 5
+  "collection_name": "manuales_tecnicos",
+  "chunks_deleted": 8
 }
 ```
 
@@ -184,11 +199,30 @@ Verifica el estado del servicio y sus dependencias.
 {
   "success": true,
   "message": "Colección eliminada exitosamente",
-  "error": null,
-  "collection_name": "string",
+  "collection_name": "manuales_tecnicos",
   "deleted": true,
-  "documents_deleted": 10,
-  "deleted_chunks": 50
+  "documents_deleted": 12,
+  "chunks_deleted": 156
+}
+```
+
+<span id="model-processingconfigresponse"></span>
+### ProcessingConfigResponse
+
+```json
+{
+  "success": true,
+  "message": "Configuración de procesamiento obtenida correctamente",
+  "default_chunk_size": 512,
+  "default_chunk_overlap": 50,
+  "supported_file_types": [
+    {"extension": "pdf", "description": "PDF Document"},
+    {"extension": "docx", "description": "Microsoft Word Document"},
+    {"extension": "txt", "description": "Text File"},
+    {"extension": "md", "description": "Markdown File"}
+  ],
+  "max_file_size_mb": 10,
+  "processing_modes": ["simple", "advanced"]
 }
 ```
 
@@ -198,13 +232,15 @@ Verifica el estado del servicio y sus dependencias.
 ```json
 {
   "success": true,
-  "message": "Service is healthy",
-  "error": null,
-  "status": "healthy",
-  "components": {
-    "supabase": "available",
-    "embedding_service": "available"
+  "message": "Servicio en funcionamiento",
+  "service": "ingestion-service",
+  "version": "1.2.0",
+  "dependencies": {
+    "database": "healthy",
+    "vector_store": "healthy",
+    "embedding_service": "healthy",
+    "file_processor": "healthy"
   },
-  "version": "1.2.0"
+  "timestamp": "2023-06-15T16:45:30Z"
 }
 ```

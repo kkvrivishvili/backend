@@ -32,7 +32,8 @@ from common.models import (
     TenantInfo, HealthResponse, AgentConfig, AgentRequest, AgentResponse, 
     AgentTool, ChatMessage, ChatRequest, ChatResponse, RAGConfig,
     ConversationCreate, ConversationResponse, ConversationsListResponse, MessageListResponse,
-    PublicChatRequest, PublicTenantInfo
+    PublicChatRequest, PublicTenantInfo, AgentsListResponse, AgentSummary,
+    DeleteAgentResponse, DeleteConversationResponse  # Agregar el modelo DeleteConversationResponse
 )
 from common.auth import verify_tenant, check_tenant_quotas, validate_model_access
 from common.supabase import get_supabase_client, init_supabase
@@ -773,54 +774,52 @@ async def get_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tena
 
 
 # Endpoint para listar agentes
-@app.get("/agents", response_model=List[AgentResponse], tags=["agents"])
+@app.get("/agents", response_model=AgentsListResponse, tags=["agents"])
 @handle_service_error_simple
 @with_tenant_context
-async def list_agents(tenant_info: TenantInfo = Depends(verify_tenant)) -> List[AgentResponse]:
+async def list_agents(tenant_info: TenantInfo = Depends(verify_tenant)) -> AgentsListResponse:
     """
-    Lista todos los agentes de un tenant.
+    Lista todos los agentes disponibles para el tenant actual.
     
     Args:
-        tenant_info: Información del tenant (inyectada por Depends)
+        tenant_info: Información del tenant (inyectada mediante verify_tenant)
         
     Returns:
-        List[AgentResponse]: Lista de agentes
+        AgentsListResponse: Lista de agentes disponibles
     """
-    tenant_id = get_current_tenant_id()
+    tenant_id = tenant_info.tenant_id
     
-    supabase = get_supabase_client()
-    
-    # Obtener todos los agentes del tenant
-    result = await supabase.from_("ai.agent_configs") \
-        .select("*") \
-        .eq("tenant_id", tenant_id) \
-        .execute()
+    try:
+        supabase = get_supabase_client()
+        result = supabase.table("agents").select("*").eq("tenant_id", tenant_id).order("created_at", desc=True).execute()
         
-    if not result.data:
-        return []
+        agents_list = []
+        for agent_data in result.data:
+            agent_summary = AgentSummary(
+                agent_id=agent_data["id"],
+                name=agent_data["name"],
+                description=agent_data.get("description", ""),
+                model=agent_data.get("model", "gpt-3.5-turbo"),
+                is_public=agent_data.get("is_public", False),
+                created_at=agent_data.get("created_at"),
+                updated_at=agent_data.get("updated_at")
+            )
+            agents_list.append(agent_summary)
         
-    # Convertir a AgentResponse
-    agents = []
-    for agent_data in result.data:
-        agent = AgentResponse(
-            agent_id=agent_data["agent_id"],
-            tenant_id=agent_data["tenant_id"],
-            name=agent_data["name"],
-            description=agent_data["description"],
-            agent_type=agent_data["agent_type"],
-            llm_model=agent_data["llm_model"],
-            tools=agent_data["tools"],
-            system_prompt=agent_data["system_prompt"],
-            memory_enabled=agent_data["memory_enabled"],
-            memory_window=agent_data["memory_window"],
-            is_active=agent_data["is_active"],
-            metadata=agent_data["metadata"],
-            created_at=agent_data["created_at"],
-            updated_at=agent_data["updated_at"]
+        return AgentsListResponse(
+            success=True,
+            message="Agentes obtenidos exitosamente",
+            agents=agents_list,
+            count=len(agents_list)
         )
-        agents.append(agent)
-    
-    return agents
+        
+    except Exception as e:
+        logger.error(f"Error listing agents: {str(e)}")
+        raise ServiceError(
+            message="Error al listar agentes",
+            status_code=500,
+            error_code="LIST_FAILED"
+        )
 
 
 # Endpoint para actualizar un agente
@@ -917,49 +916,76 @@ async def update_agent(
 
 
 # Endpoint para eliminar un agente
-@app.delete("/agents/{agent_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["agents"])
+@app.delete("/agents/{agent_id}", response_model=DeleteAgentResponse, tags=["agents"])
 @handle_service_error_simple
 @with_agent_context
-async def delete_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tenant)):
+async def delete_agent(
+    agent_id: str, 
+    tenant_info: TenantInfo = Depends(verify_tenant)
+) -> DeleteAgentResponse:
     """
-    Elimina un agente existente.
+    Elimina un agente específico y sus conversaciones asociadas.
     
     Args:
-        agent_id: ID del agente
-        tenant_info: Información del tenant (inyectada por Depends)
+        agent_id: ID del agente a eliminar
+        tenant_info: Información del tenant (inyectada mediante verify_tenant)
+        
+    Returns:
+        DeleteAgentResponse: Resultado de la operación de eliminación
     """
+    # El tenant_id y agent_id ya están disponibles gracias al decorador
     tenant_id = get_current_tenant_id()
-    agent_id = get_current_agent_id()
     
-    # Verificar que el agente exista y pertenezca al tenant
-    supabase = get_supabase_client()
-    agent_check = await supabase.from_("ai.agent_configs") \
-        .select("*") \
-        .eq("tenant_id", tenant_id) \
-        .eq("agent_id", agent_id) \
-        .single() \
-        .execute()
-    
-    if not agent_check.data:
-        logger.warning(f"Intento de eliminar agente no existente: {agent_id} por tenant {tenant_id}")
-        raise ServiceError(
-            message=f"Agent with ID {agent_id} not found for this tenant",
-            status_code=404,
-            error_code="agent_not_found"
+    try:
+        supabase = get_supabase_client()
+        
+        # Verificar que el agente exista y pertenezca al tenant
+        agent_result = supabase.table("agents").select("*").eq("id", agent_id).eq("tenant_id", tenant_id).execute()
+        
+        if not agent_result.data:
+            raise ServiceError(
+                message=f"Agent {agent_id} not found or not accessible",
+                status_code=404,
+                error_code="AGENT_NOT_FOUND"
+            )
+        
+        # Eliminar conversaciones asociadas al agente
+        # Primero contamos cuántas conversaciones hay
+        count_result = supabase.table("conversations").select("count", count="exact").eq("agent_id", agent_id).eq("tenant_id", tenant_id).execute()
+        conversations_count = count_result.count if hasattr(count_result, "count") else 0
+        
+        # Eliminar las conversaciones
+        if conversations_count > 0:
+            delete_conversations = supabase.table("conversations").delete().eq("agent_id", agent_id).eq("tenant_id", tenant_id).execute()
+        
+        # Eliminar el agente
+        delete_result = supabase.table("agents").delete().eq("id", agent_id).eq("tenant_id", tenant_id).execute()
+        
+        if not delete_result.data:
+            raise ServiceError(
+                message="Error al eliminar el agente",
+                status_code=500,
+                error_code="DELETE_FAILED"
+            )
+        
+        return DeleteAgentResponse(
+            success=True,
+            message=f"Agente {agent_id} eliminado exitosamente",
+            agent_id=agent_id,
+            deleted=True,
+            conversations_deleted=conversations_count
         )
-    
-    # Eliminar el agente de la base de datos
-    delete_result = await supabase.from_("ai.agent_configs") \
-        .delete() \
-        .eq("tenant_id", tenant_id) \
-        .eq("agent_id", agent_id) \
-        .execute()
-    
-    if delete_result.error:
-        logger.error(f"Error eliminando agente para tenant '{tenant_id}': {delete_result.error}")
-        raise ServiceError(f"Error deleting agent: {delete_result.error}")
-    
-    logger.info(f"Agente {agent_id} eliminado correctamente para tenant '{tenant_id}'")
+        
+    except ServiceError:
+        # Re-lanzar ServiceError para que sea manejado por el decorador
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting agent: {str(e)}")
+        raise ServiceError(
+            message="Error al eliminar el agente",
+            status_code=500,
+            error_code="DELETE_FAILED"
+        )
 
 
 # Endpoint para chatear con un agente
@@ -1173,19 +1199,22 @@ async def chat_with_agent(
 
 
 # Endpoint para chatear con un agente
-@app.post("/chat", response_model=AgentResponse, tags=["chat"])
-@handle_service_error_simple(on_error_response={"output": "Error procesando la consulta", "intermediate_steps": []})
+@app.post("/chat", response_model=ChatResponse, tags=["chat"])
+@handle_service_error_simple(on_error_response={"success": False, "message": "Error procesando la consulta", "error": "CHAT_PROCESSING_ERROR"})
 @with_tenant_context
-async def chat(chat_request: ChatRequest, request: Request) -> AgentResponse:
+async def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
     """
     Endpoint para chat con el agente.
     
+    Este endpoint permite interactuar con un agente enviando un mensaje y recibiendo
+    una respuesta estructurada.
+    
     Args:
-        chat_request: Solicitud de chat
-        request: Solicitud HTTP
+        chat_request: Solicitud de chat con el mensaje y configuración
+        request: Solicitud HTTP (inyectada automáticamente)
         
     Returns:
-        Respuesta del agente
+        ChatResponse: Respuesta estructurada del agente
     """
     tenant_id = get_current_tenant_id()
     # El tenant_id debe obtenerse del contexto aquí, no necesitamos pasarlo explícitamente
@@ -1255,10 +1284,18 @@ async def chat(chat_request: ChatRequest, request: Request) -> AgentResponse:
         logger.warning(f"Error al registrar uso: {e}")
     
     # Devolver resultado
-    return {
-        "output": result["answer"],
-        "intermediate_steps": result.get("intermediate_steps", [])
-    }
+    return ChatResponse(
+        conversation_id=chat_request.session_id,
+        message=ChatMessage(
+            role="assistant",
+            content=result["answer"]
+        ),
+        thinking=result.get("thinking", None),
+        tools_used=result.get("tools_used", None),
+        processing_time=0,
+        sources=result.get("sources", None),
+        context=chat_request.context
+    )
 
 
 # Endpoint para streaming de chat con el agente
@@ -1605,16 +1642,249 @@ async def public_chat_with_agent(
     )
     
     # Preparar respuesta siguiendo el modelo BaseResponse
-    return {
-        "success": True,
-        "message": "Chat processed successfully",
-        "data": {
-            "response": ai_message,
-            "session_id": session_id,
-            "thinking": thinking_steps,
-            "tools_used": tools_used
-        },
-        "metadata": {
-            "estimated_tokens": estimated_tokens
-        }
-    }
+    return ChatResponse(
+        conversation_id=session_id,
+        message=ChatMessage(
+            role="assistant",
+            content=ai_message
+        ),
+        thinking=thinking_steps,
+        tools_used=tools_used,
+        processing_time=0,
+        sources=[],
+        context=request.context
+    )
+
+# Endpoint para eliminar una conversación
+@app.delete("/conversations/{conversation_id}", response_model=DeleteConversationResponse, tags=["conversations"])
+@handle_service_error_simple
+@with_full_context
+async def delete_conversation(
+    conversation_id: str,
+    tenant_info: TenantInfo = Depends(verify_tenant)
+) -> DeleteConversationResponse:
+    """
+    Elimina una conversación específica y todos sus mensajes asociados.
+    
+    Args:
+        conversation_id: ID de la conversación a eliminar
+        tenant_info: Información del tenant (inyectada mediante verify_tenant)
+        
+    Returns:
+        DeleteConversationResponse: Resultado de la operación de eliminación
+    """
+    # El tenant_id y conversation_id ya están disponibles gracias al decorador
+    tenant_id = get_current_tenant_id()
+    
+    try:
+        supabase = get_supabase_client()
+        
+        # Verificar que la conversación exista y pertenezca al tenant
+        conversation_result = supabase.table("conversations").select("*").eq("id", conversation_id).eq("tenant_id", tenant_id).execute()
+        
+        if not conversation_result.data:
+            raise ServiceError(
+                message=f"Conversation {conversation_id} not found or not accessible",
+                status_code=404,
+                error_code="CONVERSATION_NOT_FOUND"
+            )
+        
+        # Contar mensajes asociados
+        messages_count_result = supabase.table("messages").select("count", count="exact").eq("conversation_id", conversation_id).execute()
+        messages_count = messages_count_result.count if hasattr(messages_count_result, "count") else 0
+        
+        # Eliminar mensajes asociados a la conversación
+        if messages_count > 0:
+            delete_messages = supabase.table("messages").delete().eq("conversation_id", conversation_id).execute()
+        
+        # Eliminar la conversación
+        delete_result = supabase.table("conversations").delete().eq("id", conversation_id).eq("tenant_id", tenant_id).execute()
+        
+        if not delete_result.data:
+            raise ServiceError(
+                message="Error al eliminar la conversación",
+                status_code=500,
+                error_code="DELETE_FAILED"
+            )
+        
+        return DeleteConversationResponse(
+            success=True,
+            message=f"Conversación {conversation_id} eliminada exitosamente",
+            conversation_id=conversation_id,
+            deleted=True,
+            messages_deleted=messages_count
+        )
+        
+    except ServiceError:
+        # Re-lanzar ServiceError para que sea manejado por el decorador
+        raise
+    except Exception as e:
+        logger.error(f"Error eliminando conversación: {str(e)}")
+        raise ServiceError(
+            message="Error al eliminar la conversación",
+            status_code=500,
+            error_code="DELETE_FAILED"
+        )
+
+# Endpoint para obtener mensajes de una conversación
+@app.get("/conversations/{conversation_id}/messages", response_model=MessageListResponse, tags=["conversations"])
+@handle_service_error_simple
+@with_full_context
+async def get_conversation_messages(
+    conversation_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    tenant_info: TenantInfo = Depends(verify_tenant)
+) -> MessageListResponse:
+    """
+    Obtiene los mensajes de una conversación específica.
+    
+    Args:
+        conversation_id: ID de la conversación
+        limit: Número máximo de mensajes a devolver (por defecto 50)
+        offset: Desplazamiento para paginación (por defecto 0)
+        tenant_info: Información del tenant (inyectada mediante verify_tenant)
+        
+    Returns:
+        MessageListResponse: Lista de mensajes de la conversación
+    """
+    # El tenant_id y conversation_id ya están disponibles gracias al decorador
+    tenant_id = get_current_tenant_id()
+    
+    try:
+        supabase = get_supabase_client()
+        
+        # Verificar que la conversación exista y pertenezca al tenant
+        conversation_result = supabase.table("conversations").select("*").eq("id", conversation_id).eq("tenant_id", tenant_id).execute()
+        
+        if not conversation_result.data:
+            raise ServiceError(
+                message=f"Conversation {conversation_id} not found or not accessible",
+                status_code=404,
+                error_code="CONVERSATION_NOT_FOUND"
+            )
+        
+        # Obtener los mensajes de la conversación
+        messages_result = supabase.table("messages").select("*").eq("conversation_id", conversation_id).order("created_at", desc=False).range(offset, offset + limit - 1).execute()
+        
+        # Convertir a formato ChatMessage
+        messages = []
+        for message_data in messages_result.data:
+            message = ChatMessage(
+                message_id=message_data.get("id"),
+                role=message_data.get("role", "user"),
+                content=message_data.get("content", ""),
+                created_at=message_data.get("created_at"),
+                metadata=message_data.get("metadata", {})
+            )
+            messages.append(message)
+        
+        # Obtener el conteo total de mensajes
+        count_result = supabase.table("messages").select("count", count="exact").eq("conversation_id", conversation_id).execute()
+        total_count = count_result.count if hasattr(count_result, "count") else len(messages)
+        
+        return MessageListResponse(
+            success=True,
+            message="Mensajes obtenidos exitosamente",
+            conversation_id=conversation_id,
+            messages=messages,
+            count=total_count
+        )
+        
+    except ServiceError:
+        # Re-lanzar ServiceError para que sea manejado por el decorador
+        raise
+    except Exception as e:
+        logger.error(f"Error obteniendo mensajes: {str(e)}")
+        raise ServiceError(
+            message="Error al obtener mensajes de la conversación",
+            status_code=500,
+            error_code="FETCH_FAILED"
+        )
+
+# Endpoint para listar conversaciones
+@app.get("/conversations", response_model=ConversationsListResponse, tags=["conversations"])
+@handle_service_error_simple
+@with_tenant_context
+async def list_conversations(
+    agent_id: Optional[str] = None,
+    tenant_info: TenantInfo = Depends(verify_tenant)
+) -> ConversationsListResponse:
+    """
+    Lista todas las conversaciones del tenant, opcionalmente filtradas por agente.
+    
+    Args:
+        agent_id: ID del agente para filtrar (opcional)
+        tenant_info: Información del tenant (inyectada mediante verify_tenant)
+        
+    Returns:
+        ConversationsListResponse: Lista de conversaciones
+    """
+    # El tenant_id ya está disponible gracias al decorador
+    tenant_id = get_current_tenant_id()
+    
+    try:
+        supabase = get_supabase_client()
+        
+        # Preparar la consulta base
+        query = supabase.table("conversations").select("*").eq("tenant_id", tenant_id)
+        
+        # Aplicar filtro por agente si se proporciona
+        if agent_id:
+            query = query.eq("agent_id", agent_id)
+            
+            # Verificar que el agente exista y pertenezca al tenant
+            agent_result = supabase.table("agents").select("id").eq("id", agent_id).eq("tenant_id", tenant_id).execute()
+            if not agent_result.data:
+                raise ServiceError(
+                    message=f"Agent {agent_id} not found or not accessible",
+                    status_code=404,
+                    error_code="AGENT_NOT_FOUND"
+                )
+        
+        # Ejecutar la consulta ordenando por fecha de actualización descendente
+        result = query.order("updated_at", desc=True).execute()
+        
+        # Procesar resultados
+        conversations_list = []
+        for conversation_data in result.data:
+            # Obtener el último mensaje (opcional si lo guardamos en la tabla de conversaciones)
+            last_message = None
+            try:
+                message_result = supabase.table("messages").select("*").eq("conversation_id", conversation_data["id"]).order("created_at", desc=True).limit(1).execute()
+                if message_result.data:
+                    last_message = message_result.data[0].get("content", "")
+                    if len(last_message) > 100:
+                        last_message = last_message[:97] + "..."
+            except Exception as e:
+                logger.warning(f"Error obteniendo último mensaje: {str(e)}")
+            
+            # Crear el resumen de conversación
+            conversation_summary = ConversationSummary(
+                conversation_id=conversation_data["id"],
+                agent_id=conversation_data["agent_id"],
+                title=conversation_data.get("title", "Nueva conversación"),
+                created_at=conversation_data.get("created_at"),
+                updated_at=conversation_data.get("updated_at"),
+                message_count=conversation_data.get("message_count", 0),
+                last_message=last_message
+            )
+            conversations_list.append(conversation_summary)
+        
+        return ConversationsListResponse(
+            success=True,
+            message="Conversaciones obtenidas exitosamente",
+            conversations=conversations_list,
+            count=len(conversations_list)
+        )
+        
+    except ServiceError:
+        # Re-lanzar ServiceError para que sea manejado por el decorador
+        raise
+    except Exception as e:
+        logger.error(f"Error listando conversaciones: {str(e)}")
+        raise ServiceError(
+            message="Error al listar conversaciones",
+            status_code=500,
+            error_code="LIST_FAILED"
+        )

@@ -30,7 +30,8 @@ from common.context import (
 # Importar nuestra biblioteca común
 from common.models import (
     TenantInfo, EmbeddingRequest, EmbeddingResponse, 
-    BatchEmbeddingRequest, TextItem, HealthResponse
+    BatchEmbeddingRequest, TextItem, HealthResponse, ModelListResponse,
+    CacheStatsResponse, CacheClearResponse
 )
 from common.auth import verify_tenant, check_tenant_quotas, validate_model_access
 from common.cache import (
@@ -464,12 +465,12 @@ async def batch_generate_embeddings(
     )
 
 
-@app.get("/models", response_model=Dict[str, Any])
+@app.get("/models", response_model=ModelListResponse, tags=["models"])
 @handle_service_error_simple
 @with_tenant_context
 async def list_available_models(
     tenant_info: TenantInfo = Depends(verify_tenant)
-) -> Dict[str, Any]:
+) -> ModelListResponse:
     """
     Lista los modelos de embedding disponibles para el tenant según su nivel de suscripción.
     
@@ -493,12 +494,11 @@ async def list_available_models(
             - subscription_tier: Nivel de suscripción ("free", "pro", "business")
         
     Returns:
-        Dict[str, Any]: Diccionario con modelos disponibles y su configuración
+        ModelListResponse: Respuesta estructurada con modelos disponibles
+            - success: Indica si la operación fue exitosa
+            - message: Mensaje descriptivo
+            - models: Diccionario de modelos disponibles con sus propiedades
             - default_model: Modelo predeterminado para el tenant
-            - models: Diccionario de modelos disponibles con sus propiedades:
-                - dimensions: Tamaño del vector de embedding
-                - description: Descripción de las capacidades del modelo
-                - max_tokens: Límite máximo de tokens que acepta el modelo
             - subscription_tier: Nivel de suscripción actual del tenant
     
     Raises:
@@ -538,12 +538,14 @@ async def list_available_models(
     if subscription_tier in ["pro", "enterprise"]:
         available_models.update(premium_models)
     
-    return {
-        "tenant_id": tenant_id,
-        "subscription_tier": subscription_tier,
-        "available_models": available_models,
-        "default_model": settings.default_embedding_model
-    }
+    return ModelListResponse(
+        success=True,
+        message="Modelos de embedding disponibles obtenidos correctamente",
+        models=available_models,
+        default_model=settings.default_embedding_model,
+        subscription_tier=subscription_tier,
+        tenant_id=tenant_id
+    )
 
 
 @app.get("/status", response_model=HealthResponse)
@@ -646,20 +648,29 @@ async def get_service_status() -> HealthResponse:
     )
 
 
-@app.get("/cache/stats", response_model=Dict[str, Any])
+@app.get("/cache/stats", response_model=CacheStatsResponse, tags=["cache"])
 @handle_service_error_simple
 @with_full_context
 async def get_cache_stats(
     tenant_info: TenantInfo = Depends(verify_tenant)
-) -> Dict[str, Any]:
+) -> CacheStatsResponse:
     """
-    Obtiene estadísticas sobre el uso de caché.
+    Obtiene estadísticas sobre el uso de caché para el tenant actual.
+    
+    Este endpoint proporciona información sobre el uso del caché de embeddings,
+    incluyendo cantidad de embeddings almacenados y memoria utilizada.
     
     Args:
-        tenant_info: Información del tenant (inyectada)
+        tenant_info: Información del tenant (inyectada mediante verify_tenant)
         
     Returns:
-        dict: Estadísticas de caché
+        CacheStatsResponse: Estadísticas de caché con formato estandarizado
+            - success: Indica si la operación fue exitosa
+            - message: Mensaje descriptivo
+            - cache_enabled: Indica si el caché está habilitado
+            - cached_embeddings: Cantidad de embeddings en caché
+            - memory_usage_bytes: Uso de memoria en bytes
+            - memory_usage_mb: Uso de memoria en megabytes
     """
     tenant_id = tenant_info.tenant_id
     
@@ -668,15 +679,17 @@ async def get_cache_stats(
     conversation_id = get_current_conversation_id()
     
     if not redis_client:
-        return {
-            "tenant_id": tenant_id,
-            "agent_id": agent_id,
-            "conversation_id": conversation_id,
-            "cache_enabled": False,
-            "cached_embeddings": 0,
-            "memory_usage_bytes": 0,
-            "memory_usage_mb": 0
-        }
+        return CacheStatsResponse(
+            success=True,
+            message="Caché no disponible",
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            conversation_id=conversation_id,
+            cache_enabled=False,
+            cached_embeddings=0,
+            memory_usage_bytes=0,
+            memory_usage_mb=0
+        )
         
     # Construir patrón de búsqueda según los IDs proporcionados
     pattern_parts = [tenant_id, "embed"]
@@ -700,33 +713,41 @@ async def get_cache_stats(
         if key_memory:
             memory_usage += key_memory
     
-    return {
-        "tenant_id": tenant_id,
-        "agent_id": agent_id,
-        "conversation_id": conversation_id,
-        "cache_enabled": True,
-        "cached_embeddings": len(keys),
-        "memory_usage_bytes": memory_usage,
-        "memory_usage_mb": round(memory_usage / (1024 * 1024), 2) if memory_usage else 0
-    }
+    return CacheStatsResponse(
+        success=True,
+        message="Estadísticas de caché obtenidas correctamente",
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        conversation_id=conversation_id,
+        cache_enabled=True,
+        cached_embeddings=len(keys),
+        memory_usage_bytes=memory_usage,
+        memory_usage_mb=round(memory_usage / (1024 * 1024), 2) if memory_usage else 0
+    )
 
 
-@app.delete("/cache/clear", response_model=Dict[str, Any])
+@app.delete("/cache/clear", response_model=CacheClearResponse, tags=["cache"])
 @handle_service_error_simple
 @with_tenant_context
 async def clear_cache(
     cache_type: str = "embeddings",
     tenant_info: TenantInfo = Depends(verify_tenant)
-) -> Dict[str, Any]:
+) -> CacheClearResponse:
     """
     Limpia la caché para el tenant actual.
     
+    Este endpoint elimina las entradas de caché asociadas con el tenant actual,
+    permitiendo filtrar por tipo de caché.
+    
     Args:
-        cache_type: Tipo de caché (ej: 'embed', 'query') o None para todo
-        tenant_info: Información del tenant (inyectada)
+        cache_type: Tipo de caché (ej: 'embeddings', 'query') o 'all' para todo
+        tenant_info: Información del tenant (inyectada mediante verify_tenant)
         
     Returns:
-        dict: Resultado de la operación
+        CacheClearResponse: Resultado de la operación de limpieza
+            - success: Indica si la operación fue exitosa
+            - message: Mensaje descriptivo
+            - keys_deleted: Número de claves eliminadas del caché
     """
     tenant_id = tenant_info.tenant_id
     
@@ -735,19 +756,19 @@ async def clear_cache(
     conversation_id = get_current_conversation_id()
     
     if not redis_client:
-        return {
-            "success": False,
-            "message": "Redis no está disponible",
-            "keys_deleted": 0
-        }
+        return CacheClearResponse(
+            success=False,
+            message="Redis no está disponible",
+            keys_deleted=0
+        )
         
     keys_deleted = clear_tenant_cache(tenant_id, cache_type, agent_id, conversation_id)
         
-    return {
-        "success": True,
-        "message": f"Se han eliminado {keys_deleted} claves de caché",
-        "keys_deleted": keys_deleted
-    }
+    return CacheClearResponse(
+        success=True,
+        message=f"Se han eliminado {keys_deleted} claves de caché",
+        keys_deleted=keys_deleted
+    )
 
 
 def get_available_models_for_tier(tier: str) -> Dict[str, Dict[str, Any]]:

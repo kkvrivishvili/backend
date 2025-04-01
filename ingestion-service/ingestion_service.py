@@ -345,6 +345,8 @@ async def ingest_documents(
         )
     
     return IngestionResponse(
+        success=True,
+        message="Documentos procesados exitosamente",
         document_ids=document_ids,
         node_count=total_nodes
     )
@@ -419,6 +421,8 @@ async def ingest_file(
     logger.info(f"Archivo {file.filename} procesado con {len(node_data)} fragmentos")
     
     return IngestionResponse(
+        success=True,
+        message=f"Archivo {file.filename} procesado exitosamente",
         document_ids=[doc_id],
         node_count=len(node_data)
     )

@@ -384,9 +384,9 @@ async def process_query(
     
     if not query_text:
         raise ServiceError(
-            message="Query text cannot be empty",
+            message="Consulta vacía",
             status_code=400,
-            error_code="empty_query"
+            error_code="EMPTY_QUERY"
         )
     
     # Crear motor de consulta para el tenant
@@ -862,7 +862,7 @@ async def create_collection(
     
     if collection_result.data:
         raise ServiceError(
-            message=f"Collection {name} already exists for this tenant",
+            message="La colección ya existe",
             status_code=400,
             error_code="COLLECTION_EXISTS"
         )
@@ -877,7 +877,7 @@ async def create_collection(
     
     if not result.data:
         raise ServiceError(
-            message="Error creating collection in database",
+            message="Error creando la colección",
             status_code=500,
             error_code="CREATION_FAILED"
         )
@@ -926,7 +926,7 @@ async def update_collection(
     
     if not collection_result.data:
         raise ServiceError(
-            message=f"Collection {collection_id} not found",
+            message="La colección no existe",
             status_code=404,
             error_code="NOT_FOUND"
         )
@@ -934,7 +934,7 @@ async def update_collection(
     # Verificar pertenencia al tenant
     if collection_result.data[0]["tenant_id"] != tenant_id:
         raise ServiceError(
-            message="You can only update your own collections",
+            message="Solo puedes actualizar tus propias colecciones",
             status_code=403,
             error_code="FORBIDDEN"
         )
@@ -949,7 +949,7 @@ async def update_collection(
     
     if not result.data:
         raise ServiceError(
-            message="Error updating collection in database",
+            message="Error actualizando la colección",
             status_code=500,
             error_code="UPDATE_FAILED"
         )
@@ -991,7 +991,7 @@ async def get_collection_stats(
     
     if not collection_result.data:
         raise ServiceError(
-            message=f"Colección {collection_id} no encontrada",
+            message="La colección no existe",
             status_code=404,
             error_code="NOT_FOUND"
         )
@@ -1001,7 +1001,7 @@ async def get_collection_stats(
         raise ServiceError(
             message="Solo puedes ver estadísticas de tus propias colecciones",
             status_code=403,
-            error_code="FORBIDDEN"
+            error_code="PERMISSION_DENIED"
         )
     
     collection_name = collection_result.data[0]["name"]
@@ -1077,7 +1077,7 @@ async def get_collection_tool(
     
     if not result.data:
         raise ServiceError(
-            message=f"Collection {collection_id} not found or not accessible",
+            message="La colección no existe o no es accesible",
             status_code=404,
             error_code="COLLECTION_NOT_FOUND"
         )
@@ -1087,16 +1087,16 @@ async def get_collection_tool(
     # Crear configuración de herramienta
     tool = AgentTool(
         name=f"collection_{collection_id}",
-        description=f"Search in the '{collection['name']}' knowledge base",
+        description=f"Buscar en la base de conocimiento '{collection['name']}'",
         display_name=collection['name'],
         type="function",
         function={
             "name": f"search_{collection_id}",
-            "description": f"Search for information in the '{collection['name']}' knowledge base",
+            "description": f"Buscar información en la base de conocimiento '{collection['name']}'",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The search query"}
+                    "query": {"type": "string", "description": "La consulta de búsqueda"}
                 },
                 "required": ["query"]
             }

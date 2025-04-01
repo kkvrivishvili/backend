@@ -194,6 +194,30 @@ class AgentResponse(BaseResponse):
     metadata: Optional[Dict[str, Any]] = None
 
 
+class AgentSummary(BaseModel):
+    """Resumen de información básica de un agente."""
+    agent_id: str
+    name: str
+    description: Optional[str] = None
+    model: str
+    is_public: bool = False
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class AgentsListResponse(BaseResponse):
+    """Respuesta para listado de agentes."""
+    agents: List[AgentSummary] = Field(default_factory=list)
+    count: int = 0
+
+
+class DeleteAgentResponse(BaseResponse):
+    """Respuesta para eliminación de agente."""
+    agent_id: str
+    deleted: bool = True
+    conversations_deleted: int = 0
+
+
 class ChatMessage(BaseModel):
     """Mensaje individual en una conversación."""
     role: str  # 'user', 'assistant', 'system'
@@ -222,6 +246,58 @@ class ChatResponse(BaseResponse):
     processing_time: float
     tools_used: Optional[List[str]] = None
     context: Optional[Dict[str, Any]] = None
+
+
+class ConversationSummary(BaseModel):
+    """Resumen de información básica de una conversación."""
+    conversation_id: str
+    agent_id: str
+    title: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    message_count: int = 0
+    last_message: Optional[str] = None
+
+
+class ConversationsListResponse(BaseResponse):
+    """Respuesta para listado de conversaciones."""
+    conversations: List[ConversationSummary] = Field(default_factory=list)
+    count: int = 0
+
+
+class DeleteConversationResponse(BaseResponse):
+    """Respuesta para eliminación de conversación."""
+    conversation_id: str
+    deleted: bool = True
+    messages_deleted: int = 0
+
+
+class AgentExecutionResponse(BaseResponse):
+    """Respuesta para ejecución de un agente."""
+    agent_id: str
+    conversation_id: Optional[str] = None
+    response: str
+    tools_used: List[Dict[str, Any]] = Field(default_factory=list)
+    tokens_in: int = 0
+    tokens_out: int = 0
+    processing_time: float = 0.0
+    model: str
+
+
+class ToolInfo(BaseModel):
+    """Información sobre una herramienta disponible."""
+    name: str
+    description: str
+    type: str
+    display_name: Optional[str] = None
+    function: Optional[Dict[str, Any]] = None
+    parameters: Optional[Dict[str, Any]] = None
+
+
+class ToolsListResponse(BaseResponse):
+    """Respuesta para listado de herramientas disponibles."""
+    tools: List[ToolInfo] = Field(default_factory=list)
+    count: int = 0
 
 
 class RAGConfig(BaseModel):
@@ -425,3 +501,27 @@ class DeleteCollectionResponse(BaseResponse):
     collection_name: str
     deleted: bool
     documents_deleted: int = 0
+
+
+class ModelListResponse(BaseResponse):
+    """Respuesta con la lista de modelos disponibles."""
+    models: Dict[str, Any] = Field(default_factory=dict)
+    default_model: str
+    subscription_tier: str
+    tenant_id: str
+
+
+class CacheStatsResponse(BaseResponse):
+    """Estadísticas de uso del caché."""
+    tenant_id: str
+    agent_id: Optional[str] = None
+    conversation_id: Optional[str] = None
+    cache_enabled: bool = False
+    cached_embeddings: int = 0
+    memory_usage_bytes: int = 0
+    memory_usage_mb: float = 0.0
+
+
+class CacheClearResponse(BaseResponse):
+    """Respuesta a la operación de limpieza de caché."""
+    keys_deleted: int = 0

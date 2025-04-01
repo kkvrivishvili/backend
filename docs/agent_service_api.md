@@ -17,28 +17,34 @@ Authorization: Bearer {tenant_api_key}
 
 ## Standard Response Format
 
-Todas las respuestas siguen este formato estándar:
+Todas las respuestas siguen el formato estandarizado `BaseResponse`:
 
 ```json
 {
   "success": true,          // boolean, indica si la operación fue exitosa
-  "message": "string",      // string, opcional, mensaje descriptivo
-  "error": "string",        // string, opcional, detalles del error (si ocurrió)
-  "data": {},               // object, opcional, datos específicos de la respuesta
-  "metadata": {}            // object, opcional, metadatos adicionales
+  "message": "string",      // string, mensaje descriptivo sobre el resultado
+  "error": null,            // string, presente solo si hay un error
+  "error_code": null,       // string, código de error estandarizado (ej. NOT_FOUND)
+  // Campos específicos según el tipo de respuesta
 }
 ```
 
 ## Error Codes
 
-| Status Code | Description                                   |
-|-------------|-----------------------------------------------|
-| 400         | Bad Request - Error en los parámetros         |
-| 401         | Unauthorized - API key inválida               |
-| 403         | Forbidden - No tiene permisos                 |
-| 404         | Not Found - Recurso no encontrado             |
-| 429         | Too Many Requests - Rate limit excedido       |
-| 500         | Internal Server Error - Error del servidor    |
+El servicio utiliza códigos de error estandarizados:
+
+| Error Code | Description                                   |
+|------------|-----------------------------------------------|
+| NOT_FOUND | Recurso no encontrado |
+| AGENT_NOT_FOUND | Agente no encontrado |
+| CONVERSATION_NOT_FOUND | Conversación no encontrada |
+| PERMISSION_DENIED | No tiene permisos para la operación |
+| VALIDATION_ERROR | Error en datos de entrada |
+| QUOTA_EXCEEDED | Límite de cuota alcanzado |
+| RATE_LIMITED | Límite de tasa excedido |
+| DELETE_FAILED | Error durante eliminación de recurso |
+| SERVICE_UNAVAILABLE | Servicio no disponible |
+| INTERNAL_ERROR | Error interno del servidor |
 
 ## Endpoints
 
@@ -273,6 +279,91 @@ Endpoint público para chat con agentes públicos (no requiere autenticación).
 
 ---
 
+### Chat Operations
+
+#### Chat with Agent
+```
+POST /agents/{agent_id}/chat
+```
+
+Interactúa con un agente específico en una conversación.
+
+**Path Parameters:**
+- `agent_id` (string, required) - ID del agente
+
+**Request Body:**
+```json
+{
+  "message": "string",                    // Mensaje a enviar al agente
+  "conversation_id": "string",            // Opcional, ID de conversación existente
+  "context": {},                          // Opcional, contexto para la conversación
+  "stream": false                         // Opcional, si se debe usar streaming
+}
+```
+
+**Response:** [ChatResponse](#model-chatresponse)
+
+---
+
+#### Generic Chat
+```
+POST /chat
+```
+
+Interactúa con un agente usando una configuración personalizada.
+
+**Request Body:**
+```json
+{
+  "message": "string",                    // Mensaje a enviar al agente
+  "agent_id": "string",                   // ID del agente
+  "conversation_id": "string",            // Opcional, ID de conversación existente
+  "context": {},                          // Opcional, contexto para la conversación
+  "stream": false                         // Opcional, si se debe usar streaming
+}
+```
+
+**Response:** [ChatResponse](#model-chatresponse)
+
+---
+
+#### Chat Streaming
+```
+POST /chat/stream
+```
+
+Versión de streaming de la operación de chat, retorna respuestas progresivamente.
+
+**Request Body:** Same as [Generic Chat](#generic-chat)
+
+**Response:** Server-Sent Events stream con [ChatResponse](#model-chatresponse) fragmentado
+
+---
+
+#### Public Chat
+```
+POST /public/chat/{agent_id}
+```
+
+Endpoint para chat público sin autenticación para agentes marcados como públicos.
+
+**Path Parameters:**
+- `agent_id` (string, required) - ID del agente público
+
+**Request Body:**
+```json
+{
+  "message": "string",                    // Mensaje a enviar al agente
+  "tenant_slug": "string",                // Slug del tenant
+  "session_id": "string",                 // Opcional, ID de sesión existente
+  "context": {}                           // Opcional, contexto para la conversación
+}
+```
+
+**Response:** [ChatResponse](#model-chatresponse)
+
+---
+
 ### Tools Management
 
 #### List Available Tools
@@ -309,31 +400,21 @@ Verifica el estado del servicio y sus dependencias.
 {
   "success": true,
   "message": "Agente creado exitosamente",
-  "error": null,
-  "agent_id": "string",
-  "name": "string",
-  "description": "string",
-  "system_prompt": "string",
-  "model": "string",
+  "agent_id": "ag_123456789",
+  "name": "Customer Support Agent",
+  "description": "Asistente para soporte al cliente",
+  "model": "gpt-3.5-turbo",
+  "system_prompt": "Eres un asistente de soporte al cliente...",
   "tools": [
     {
-      "name": "string",
-      "description": "string",
-      "type": "string",
-      "function": {
-        "name": "string",
-        "description": "string",
-        "parameters": {}
-      }
+      "name": "search_knowledge_base",
+      "description": "Buscar en la base de conocimientos",
+      "type": "function"
     }
   ],
   "is_public": false,
-  "created_at": "2025-01-01T00:00:00",
-  "updated_at": "2025-01-01T00:00:00",
-  "rag_config": {
-    "collections": ["string"],
-    "enabled": true
-  }
+  "created_at": "2023-06-15T10:30:45Z",
+  "updated_at": "2023-06-15T10:30:45Z"
 }
 ```
 
@@ -344,18 +425,27 @@ Verifica el estado del servicio y sus dependencias.
 {
   "success": true,
   "message": "Agentes obtenidos exitosamente",
-  "error": null,
   "agents": [
     {
-      "agent_id": "string",
-      "name": "string",
-      "description": "string",
-      "model": "string",
+      "agent_id": "ag_123456789",
+      "name": "Customer Support Agent",
+      "description": "Asistente para soporte al cliente",
+      "model": "gpt-3.5-turbo",
       "is_public": false,
-      "created_at": "2025-01-01T00:00:00"
+      "created_at": "2023-06-15T10:30:45Z",
+      "updated_at": "2023-06-15T10:30:45Z"
+    },
+    {
+      "agent_id": "ag_987654321",
+      "name": "Sales Assistant",
+      "description": "Asistente para ventas",
+      "model": "gpt-4",
+      "is_public": true,
+      "created_at": "2023-06-10T14:22:33Z",
+      "updated_at": "2023-06-14T09:15:20Z"
     }
   ],
-  "count": 1
+  "count": 2
 }
 ```
 
@@ -365,11 +455,32 @@ Verifica el estado del servicio y sus dependencias.
 ```json
 {
   "success": true,
-  "message": "Agente eliminado exitosamente",
-  "error": null,
-  "agent_id": "string",
+  "message": "Agente ag_123456789 eliminado exitosamente",
+  "agent_id": "ag_123456789",
   "deleted": true,
-  "conversations_deleted": 3
+  "conversations_deleted": 5
+}
+```
+
+<span id="model-chatresponse"></span>
+### ChatResponse
+
+```json
+{
+  "success": true,
+  "message": "Consulta procesada exitosamente",
+  "conversation_id": "conv_987654321",
+  "message": {
+    "role": "assistant",
+    "content": "Hola, ¿en qué puedo ayudarte hoy?",
+    "metadata": {
+      "processing_time": 0.853
+    }
+  },
+  "thinking": "El usuario ha iniciado una conversación, voy a saludar cordialmente...",
+  "tools_used": ["none"],
+  "processing_time": 0.853,
+  "sources": []
 }
 ```
 
@@ -380,14 +491,14 @@ Verifica el estado del servicio y sus dependencias.
 {
   "success": true,
   "message": "Conversación creada exitosamente",
-  "error": null,
-  "conversation_id": "string",
-  "agent_id": "string",
-  "title": "string",
-  "created_at": "2025-01-01T00:00:00",
-  "updated_at": "2025-01-01T00:00:00",
-  "message_count": 0,
-  "metadata": {}
+  "conversation_id": "conv_987654321",
+  "tenant_id": "tenant_123",
+  "agent_id": "ag_123456789",
+  "title": "Consulta sobre productos",
+  "status": "active",
+  "created_at": "2023-06-15T10:30:45Z",
+  "updated_at": "2023-06-15T10:30:45Z",
+  "messages_count": 0
 }
 ```
 
@@ -398,18 +509,27 @@ Verifica el estado del servicio y sus dependencias.
 {
   "success": true,
   "message": "Conversaciones obtenidas exitosamente",
-  "error": null,
   "conversations": [
     {
-      "conversation_id": "string",
-      "agent_id": "string",
-      "title": "string",
-      "created_at": "2025-01-01T00:00:00",
-      "updated_at": "2025-01-01T00:00:00",
-      "message_count": 5
+      "conversation_id": "conv_987654321",
+      "agent_id": "ag_123456789",
+      "title": "Consulta sobre productos",
+      "created_at": "2023-06-15T10:30:45Z",
+      "updated_at": "2023-06-15T10:35:22Z",
+      "message_count": 4,
+      "last_message": "Gracias por la información..."
+    },
+    {
+      "conversation_id": "conv_456789123",
+      "agent_id": "ag_123456789",
+      "title": "Problema técnico",
+      "created_at": "2023-06-14T15:20:33Z",
+      "updated_at": "2023-06-14T15:45:10Z",
+      "message_count": 8,
+      "last_message": "El problema ha sido resuelto..."
     }
   ],
-  "count": 1
+  "count": 2
 }
 ```
 
@@ -420,18 +540,22 @@ Verifica el estado del servicio y sus dependencias.
 {
   "success": true,
   "message": "Mensajes obtenidos exitosamente",
-  "error": null,
-  "conversation_id": "string",
+  "conversation_id": "conv_987654321",
   "messages": [
     {
-      "message_id": "string",
+      "message_id": "msg_123456",
       "role": "user",
-      "content": "string",
-      "created_at": "2025-01-01T00:00:00",
-      "metadata": {}
+      "content": "Hola, tengo una pregunta sobre el producto X",
+      "created_at": "2023-06-15T10:30:45Z"
+    },
+    {
+      "message_id": "msg_123457",
+      "role": "assistant",
+      "content": "Claro, estaré encantado de ayudarte con información sobre el producto X. ¿Qué te gustaría saber?",
+      "created_at": "2023-06-15T10:30:48Z"
     }
   ],
-  "count": 1
+  "count": 2
 }
 ```
 
@@ -441,54 +565,10 @@ Verifica el estado del servicio y sus dependencias.
 ```json
 {
   "success": true,
-  "message": "Conversación eliminada exitosamente",
-  "error": null,
-  "conversation_id": "string",
+  "message": "Conversación conv_987654321 eliminada exitosamente",
+  "conversation_id": "conv_987654321",
   "deleted": true,
-  "messages_deleted": 10
-}
-```
-
-<span id="model-agentexecutionresponse"></span>
-### AgentExecutionResponse
-
-```json
-{
-  "success": true,
-  "message": "Ejecución del agente completada exitosamente",
-  "error": null,
-  "agent_id": "string",
-  "conversation_id": "string",
-  "response": "string",
-  "tools_used": [
-    {
-      "tool": "string",
-      "input": {},
-      "output": {}
-    }
-  ],
-  "tokens_in": 150,
-  "tokens_out": 50,
-  "processing_time": 1.5,
-  "model": "string"
-}
-```
-
-<span id="model-chatresponse"></span>
-### ChatResponse
-
-```json
-{
-  "success": true,
-  "message": "Respuesta generada exitosamente",
-  "error": null,
-  "conversation_id": "string",
-  "agent_id": "string",
-  "response": "string",
-  "message_id": "string",
-  "model": "string",
-  "tokens_in": 150,
-  "tokens_out": 50
+  "messages_deleted": 8
 }
 ```
 
@@ -499,18 +579,11 @@ Verifica el estado del servicio y sus dependencias.
 {
   "success": true,
   "message": "Herramientas obtenidas exitosamente",
-  "error": null,
   "tools": [
     {
-      "name": "string",
-      "description": "string",
-      "type": "string",
-      "display_name": "string",
-      "function": {
-        "name": "string",
-        "description": "string",
-        "parameters": {}
-      }
+      "name": "search_knowledge_base",
+      "description": "Buscar en la base de conocimientos",
+      "type": "function"
     }
   ],
   "count": 1

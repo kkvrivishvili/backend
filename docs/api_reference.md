@@ -15,10 +15,58 @@ Todas las respuestas siguen un formato consistente derivado de `BaseResponse`:
 ```json
 {
   "success": true,          // boolean, indica si la operación fue exitosa
-  "message": "string",      // string, opcional, mensaje descriptivo
-  "error": "string",        // string, opcional, detalles del error (si ocurrió)
-  "data": {},               // object, opcional, datos específicos de la respuesta
-  "metadata": {}            // object, opcional, metadatos adicionales
+  "message": "string",      // string, mensaje descriptivo sobre el resultado
+  "error": null,            // string, presente solo si hay un error
+  "error_code": null,       // string, código de error estandarizado (ej. NOT_FOUND, VALIDATION_ERROR)
+  // Campos específicos según el tipo de respuesta
+}
+```
+
+#### Modelos de Respuesta Estandarizados
+
+Todos los endpoints de la API utilizan modelos de respuesta estandarizados:
+
+| Tipo de Operación | Modelo de Respuesta | Campos Específicos |
+|-------------------|---------------------|-------------------|
+| Listado de elementos | `*ListResponse` | `items`, `count`, `total` |
+| Eliminación | `Delete*Response` | `deleted`, `*_deleted` (contadores) |
+| Estadísticas | `*StatsResponse` | Estadísticas relevantes para el recurso |
+| Chat | `ChatResponse` | `conversation_id`, `message`, `thinking`, `sources` |
+| Modelos | `ModelListResponse` | `models`, `default_model` |
+| Caché | `CacheStatsResponse`, `CacheClearResponse` | Estadísticas y resultados de operaciones de caché |
+
+### Ejemplos de Respuestas Estandarizadas
+
+**Listar Agentes (AgentsListResponse)**:
+```json
+{
+  "success": true,
+  "message": "Agentes obtenidos exitosamente",
+  "agents": [/* lista de agentes */],
+  "count": 5
+}
+```
+
+**Eliminar Conversación (DeleteConversationResponse)**:
+```json
+{
+  "success": true,
+  "message": "Conversación abc123 eliminada exitosamente",
+  "conversation_id": "abc123",
+  "deleted": true,
+  "messages_deleted": 24
+}
+```
+
+**Estadísticas de Caché (CacheStatsResponse)**:
+```json
+{
+  "success": true,
+  "message": "Estadísticas de caché obtenidas correctamente",
+  "tenant_id": "tenant123",
+  "cache_enabled": true,
+  "cached_embeddings": 500,
+  "memory_usage_mb": 25.4
 }
 ```
 

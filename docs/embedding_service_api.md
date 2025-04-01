@@ -17,28 +17,31 @@ Authorization: Bearer {tenant_api_key}
 
 ## Standard Response Format
 
-Todas las respuestas siguen este formato estándar:
+Todas las respuestas siguen el formato estandarizado `BaseResponse`:
 
 ```json
 {
   "success": true,          // boolean, indica si la operación fue exitosa
-  "message": "string",      // string, opcional, mensaje descriptivo
-  "error": "string",        // string, opcional, detalles del error (si ocurrió)
-  "data": {},               // object, opcional, datos específicos de la respuesta
-  "metadata": {}            // object, opcional, metadatos adicionales
+  "message": "string",      // string, mensaje descriptivo sobre el resultado
+  "error": null,            // string, presente solo si hay un error
+  "error_code": null,       // string, código de error estandarizado (ej. NOT_FOUND)
+  // Campos específicos según el tipo de respuesta
 }
 ```
 
 ## Error Codes
 
-| Status Code | Description                                   |
-|-------------|-----------------------------------------------|
-| 400         | Bad Request - Error en los parámetros         |
-| 401         | Unauthorized - API key inválida               |
-| 403         | Forbidden - No tiene permisos                 |
-| 404         | Not Found - Recurso no encontrado             |
-| 429         | Too Many Requests - Rate limit excedido       |
-| 500         | Internal Server Error - Error del servidor    |
+El servicio utiliza códigos de error estandarizados:
+
+| Error Code | Description                                   |
+|------------|-----------------------------------------------|
+| NOT_FOUND | Recurso no encontrado |
+| PERMISSION_DENIED | No tiene permisos para la operación |
+| VALIDATION_ERROR | Error en datos de entrada |
+| QUOTA_EXCEEDED | Límite de cuota alcanzado |
+| RATE_LIMITED | Límite de tasa excedido |
+| SERVICE_UNAVAILABLE | Servicio no disponible |
+| INTERNAL_ERROR | Error interno del servidor |
 
 ## Endpoints
 
@@ -93,18 +96,13 @@ Genera vectores de embedding para múltiples textos en una sola operación.
 
 #### Clear Cache
 ```
-POST /clear-cache
+DELETE /cache/clear
 ```
 
 Elimina los embeddings en caché para un tenant, opcionalmente filtrados por agente o conversación.
 
-**Request Body:**
-```json
-{
-  "conversation_id": "string",         // Opcional, ID de conversación para limpieza específica
-  "agent_id": "string"                 // Opcional, ID del agente para limpieza específica
-}
-```
+**Query Parameters:**
+- `cache_type` (string, optional): Tipo de caché a limpiar (por defecto: "embeddings")
 
 **Response:** [CacheClearResponse](#model-cacheclearresponse)
 
@@ -117,7 +115,18 @@ GET /models
 
 Obtiene la lista de modelos de embedding disponibles para el tenant según su nivel de suscripción.
 
-**Response:** [ModelsListResponse](#model-modelslistresponse)
+**Response:** [ModelListResponse](#model-modellistresponse)
+
+---
+
+#### Get Cache Statistics
+```
+GET /cache/stats
+```
+
+Obtiene estadísticas sobre el uso del caché de embeddings para el tenant actual.
+
+**Response:** [CacheStatsResponse](#model-cachestatsresponse)
 
 ---
 
@@ -180,55 +189,56 @@ Verifica el estado del servicio y sus dependencias.
 }
 ```
 
+<span id="model-modellistresponse"></span>
+### ModelListResponse
+
+```json
+{
+  "success": true,
+  "message": "Modelos de embedding disponibles obtenidos correctamente",
+  "models": {
+    "text-embedding-3-small": {
+      "dimensions": 1536,
+      "description": "OpenAI text-embedding-3-small model, suitable for most applications",
+      "max_tokens": 8191
+    },
+    "text-embedding-ada-002": {
+      "dimensions": 1536,
+      "description": "OpenAI legacy model, maintained for backwards compatibility",
+      "max_tokens": 8191
+    }
+  },
+  "default_model": "text-embedding-3-small",
+  "subscription_tier": "pro",
+  "tenant_id": "tenant123"
+}
+```
+
+<span id="model-cachestatsresponse"></span>
+### CacheStatsResponse
+
+```json
+{
+  "success": true,
+  "message": "Estadísticas de caché obtenidas correctamente",
+  "tenant_id": "tenant123",
+  "agent_id": "agent456",
+  "conversation_id": "conv789",
+  "cache_enabled": true,
+  "cached_embeddings": 250,
+  "memory_usage_bytes": 15728640,
+  "memory_usage_mb": 15.0
+}
+```
+
 <span id="model-cacheclearresponse"></span>
 ### CacheClearResponse
 
 ```json
 {
   "success": true,
-  "message": "Caché eliminado exitosamente",
-  "error": null,
-  "keys_deleted": 35,
-  "scope": "tenant",
-  "metadata": {
-    "memory_freed": "2.5MB"
-  }
-}
-```
-
-<span id="model-modelslistresponse"></span>
-### ModelsListResponse
-
-```json
-{
-  "success": true,
-  "message": "Modelos disponibles obtenidos exitosamente",
-  "error": null,
-  "models": [
-    {
-      "model_id": "text-embedding-3-small",
-      "name": "OpenAI Embeddings (Small)",
-      "provider": "openai",
-      "dimensions": 1536,
-      "cost_per_1k_tokens": 0.00002,
-      "tier_required": "free",
-      "properties": {
-        "context_length": 8191
-      }
-    },
-    {
-      "model_id": "text-embedding-3-large",
-      "name": "OpenAI Embeddings (Large)",
-      "provider": "openai",
-      "dimensions": 3072,
-      "cost_per_1k_tokens": 0.00013,
-      "tier_required": "premium",
-      "properties": {
-        "context_length": 8191
-      }
-    }
-  ],
-  "default_model": "text-embedding-3-small"
+  "message": "Se han eliminado 35 claves de caché",
+  "keys_deleted": 35
 }
 ```
 
