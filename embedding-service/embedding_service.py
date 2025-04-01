@@ -54,7 +54,32 @@ settings = get_settings()
 redis_client = get_redis_client()
 
 # FastAPI app
-app = FastAPI(title="Linktree AI - Embeddings Service")
+app = FastAPI(
+    title="Linktree AI - Embeddings Service",
+    description="""
+    Servicio encargado de generar embeddings vectoriales para texto.
+    
+    ## Funcionalidad
+    - Generación de embeddings unitarios y por lotes
+    - Soporte para múltiples modelos de embeddings (OpenAI, Ollama)
+    - Aislamiento multi-tenant con caché por tenant
+    
+    ## Dependencias
+    - Redis: Para caché de embeddings
+    - Supabase: Para almacenamiento de configuración
+    - Ollama (opcional): Para modelos locales de embeddings
+    - OpenAI API (opcional): Para modelos en la nube
+    
+    ## Variables de entorno
+    - REDIS_URL: Conexión con Redis
+    - SUPABASE_URL/KEY: Credenciales de Supabase
+    - OPENAI_API_KEY: Clave de API para OpenAI
+    - USE_OLLAMA: Habilitar uso de modelos locales
+    """,
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
 
 # Configurar manejo de errores y rate limiting
 setup_error_handling(app)
@@ -232,14 +257,39 @@ async def generate_embeddings(
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> EmbeddingResponse:
     """
-    Genera embeddings para una lista de textos.
+    Genera embeddings vectoriales para una lista de textos.
+    
+    Este endpoint transforma texto en vectores densos que capturan el significado semántico,
+    utilizando modelos de embeddings como OpenAI o alternativas locales como Ollama.
+    
+    ## Flujo de procesamiento
+    1. Validación de cuotas y acceso al modelo para el tenant
+    2. Verificación de embeddings en caché (si están habilitados)
+    3. Generación de embeddings utilizando el modelo seleccionado
+    4. Almacenamiento en caché de los resultados (si está habilitado)
+    5. Registro de uso para facturación y análisis
+    
+    ## Dependencias
+    - Redis: Para caché de embeddings
+    - Modelo de embeddings: OpenAI o Ollama según configuración
     
     Args:
-        request: Solicitud con textos para generar embeddings
-        tenant_info: Información del tenant (inyectada)
+        request: Solicitud con textos para generar embeddings (EmbeddingRequest)
+            - text: Lista de textos para vectorizar
+            - model: Modelo a utilizar (opcional, se usa el predeterminado si no se especifica)
+            - cache_enabled: Si se debe utilizar/actualizar caché (predeterminado: True)
+        tenant_info: Información del tenant (inyectada mediante token de autenticación)
         
     Returns:
-        EmbeddingResponse: Respuesta con embeddings generados
+        EmbeddingResponse: Respuesta con los vectores de embeddings generados
+            - success: True si la operación fue exitosa
+            - embeddings: Lista de vectores de embeddings en formato de lista de flotantes
+            - model: Modelo utilizado para generar los embeddings
+            - total_tokens: Cantidad de tokens procesados
+    
+    Raises:
+        ServiceError: En caso de error en la generación de embeddings o problemas con el modelo
+        HTTPException: Para errores de validación o de autorización
     """
     start_time = time.time()
     tenant_id = tenant_info.tenant_id
@@ -322,14 +372,45 @@ async def batch_generate_embeddings(
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> EmbeddingResponse:
     """
-    Procesa embeddings para elementos con texto y metadata juntos.
+    Procesa embeddings para lotes de elementos con texto y metadatos asociados.
+    
+    Este endpoint está optimizado para procesar múltiples textos junto con sus metadatos,
+    permitiendo un procesamiento más eficiente y manteniendo la relación entre 
+    los textos y sus datos asociados.
+    
+    ## Flujo de procesamiento
+    1. Validación de cuotas y acceso al modelo para el tenant
+    2. Extracción de textos de los items manteniendo mapeo con metadatos
+    3. Verificación de embeddings en caché (si están habilitados)
+    4. Generación de embeddings en lote para todos los textos
+    5. Reconstrucción de la respuesta asociando cada embedding con su metadata
+    6. Almacenamiento en caché de los resultados (si está habilitado)
+    7. Registro de uso para facturación y análisis
+    
+    ## Dependencias
+    - Redis: Para caché de embeddings
+    - Modelo de embeddings: OpenAI o Ollama según configuración
     
     Args:
-        request: Solicitud con items para generar embeddings
-        tenant_info: Información del tenant (inyectada)
+        request: Solicitud con items para generar embeddings (BatchEmbeddingRequest)
+            - items: Lista de objetos TextItem que contienen:
+                - text: Texto para vectorizar
+                - metadata: Diccionario con metadatos asociados al texto
+            - model: Modelo a utilizar (opcional, se usa el predeterminado si no se especifica)
+            - cache_enabled: Si se debe utilizar/actualizar caché (predeterminado: True)
+        tenant_info: Información del tenant (inyectada mediante token de autenticación)
         
     Returns:
-        EmbeddingResponse: Respuesta con embeddings generados
+        EmbeddingResponse: Respuesta con los vectores de embeddings generados
+            - success: True si la operación fue exitosa
+            - embeddings: Lista de vectores de embeddings en formato de lista de flotantes
+            - items: Lista de objetos procesados con sus metadatos originales
+            - model: Modelo utilizado para generar los embeddings
+            - total_tokens: Cantidad de tokens procesados
+    
+    Raises:
+        ServiceError: En caso de error en la generación de embeddings o problemas con el modelo
+        HTTPException: Para errores de validación o de autorización
     """
     start_time = time.time()
     tenant_id = tenant_info.tenant_id
@@ -402,13 +483,39 @@ async def list_available_models(
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> Dict[str, Any]:
     """
-    Lista los modelos de embedding disponibles para el tenant.
+    Lista los modelos de embedding disponibles para el tenant según su nivel de suscripción.
+    
+    Este endpoint proporciona información detallada sobre los modelos de embedding
+    disponibles para el tenant según su nivel de suscripción, incluyendo dimensiones,
+    capacidades y límites de tokens.
+    
+    ## Flujo de procesamiento
+    1. Obtención del nivel de suscripción del tenant
+    2. Recuperación de modelos básicos disponibles para todos los niveles
+    3. Inclusión de modelos premium si el nivel de suscripción lo permite
+    4. Adición de modelos locales (Ollama) si están habilitados en la configuración
+    
+    ## Dependencias
+    - Supabase: Para verificación del nivel de suscripción del tenant
+    - Ollama (opcional): Para información de modelos locales disponibles
     
     Args:
-        tenant_info: Información del tenant (inyectada)
+        tenant_info: Información del tenant (inyectada mediante token de autenticación)
+            - tenant_id: Identificador único del tenant
+            - subscription_tier: Nivel de suscripción ("free", "pro", "business")
         
     Returns:
-        dict: Modelos disponibles y configuración
+        Dict[str, Any]: Diccionario con modelos disponibles y su configuración
+            - default_model: Modelo predeterminado para el tenant
+            - models: Diccionario de modelos disponibles con sus propiedades:
+                - dimensions: Tamaño del vector de embedding
+                - description: Descripción de las capacidades del modelo
+                - max_tokens: Límite máximo de tokens que acepta el modelo
+            - subscription_tier: Nivel de suscripción actual del tenant
+    
+    Raises:
+        ServiceError: En caso de problemas para obtener la información de modelos
+        HTTPException: Para errores de autorización o validación
     """
     tenant_id = tenant_info.tenant_id
     
@@ -456,10 +563,55 @@ async def list_available_models(
 @handle_service_error_simple
 async def get_service_status() -> HealthResponse:
     """
-    Verifica el estado del servicio y sus dependencias.
+    Verifica el estado del servicio y sus dependencias críticas.
+    
+    Este endpoint proporciona información detallada sobre el estado operativo 
+    del servicio de embeddings y sus componentes dependientes. Es utilizado por 
+    sistemas de monitoreo, Kubernetes y scripts de health check para verificar
+    la disponibilidad del servicio.
+    
+    ## Flujo de procesamiento
+    1. Verificación de conexión con Redis
+    2. Verificación de conexión con Supabase
+    3. Verificación de disponibilidad de OpenAI API
+    4. Verificación de disponibilidad de Ollama (si está habilitado)
+    5. Generación de reporte de estado consolidado
+    
+    ## Dependencias verificadas
+    - Redis: Para funcionamiento del caché
+    - Supabase: Para configuración y almacenamiento
+    - OpenAI API: Para generación de embeddings en la nube
+    - Ollama (opcional): Para generación de embeddings local
     
     Returns:
-        HealthResponse: Estado del servicio
+        HealthResponse: Estado detallado del servicio y sus componentes
+            - success: True si la respuesta se generó correctamente
+            - status: Estado general del servicio ("healthy", "degraded", "unhealthy")
+            - components: Diccionario con el estado de cada componente
+                - redis: "available" o "unavailable"
+                - supabase: "available" o "unavailable"
+                - openai: "available" o "unavailable"
+                - ollama: "available" o "unavailable" (si está habilitado)
+            - version: Versión del servicio
+    
+    Ejemplo de respuesta:
+    ```json
+    {
+        "success": true,
+        "message": "Servicio de embeddings operativo",
+        "error": null,
+        "data": null,
+        "metadata": {},
+        "status": "healthy",
+        "components": {
+            "redis": "available",
+            "supabase": "available",
+            "openai": "available",
+            "ollama": "available"
+        },
+        "version": "1.0.0"
+    }
+    ```
     """
     # Para el health check no necesitamos un contexto específico
     # Check if Redis is available

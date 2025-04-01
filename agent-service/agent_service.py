@@ -77,9 +77,36 @@ async def lifespan(app: FastAPI):
 
 # Inicializar la aplicación FastAPI
 app = FastAPI(
-    title="Agent Service API",
-    description="API para crear y utilizar agentes de IA para Linktree",
+    title="Linktree AI - Agent Service",
+    description="""
+    Servicio de agentes inteligentes para la plataforma Linktree AI.
+    
+    ## Funcionalidad
+    - Gestión de agentes conversacionales con diferentes capacidades
+    - Procesamiento de solicitudes con uso de herramientas (tools)
+    - Integración con servicios de consulta RAG y embeddings
+    - Soporte para diferentes modelos LLM (OpenAI, Ollama)
+    - Manejo de conversaciones persistentes con historial
+    
+    ## Dependencias
+    - Redis: Para caché de sesiones y gestión de conversaciones
+    - Supabase: Para almacenamiento de configuración y herramientas
+    - Query Service: Para capacidades de RAG integradas
+    - Embedding Service: Para procesamiento semántico
+    - OpenAI API (opcional): Para modelos de generación en la nube
+    - Ollama (opcional): Para modelos de generación locales
+    
+    ## Variables de entorno
+    - REDIS_URL: Conexión con Redis
+    - SUPABASE_URL/KEY: Credenciales de Supabase
+    - OPENAI_API_KEY: Clave de API para OpenAI
+    - EMBEDDING_SERVICE_URL: URL del servicio de embeddings
+    - QUERY_SERVICE_URL: URL del servicio de consulta
+    - USE_OLLAMA: Habilitar uso de modelos locales
+    """,
     version=settings.service_version,
+    docs_url="/docs",
+    redoc_url="/redoc",
     lifespan=lifespan
 )
 
@@ -430,16 +457,48 @@ async def initialize_agent_with_tools(tenant_info: TenantInfo, agent_config: Age
 @handle_service_error_simple
 async def get_service_status() -> HealthResponse:
     """
-    Verifica el estado del servicio y sus dependencias.
+    Verifica el estado del servicio de agentes y sus dependencias críticas.
+    
+    Este endpoint proporciona información detallada sobre el estado operativo 
+    del servicio de agentes y sus componentes dependientes. Es utilizado por 
+    sistemas de monitoreo, Kubernetes y scripts de health check.
+    
+    ## Componentes verificados
+    - Supabase: Acceso a configuraciones de agentes y conversaciones
+    - Query Service: Integración con capacidades RAG
+    - Embedding Service: Acceso a funcionalidades de vectorización
+    
+    ## Posibles estados
+    - healthy: Todos los componentes funcionan correctamente
+    - degraded: Algunos componentes no están disponibles pero el servicio funciona
+    - unhealthy: Componentes críticos no están disponibles
     
     Returns:
-        HealthResponse: Estado del servicio
+        HealthResponse: Estado detallado del servicio y sus componentes
+            - success: True (cumpliendo con BaseResponse)
+            - status: Estado general ("healthy", "degraded", "unhealthy")
+            - components: Estado de cada dependencia ("available", "unavailable")
+            - version: Versión del servicio
+    
+    Ejemplo:
+    ```json
+    {
+        "success": true,
+        "message": "Servicio de agente con funcionalidad limitada",
+        "status": "degraded",
+        "components": {
+            "supabase": "available",
+            "query_service": "unavailable" 
+        },
+        "version": "1.0.0"
+    }
+    ```
     """
     # Verificar Supabase
     supabase_status = "available"
     try:
         supabase = get_supabase_client()
-        supabase.table("ai.agent_configs").select("agent_id").limit(1).execute()
+        supabase.table("tenants").select("tenant_id").limit(1).execute()
     except Exception as e:
         logger.warning(f"Supabase no disponible: {str(e)}")
         supabase_status = "unavailable"
@@ -797,16 +856,34 @@ async def chat_with_agent(
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> ChatResponse:
     """
-    Conversa con un agente existente.
+    Procesa una solicitud de chat con un agente inteligente específico.
+    
+    Este endpoint permite interactuar con un agente configurado, enviando mensajes
+    y recibiendo respuestas que pueden incluir uso de herramientas y consultas RAG.
+    
+    ## Proceso
+    1. Validación de permisos y configuración del agente
+    2. Gestión de la conversación (nueva o existente)
+    3. Ejecución del agente con las herramientas disponibles
+    4. Persistencia del historial y registro de uso
+    
+    ## Dependencias
+    - Supabase: Datos del agente y conversaciones
+    - LLM: OpenAI o Ollama según configuración
+    - Query Service: Para capacidades RAG (si habilitadas)
     
     Args:
-        agent_id: ID del agente
-        request: Datos para la conversación
-        background_tasks: Tareas en segundo plano (inyectada por FastAPI)
-        tenant_info: Información del tenant (inyectada por Depends)
+        agent_id: ID del agente a utilizar
+        request: Datos para la conversación (mensajes, parámetros)
+        background_tasks: Tareas en segundo plano
+        tenant_info: Información del tenant
         
     Returns:
-        ChatResponse: Respuesta del agente
+        ChatResponse: Respuesta con mensaje del agente, fuentes usadas y metadatos
+    
+    Raises:
+        ServiceError: Errores de procesamiento o configuración
+        HTTPException: Errores de validación o autorización
     """
     start_time = time.time()
     

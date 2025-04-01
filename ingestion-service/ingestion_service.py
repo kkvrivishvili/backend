@@ -48,7 +48,35 @@ settings = get_settings()
 http_client = httpx.AsyncClient(timeout=30.0)
 
 # FastAPI app
-app = FastAPI(title="Linktree AI - Ingestion Service")
+app = FastAPI(
+    title="Linktree AI - Ingestion Service",
+    description="""
+    Servicio de ingestión de documentos para la plataforma Linktree AI.
+    
+    ## Funcionalidad
+    - Procesamiento y carga de documentos en múltiples formatos
+    - Chunking y segmentación de texto para optimizar recuperación
+    - Integración con base de datos vectorial para indexación
+    - Soporte para múltiples colecciones por tenant
+    - Procesamiento asíncrono para documentos grandes
+    
+    ## Dependencias
+    - Redis: Para gestión de tareas asíncronas
+    - Supabase: Para almacenamiento de documentos y vectores
+    - Embedding Service: Para vectorización de documentos
+    - Ollama (opcional): Para modelos de embedding locales
+    
+    ## Variables de entorno
+    - REDIS_URL: Conexión con Redis
+    - SUPABASE_URL/KEY: Credenciales de Supabase
+    - EMBEDDING_SERVICE_URL: URL del servicio de embeddings
+    - OLLAMA_API_URL: URL de Ollama para modelos locales (opcional)
+    - MAX_CHUNK_SIZE: Tamaño máximo de segmentos de texto
+    """,
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
 
 # Configurar manejo de errores y rate limiting
 setup_error_handling(app)
@@ -220,15 +248,42 @@ async def ingest_documents(
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> IngestionResponse:
     """
-    Ingiere documentos para su procesamiento e indexación.
+    Procesa e indexa documentos en la base de datos vectorial.
+    
+    Este endpoint permite ingerir documentos de texto con sus metadatos asociados, 
+    segmentarlos en nodos más pequeños, y almacenarlos en la colección especificada
+    con sus embeddings vectoriales para búsqueda semántica posterior.
+    
+    ## Flujo de procesamiento
+    1. Validación de cuotas y permisos del tenant
+    2. Chunking de documentos en nodos más pequeños según configuración
+    3. Generación de embeddings para cada nodo (vía Embedding Service)
+    4. Almacenamiento en Supabase (metadatos y vectores)
+    5. Registro de uso para facturación y análisis
+    
+    ## Dependencias
+    - Embedding Service: Para vectorización de los fragmentos de texto
+    - Supabase: Para almacenamiento persistente de documentos y vectores
     
     Args:
-        request: Solicitud con documentos a ingerir
-        background_tasks: Tareas en segundo plano
-        tenant_info: Información del tenant (inyectada)
+        request: Solicitud con documentos a ingerir (DocumentIngestionRequest)
+            - documents: Lista de documentos con texto y metadatos
+            - collection_name: Nombre de la colección donde almacenar (opcional, default: "default")
+            - chunk_size: Tamaño máximo de cada fragmento de texto (opcional)
+            - chunk_overlap: Cantidad de solapamiento entre fragmentos (opcional)
+        background_tasks: Tareas en segundo plano (inyectado por FastAPI)
+        tenant_info: Información del tenant (inyectado mediante autenticación)
         
     Returns:
-        IngestionResponse: Respuesta con IDs de documentos y contador de nodos
+        IngestionResponse: Confirmación de la ingestión con detalles
+            - success: True si la operación fue exitosa (cumpliendo BaseResponse)
+            - document_ids: Lista de IDs únicos asignados a los documentos procesados
+            - node_count: Número total de nodos/fragmentos generados
+            - metadata: Información adicional sobre el procesamiento
+    
+    Raises:
+        ServiceError: En caso de errores durante el procesamiento o almacenamiento
+        HTTPException: Para errores de validación o autorización
     """
     # Verificar cuotas del tenant
     await check_tenant_quotas(tenant_info)
@@ -463,10 +518,45 @@ async def delete_collection(
 @handle_service_error_simple
 async def get_service_status() -> HealthResponse:
     """
-    Verifica el estado del servicio y sus dependencias.
+    Verifica el estado del servicio de ingestión y sus dependencias críticas.
+    
+    Este endpoint proporciona información detallada sobre el estado operativo 
+    del servicio de ingestión y sus componentes dependientes. Es utilizado por 
+    sistemas de monitoreo, Kubernetes y scripts de health check para verificar
+    la disponibilidad del servicio.
+    
+    ## Componentes verificados
+    - Supabase: Para almacenamiento de documentos y vectores
+    - Embedding Service: Para generación de embeddings de documentos
+    
+    ## Posibles estados
+    - healthy: Todos los componentes funcionan correctamente
+    - degraded: Algunos componentes no están disponibles pero el servicio funciona
+    - unhealthy: Componentes críticos no están disponibles
     
     Returns:
-        HealthResponse: Estado del servicio
+        HealthResponse: Estado detallado del servicio y sus componentes
+            - success: True (cumpliendo con BaseResponse)
+            - status: Estado general ("healthy", "degraded", "unhealthy")
+            - components: Estado de cada dependencia ("available", "unavailable")
+            - version: Versión del servicio
+    
+    Ejemplo:
+    ```json
+    {
+        "success": true,
+        "message": "Servicio de ingestión operativo",
+        "error": null,
+        "data": null,
+        "metadata": {},
+        "status": "healthy",
+        "components": {
+            "supabase": "available",
+            "embedding_service": "available"
+        },
+        "version": "1.0.0"
+    }
+    ```
     """
     # Check if Supabase is available
     supabase_status = "available"

@@ -51,7 +51,33 @@ from common.errors import setup_error_handling, handle_service_error_simple, Ser
 
 # Configuración de la aplicación FastAPI
 app = FastAPI(
-    title="Linktree AI - Query Service"
+    title="Linktree AI - Query Service",
+    description="""
+    Servicio de consulta RAG (Retrieval Augmented Generation) para la plataforma Linktree AI.
+    
+    ## Funcionalidad
+    - Búsqueda semántica de documentos por similitud vectorial
+    - Generación de respuestas basadas en contexto recuperado
+    - Soporte para diferentes estrategias de recuperación y sintetización
+    - Múltiples motores LLM (OpenAI, Ollama) con configuración por tenant
+    
+    ## Dependencias
+    - Redis: Para caché y almacenamiento temporal
+    - Supabase: Para almacenamiento de vectores y configuración
+    - Embedding Service: Para generación de embeddings de consultas
+    - OpenAI API (opcional): Para modelos de generación en la nube
+    - Ollama (opcional): Para modelos de generación locales
+    
+    ## Variables de entorno
+    - REDIS_URL: Conexión con Redis
+    - SUPABASE_URL/KEY: Credenciales de Supabase
+    - OPENAI_API_KEY: Clave de API para OpenAI
+    - EMBEDDING_SERVICE_URL: URL del servicio de embeddings
+    - USE_OLLAMA: Habilitar uso de modelos locales
+    """,
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
 
 # Configurar manejo de errores y rate limiting
@@ -254,14 +280,52 @@ async def process_query(
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> QueryResponse:
     """
-    Procesa una consulta RAG utilizando el contexto adecuado.
+    Procesa una consulta RAG (Retrieval Augmented Generation) utilizando los documentos almacenados.
+    
+    Este endpoint realiza una búsqueda semántica de información relevante en los documentos 
+    del tenant y genera una respuesta contextualizada utilizando un modelo de lenguaje.
+    
+    ## Flujo de procesamiento
+    1. Validación de cuotas y acceso del tenant
+    2. Generación de embeddings para la consulta (usando el servicio de embeddings)
+    3. Recuperación de documentos relevantes basados en similitud vectorial
+    4. Aplicación de post-procesadores para filtrar y ordenar los resultados
+    5. Generación de respuesta utilizando el modelo LLM configurado
+    6. Cita y referencia de las fuentes utilizadas para la respuesta
+    7. Registro de uso para facturación y análisis
+    
+    ## Dependencias
+    - Embedding Service: Para vectorizar la consulta
+    - Supabase: Para acceder a los documentos y vectores almacenados
+    - Motor LLM: OpenAI o Ollama según configuración del tenant
     
     Args:
-        request: Solicitud de consulta
-        tenant_info: Información del tenant (inyectada)
+        request: Solicitud de consulta (QueryRequest)
+            - query: Texto de la consulta a procesar
+            - collection_name: Nombre de la colección a consultar (opcional, default: "default")
+            - filters: Filtros adicionales para la búsqueda (opcional)
+            - similarity_top_k: Número de documentos a recuperar (opcional)
+            - model: Modelo LLM a utilizar (opcional, se usa el predeterminado si no se especifica)
+            - response_mode: Modo de generación de respuesta (opcional)
+        tenant_info: Información del tenant (inyectada mediante token de autenticación)
+            - tenant_id: Identificador único del tenant
+            - subscription_tier: Nivel de suscripción
         
     Returns:
-        QueryResponse: Respuesta con fuentes
+        QueryResponse: Respuesta generada con fuentes y metadatos
+            - success: True si la operación fue exitosa
+            - response: Texto de la respuesta generada
+            - sources: Lista de fuentes utilizadas para generar la respuesta
+                - document_id: ID del documento
+                - text: Fragmento de texto utilizado
+                - metadata: Metadatos asociados al documento
+            - model: Modelo utilizado para generar la respuesta
+            - total_tokens: Cantidad de tokens utilizados
+            - processing_time: Tiempo total de procesamiento en segundos
+    
+    Raises:
+        ServiceError: En caso de error en la generación de respuesta o configuración inválida
+        HTTPException: Para errores de validación o autorización
     """
     start_time = time.time()
     
@@ -553,10 +617,58 @@ async def get_tenant_stats(
 @handle_service_error_simple
 async def get_service_status() -> HealthResponse:
     """
-    Verifica el estado del servicio y sus dependencias.
+    Verifica el estado del servicio de consulta y sus dependencias críticas.
+    
+    Este endpoint proporciona información detallada sobre el estado operativo 
+    del servicio de consulta y sus componentes dependientes. Es utilizado por 
+    sistemas de monitoreo, Kubernetes y scripts de health check para verificar
+    la disponibilidad del servicio.
+    
+    ## Flujo de procesamiento
+    1. Verificación de conexión con Redis
+    2. Verificación de conexión con Supabase
+    3. Verificación de disponibilidad del servicio de embeddings
+    4. Verificación de disponibilidad de OpenAI API
+    5. Verificación de disponibilidad de Ollama (si está habilitado)
+    6. Generación de reporte de estado consolidado
+    
+    ## Dependencias verificadas
+    - Redis: Para funcionamiento del caché y seguimiento de cuotas
+    - Supabase: Para acceso a vectores y documentos almacenados
+    - Embedding Service: Para generación de embeddings de consultas
+    - OpenAI API: Para generación de respuestas en la nube
+    - Ollama (opcional): Para generación de respuestas local
     
     Returns:
-        HealthResponse: Estado del servicio
+        HealthResponse: Estado detallado del servicio y sus componentes
+            - success: True si la respuesta se generó correctamente
+            - status: Estado general del servicio ("healthy", "degraded", "unhealthy")
+            - components: Diccionario con el estado de cada componente
+                - redis: "available" o "unavailable"
+                - supabase: "available" o "unavailable"
+                - embedding_service: "available" o "unavailable"
+                - openai: "available" o "unavailable"
+                - ollama: "available" o "unavailable" (si está habilitado)
+            - version: Versión del servicio
+    
+    Ejemplo de respuesta:
+    ```json
+    {
+        "success": true,
+        "message": "Servicio de consulta operativo",
+        "error": null,
+        "data": null,
+        "metadata": {},
+        "status": "healthy",
+        "components": {
+            "redis": "available",
+            "supabase": "available",
+            "embedding_service": "available",
+            "openai": "available"
+        },
+        "version": "1.0.0"
+    }
+    ```
     """
     # Para el health check no necesitamos un contexto específico
     # Check if Redis is available (for caching)
@@ -642,7 +754,7 @@ async def create_collection(
     
     # Verificar que la colección no existe ya
     supabase = get_supabase_client()
-    collection_result = supabase.table("ai.collections").select("*") \
+    collection_result = supabase.table("collections").select("*") \
         .eq("tenant_id", tenant_id) \
         .eq("name", name) \
         .execute()
@@ -655,7 +767,7 @@ async def create_collection(
         )
     
     # Crear colección
-    result = supabase.table("ai.collections").insert({
+    result = supabase.table("collections").insert({
         "tenant_id": tenant_id,
         "name": name,
         "description": description,
@@ -700,7 +812,7 @@ async def update_collection(
     
     # Verificar que la colección existe
     supabase = get_supabase_client()
-    collection_result = supabase.table("ai.collections").select("*") \
+    collection_result = supabase.table("collections").select("*") \
         .eq("id", collection_id) \
         .execute()
     
@@ -720,7 +832,7 @@ async def update_collection(
         )
     
     # Actualizar colección
-    result = supabase.table("ai.collections").update({
+    result = supabase.table("collections").update({
         "name": name,
         "description": description,
         "is_active": is_active,
@@ -759,7 +871,7 @@ async def get_collection_stats(
     
     # Verificar que la colección existe
     supabase = get_supabase_client()
-    collection_result = supabase.table("ai.collections").select("*") \
+    collection_result = supabase.table("collections").select("*") \
         .eq("id", collection_id) \
         .execute()
     
