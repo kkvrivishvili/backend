@@ -127,8 +127,9 @@ def configure_swagger_ui(
         """
         Genera una especificación OpenAPI personalizada para el servicio.
         """
-        if app.openapi_schema:
-            return app.openapi_schema
+        # Importante: Limpiar el esquema existente para forzar su regeneración
+        # ya que podríamos haber modificado rutas después de la primera generación
+        app.openapi_schema = None
             
         openapi_schema = get_openapi(
             title=f"Linktree AI - {service_name}",
@@ -169,7 +170,10 @@ def configure_swagger_ui(
     
     # Asignar la función personalizada
     app.openapi = custom_openapi
-
+    
+    # Generar el esquema inicialmente para asegurar que está disponible
+    # antes de que cualquier add_example_to_endpoint sea llamado
+    app.openapi_schema = app.openapi()
 
 def get_swagger_ui_html() -> str:
     """
@@ -278,9 +282,14 @@ def add_example_to_endpoint(
         response_example: Ejemplo de respuesta
         status_code: Código de estado para la respuesta
     """
-    if not app.openapi_schema:
-        # Forzar la generación del esquema OpenAPI
-        _ = app.openapi
+    # Primero garantizamos que se genere el esquema OpenAPI
+    if hasattr(app, "openapi") and callable(app.openapi):
+        app.openapi_schema = app.openapi()
+    
+    # Verificar si el esquema existe
+    if not app.openapi_schema or "paths" not in app.openapi_schema:
+        print(f"Error: No se pudo generar el esquema OpenAPI para añadir ejemplos a {path}")
+        return
         
     # Verificar si el path existe
     if path not in app.openapi_schema["paths"]:
