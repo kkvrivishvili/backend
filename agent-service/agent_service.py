@@ -31,7 +31,8 @@ from langchain.agents import AgentExecutor, create_tool_calling_agent
 from common.models import (
     TenantInfo, HealthResponse, AgentConfig, AgentRequest, AgentResponse, 
     AgentTool, ChatMessage, ChatRequest, ChatResponse, RAGConfig,
-    ConversationCreate, ConversationResponse, ConversationsListResponse, MessageListResponse
+    ConversationCreate, ConversationResponse, ConversationsListResponse, MessageListResponse,
+    PublicChatRequest, PublicTenantInfo
 )
 from common.auth import verify_tenant, check_tenant_quotas, validate_model_access
 from common.supabase import get_supabase_client, init_supabase
@@ -402,12 +403,11 @@ async def query_rag(
 
 # Función para inicializar un agente LangChain
 @with_tenant_context
-async def initialize_agent_with_tools(tenant_info: TenantInfo, agent_config: AgentConfig, tools: List[Tool], callback_handler: Optional[BaseCallbackHandler] = None) -> AgentExecutor:
+async def initialize_agent_with_tools(agent_config: AgentConfig, tools: List[Tool], callback_handler: Optional[BaseCallbackHandler] = None) -> AgentExecutor:
     """
     Inicializa un agente con herramientas utilizando la API de LangChain 0.3.x.
     
     Args:
-        tenant_info: Información del inquilino
         agent_config: Configuración del agente
         tools: Lista de herramientas para el agente
         callback_handler: Manejador de callbacks opcional
@@ -423,7 +423,7 @@ async def initialize_agent_with_tools(tenant_info: TenantInfo, agent_config: Age
     llm = ChatOpenAI(
         model=model,
         temperature=temperature,
-        openai_api_key=tenant_info.openai_api_key,
+        openai_api_key=agent_config.tenant_info.openai_api_key,
         streaming=agent_config.streaming if agent_config.streaming is not None else False
     )
     
@@ -1200,23 +1200,6 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
     )
 
 
-# Modelos para el endpoint público
-class PublicChatRequest(BaseModel):
-    """Modelo para solicitudes de chat público."""
-    message: str
-    session_id: Optional[str] = None
-    tenant_slug: str
-    context: Optional[Dict[str, Any]] = None
-    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
-
-class PublicTenantInfo(BaseModel):
-    """Información básica de un tenant para acceso público."""
-    tenant_id: str
-    name: str
-    token_quota: int = 0
-    tokens_used: int = 0
-    has_quota: bool = True
-
 # Función para verificar un tenant público por su slug
 async def verify_public_tenant(tenant_slug: str) -> PublicTenantInfo:
     """
@@ -1320,4 +1303,133 @@ async def register_public_session(tenant_id: str, session_id: str, agent_id: str
         # No lanzamos excepción para no interrumpir el flujo del chat
         return session_id
 
-# ... Resto del código ...
+def estimate_token_count(text: str) -> int:
+    """
+    Estima el número de tokens basado en el número de palabras × 1.5.
+    
+    Esta es una estimación aproximada para contabilizar uso de tokens.
+    Para cálculos más precisos, se debería usar el tokenizador específico del modelo.
+    
+    Args:
+        text: Texto a estimar
+        
+    Returns:
+        int: Número estimado de tokens
+    """
+    words = len(text.split())
+    return int(words * 1.5)
+
+
+
+@app.post("/public/chat/{agent_id}", response_model=ChatResponse)
+@handle_service_error_simple
+@with_full_context
+async def public_chat_with_agent(
+    agent_id: str,
+    request: PublicChatRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    Procesa una solicitud de chat pública con un agente sin requerir autenticación.
+    
+    Este endpoint permite que usuarios sin autenticación interactúen con agentes públicos
+    a través de un slug de tenant, manteniendo el seguimiento de sesiones y respetando
+    las cuotas de tokens establecidas.
+    
+    Args:
+        agent_id: ID del agente a utilizar
+        request: Datos para la conversación (mensaje, tenant_slug, etc.)
+        background_tasks: Tareas en segundo plano
+        
+    Returns:
+        ChatResponse: Respuesta con mensaje del agente y metadatos
+    """
+    # Verificar tenant público por slug
+    tenant_info = await verify_public_tenant(request.tenant_slug)
+    
+    # Generar session_id si no se proporcionó
+    session_id = request.session_id or str(uuid.uuid4())
+    
+    # Configurar contexto manualmente para el decorador @with_full_context
+    FullContext.set_current_tenant_id(tenant_info.tenant_id)
+    FullContext.set_current_agent_id(agent_id)
+    FullContext.set_current_conversation_id(session_id)
+    
+    # Verificar existencia del agente
+    supabase = get_supabase_client()
+    agent_data = await supabase.from_("agents").select("*").eq("id", agent_id).eq("tenant_id", tenant_info.tenant_id).execute()
+    
+    if agent_data.error:
+        logger.error(f"Error fetching agent data: {agent_data.error}")
+        raise ServiceError(
+            message="Error accessing agent configuration",
+            status_code=500,
+            error_code="agent_fetch_error"
+        )
+            
+    if not agent_data.data or len(agent_data.data) == 0:
+        raise ServiceError(
+            message="Agent not found or not available for this tenant",
+            status_code=404,
+            error_code="agent_not_found"
+        )
+        
+    # Crear configuración de agente
+    agent_config = AgentConfig.model_validate(agent_data.data[0])
+    
+    # Preparar tenant info para el agente
+    temp_tenant_info = TenantInfo(tenant_id=tenant_info.tenant_id, name=tenant_info.name)
+    
+    # Inicializar callback handler para capturar información
+    callback_handler = AgentCallbackHandler()
+    
+    # Configurar las herramientas del agente
+    tools = await create_agent_tools(agent_config)
+    
+    # Inicializar el agente con las herramientas
+    agent_executor = await initialize_agent_with_tools(
+        temp_tenant_info,
+        agent_config,
+        tools,
+        callback_handler
+    )
+    
+    # Ejecutar el agente
+    response = await agent_executor.ainvoke(
+        {
+            "input": request.message,
+            "chat_history": []  # No hay historial previo por simplicidad
+        },
+        config=RunnableConfig(callbacks=[callback_handler])
+    )
+    
+    # Obtener respuesta
+    ai_message = response["output"]
+    tools_used = callback_handler.get_tools_used()
+    thinking_steps = callback_handler.get_thinking_steps()
+    
+    # Estimar tokens y registrar sesión en background
+    estimated_tokens = estimate_token_count(request.message) + estimate_token_count(ai_message)
+    
+    background_tasks.add_task(
+        register_public_session,
+        tenant_info.tenant_id,
+        session_id,
+        agent_id,
+        estimated_tokens
+    )
+    
+    # Preparar respuesta siguiendo el modelo BaseResponse
+    return {
+        "success": True,
+        "message": "Chat processed successfully",
+        "data": {
+            "response": ai_message,
+            "session_id": session_id,
+            "thinking": thinking_steps,
+            "tools_used": tools_used
+        },
+        "metadata": {
+            "estimated_tokens": estimated_tokens
+        }
+    }

@@ -285,3 +285,21 @@ class MessageListResponse(BaseResponse):
     total: int
     limit: int
     offset: int
+
+
+class PublicTenantInfo(BaseModel):
+    """Información básica de un tenant para acceso público."""
+    tenant_id: str
+    name: str
+    token_quota: int = 0
+    tokens_used: int = 0
+    has_quota: bool = True
+
+
+class PublicChatRequest(BaseModel):
+    """Modelo para solicitudes de chat público sin autenticación."""
+    message: str
+    session_id: Optional[str] = None
+    tenant_slug: str
+    context: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
