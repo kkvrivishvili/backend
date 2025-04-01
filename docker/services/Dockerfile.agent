@@ -2,19 +2,18 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Instalar dependencias base primero
-RUN pip install --upgrade pip && \
-    pip install fastapi==0.115.12 uvicorn==0.34.0 pydantic==2.10.6 pydantic-settings==2.8.1 python-multipart==0.0.20 httpx==0.28.1 \
-    redis==5.2.1 python-dotenv==1.0.1 tenacity==9.0.0 \
-    pytest==8.3.5 supabase==2.15.0
+# Instalar dependencias base críticas para la funcionalidad principal
+RUN pip install --upgrade pip
 
-# Instalar LangChain 0.3.x con soporte para Ollama
-RUN pip install langchain==0.3.21 langchain-core==0.3.49 langchain-community==0.3.20 
+# Copiar requirements.txt para instalar dependencias
+COPY agent-service/requirements.txt ./agent-service/requirements.txt
+
+# Instalar dependencias desde requirements.txt
+RUN pip install -r ./agent-service/requirements.txt
 
 # Copiar código de la aplicación
 COPY agent-service/ ./agent-service/
 COPY common/ ./common/
-COPY .env.example ./.env.example
 
 # Instalar curl para health checks
 RUN apt-get update && apt-get install -y curl && apt-get clean

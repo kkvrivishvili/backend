@@ -471,7 +471,8 @@ async def get_service_status() -> HealthResponse:
         from common.supabase import get_supabase_client
         supabase = get_supabase_client()
         supabase.table("tenants").select("tenant_id").limit(1).execute()
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Supabase no disponible: {str(e)}")
         supabase_status = "unavailable"
     
     # Check if OpenAI is available
@@ -485,17 +486,23 @@ async def get_service_status() -> HealthResponse:
         test_result = embed_model._get_text_embedding("test")
         if not test_result or len(test_result) < 10:
             openai_status = "degraded"
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Servicio de embeddings no disponible: {str(e)}")
         openai_status = "unavailable"
     
+    # Determinar estado general
+    is_healthy = all(s == "available" for s in [redis_status, supabase_status, openai_status])
+    
     return HealthResponse(
-        status="healthy" if all(s == "available" for s in [redis_status, supabase_status, openai_status]) else "degraded",
+        success=True,  
+        status="healthy" if is_healthy else "degraded",
         components={
             "redis": redis_status,
             "supabase": supabase_status,
             "openai": openai_status
         },
-        version=settings.service_version
+        version=settings.service_version,
+        message="Servicio de embeddings operativo" if is_healthy else "Servicio de embeddings con funcionalidad limitada"
     )
 
 

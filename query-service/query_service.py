@@ -566,8 +566,8 @@ async def get_service_status() -> HealthResponse:
         redis_client = get_redis_client()
         if redis_client and redis_client.ping():
             redis_status = "available"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Redis no disponible: {str(e)}")
     
     # Check if Supabase is available
     supabase_status = "unavailable"
@@ -575,8 +575,8 @@ async def get_service_status() -> HealthResponse:
         supabase = get_supabase_client()
         supabase.table("tenants").select("tenant_id").limit(1).execute()
         supabase_status = "available"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Supabase no disponible: {str(e)}")
     
     # Check if OpenAI API is available
     openai_status = "unavailable"
@@ -589,8 +589,8 @@ async def get_service_status() -> HealthResponse:
             max_tokens=5
         )
         openai_status = "available"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"OpenAI no disponible: {str(e)}")
         
     # Check if Embedding service is available
     embed_status = "unavailable"
@@ -598,19 +598,25 @@ async def get_service_status() -> HealthResponse:
         response = httpx.get(f"{settings.embedding_service_url}/status")
         if response.status_code == 200:
             embed_status = "available"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Servicio de embeddings no disponible: {str(e)}")
+    
+    # Determinar estado general
+    is_healthy = all(s == "available" for s in [supabase_status, openai_status, embed_status])
     
     return HealthResponse(
-        status="healthy" if all(s == "available" for s in [supabase_status, openai_status, embed_status]) else "degraded",
+        success=True,  
+        status="healthy" if is_healthy else "degraded",
         components={
             "redis": redis_status,
             "supabase": supabase_status,
             "openai": openai_status,
             "embedding_service": embed_status
         },
-        version=settings.service_version
+        version=settings.service_version,
+        message="Servicio de consulta operativo" if is_healthy else "Servicio de consulta con funcionalidad limitada"
     )
+
 
 @app.post("/collections", response_model=Dict[str, Any])
 @handle_service_error_simple

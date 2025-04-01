@@ -7,13 +7,15 @@ import logging
 from typing import Dict, Any, List, Optional
 
 # Importar desde el módulo de errores para evitar duplicación
-from .errors import handle_service_error, sanitize_content, ServiceError
+from .errors import handle_service_error_simple, sanitize_content, ServiceError
 from .tracking import track_token_usage, track_query, track_embedding_usage
 
 logger = logging.getLogger(__name__)
 
-# Re-exportamos handle_service_error para mantener compatibilidad con código existente
-# Actualmente, handle_service_error es el decorador estándar recomendado para todos los endpoints
+# Re-exportamos handle_service_error_simple para mantener compatibilidad con código existente
+# Actualmente, handle_service_error_simple es el decorador estándar recomendado para todos los endpoints
+# Para fines de compatibilidad con código existente, podemos crear un alias
+handle_service_error = handle_service_error_simple
 
 async def track_usage(tenant_id: str, operation: str, metadata: Dict[str, Any]) -> bool:
     """

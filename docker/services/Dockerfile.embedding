@@ -2,14 +2,14 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Instalar dependencias base primero
-RUN pip install --upgrade pip && \
-    pip install fastapi==0.115.12 uvicorn==0.34.0 pydantic==2.10.6 pydantic-settings==2.8.1 python-multipart==0.0.20 httpx==0.28.1 \
-    tiktoken==0.9.0 redis==5.2.1 python-dotenv==1.0.1 tenacity==9.0.0 \
-    pytest==8.3.5 supabase==2.15.0
+# Instalar dependencias base críticas
+RUN pip install --upgrade pip
 
-# Instalar LlamaIndex en versión monolítica
-RUN pip install llama-index==0.12.26
+# Copiar requirements.txt para instalar dependencias
+COPY embedding-service/requirements.txt ./embedding-service/requirements.txt
+
+# Instalar dependencias desde requirements.txt
+RUN pip install -r ./embedding-service/requirements.txt
 
 # Copiar código de la aplicación
 COPY embedding-service/ ./embedding-service/

@@ -473,7 +473,8 @@ async def get_service_status() -> HealthResponse:
     try:
         supabase = get_supabase_client()
         supabase.table("tenants").select("tenant_id").limit(1).execute()
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Supabase no disponible: {str(e)}")
         supabase_status = "unavailable"
     
     # Check if embedding service is available
@@ -482,16 +483,22 @@ async def get_service_status() -> HealthResponse:
         response = await http_client.get(f"{settings.embedding_service_url}/status")
         if response.status_code != 200:
             embedding_status = "degraded"
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Servicio de embeddings no disponible: {str(e)}")
         embedding_status = "unavailable"
     
+    # Determinar estado general
+    is_healthy = all(s == "available" for s in [supabase_status, embedding_status])
+    
     return HealthResponse(
-        status="healthy" if all(s == "available" for s in [supabase_status, embedding_status]) else "degraded",
+        success=True,  
+        status="healthy" if is_healthy else "degraded",
         components={
             "supabase": supabase_status,
             "embedding_service": embedding_status
         },
-        version=settings.service_version
+        version=settings.service_version,
+        message="Servicio de ingestión operativo" if is_healthy else "Servicio de ingestión con funcionalidad limitada"
     )
 
 if __name__ == "__main__":

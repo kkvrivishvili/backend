@@ -349,3 +349,87 @@ def invalidate_conversation_cache(tenant_id: str, agent_id: str, conversation_id
     """
     logger.info(f"Invalidando caché para conversación {conversation_id} del agente {agent_id}")
     return clear_tenant_cache(tenant_id, agent_id=agent_id, conversation_id=conversation_id)
+
+
+def cache_keys_by_pattern(pattern: str) -> List[str]:
+    """
+    Obtiene todas las claves que coinciden con un patrón dado.
+    
+    Args:
+        pattern: Patrón de clave (ej: 'embed:123:*')
+        
+    Returns:
+        List[str]: Lista de claves que coinciden con el patrón
+    """
+    redis_client = get_redis_client()
+    if not redis_client:
+        return []
+    
+    try:
+        keys = []
+        cursor = 0
+        while True:
+            cursor, partial_keys = redis_client.scan(cursor, match=pattern, count=100)
+            keys.extend([k.decode('utf-8') if isinstance(k, bytes) else k for k in partial_keys])
+            if cursor == 0:
+                break
+        
+        return keys
+    except Exception as e:
+        logger.warning(f"Error getting keys by pattern: {str(e)}")
+        return []
+
+
+def cache_get_memory_usage(pattern: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Obtiene estadísticas de uso de memoria de Redis.
+    
+    Args:
+        pattern: Patrón opcional para filtrar claves
+        
+    Returns:
+        Dict[str, Any]: Estadísticas de memoria
+    """
+    redis_client = get_redis_client()
+    if not redis_client:
+        return {"status": "error", "message": "Redis no disponible"}
+    
+    try:
+        # Obtener estadísticas generales
+        memory_info = redis_client.info("memory")
+        
+        result = {
+            "used_memory": memory_info.get("used_memory_human", "N/A"),
+            "used_memory_peak": memory_info.get("used_memory_peak_human", "N/A"),
+            "total_keys": 0,
+            "pattern_keys": 0
+        }
+        
+        # Contar claves totales
+        total_keys = redis_client.dbsize()
+        result["total_keys"] = total_keys
+        
+        # Si se proporciona un patrón, contar claves que coinciden
+        if pattern:
+            pattern_keys = len(cache_keys_by_pattern(pattern))
+            result["pattern_keys"] = pattern_keys
+            result["pattern"] = pattern
+        
+        return result
+    except Exception as e:
+        logger.warning(f"Error getting memory usage: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
+
+def clear_tenant_cache(tenant_id: str) -> int:
+    """
+    Elimina todas las claves de caché relacionadas con un tenant.
+    
+    Args:
+        tenant_id: ID del tenant
+        
+    Returns:
+        int: Número de claves eliminadas
+    """
+    pattern = f"{tenant_id}:*"
+    return cache_delete_pattern(pattern)

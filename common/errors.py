@@ -338,3 +338,7 @@ def create_error_response(message: str, status_code: int = 500, error_detail: Op
         response["metadata"]["context"] = context_info
         
     return response
+
+# Crear un alias para mantener compatibilidad con código existente
+# El alias debe estar al final del archivo para evitar referencias circulares
+handle_service_error = handle_service_error_simple

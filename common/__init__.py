@@ -11,7 +11,7 @@ from .models import TenantInfo, HealthResponse
 from .rate_limiting import apply_rate_limit
 from .supabase import get_supabase_client
 from .tracking import track_token_usage, track_embedding_usage
-from .errors import setup_error_handling, handle_service_error
+from .errors import setup_error_handling, handle_service_error_simple
 
 __all__ = [
     'verify_tenant',
@@ -25,5 +25,5 @@ __all__ = [
     'track_token_usage',
     'track_embedding_usage',
     'setup_error_handling',
-    'handle_service_error',
+    'handle_service_error_simple',
 ]

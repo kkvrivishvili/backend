@@ -2,14 +2,14 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Instalar dependencias base primero
-RUN pip install --upgrade pip && \
-    pip install fastapi==0.115.12 uvicorn==0.34.0 pydantic==2.10.6 pydantic-settings==2.8.1 python-multipart==0.0.20 httpx==0.28.1 \
-    tiktoken==0.9.0 redis==5.2.1 python-dotenv==1.0.1 tenacity==9.0.0 \
-    pytest==8.3.5 supabase==2.15.0
+# Instalar dependencias base críticas
+RUN pip install --upgrade pip
 
-# Instalar LlamaIndex en versión monolítica
-RUN pip install llama-index==0.12.26
+# Copiar requirements.txt para instalar dependencias
+COPY ingestion-service/requirements.txt ./ingestion-service/requirements.txt
+
+# Instalar dependencias desde requirements.txt
+RUN pip install -r ./ingestion-service/requirements.txt
 
 # Copiar código de la aplicación
 COPY ingestion-service/ ./ingestion-service/
@@ -37,13 +37,13 @@ ENV SUPABASE_KEY=dummy-key-for-testing
 ENV OPENAI_API_KEY=sk-dummy-key-for-testing
 
 # Puerto en el que se ejecutará el servicio (definido en config.py)
-EXPOSE 8000
+EXPOSE 8004
 
 # Directorio de trabajo para el servicio
 WORKDIR /app/ingestion-service
 
 # Health check para K8s
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD curl -f http://localhost:8000/status || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD curl -f http://localhost:8004/status || exit 1
 
 # Comando para ejecutar el servicio
-CMD ./init_ollama.sh && uvicorn ingestion_service:app --host 0.0.0.0 --port 8000
+CMD ./init_ollama.sh && uvicorn ingestion_service:app --host 0.0.0.0 --port 8004

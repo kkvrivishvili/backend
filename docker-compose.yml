@@ -63,7 +63,7 @@ services:
       context: .
       dockerfile: docker/services/Dockerfile.ingestion
     ports:
-      - "8000:8000"
+      - "8004:8004"
     environment:
       # Variables de credenciales
       - OPENAI_API_KEY=${OPENAI_API_KEY}

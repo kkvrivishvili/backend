@@ -42,7 +42,7 @@ from common.ollama import get_llm_model, is_using_ollama
 from common.context import (
     TenantContext, FullContext, get_current_tenant_id, get_current_agent_id, 
     get_current_conversation_id, with_tenant_context, with_full_context, 
-    AgentContext,
+    AgentContext, with_agent_context,
 )
 
 # Configuración
@@ -440,7 +440,8 @@ async def get_service_status() -> HealthResponse:
     try:
         supabase = get_supabase_client()
         supabase.table("ai.agent_configs").select("agent_id").limit(1).execute()
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Supabase no disponible: {str(e)}")
         supabase_status = "unavailable"
     
     # Verificar servicio de consulta
@@ -449,16 +450,22 @@ async def get_service_status() -> HealthResponse:
         response = await http_client.get(f"{settings.query_service_url}/status")
         if response.status_code != 200:
             query_service_status = "degraded"
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Servicio de consulta no disponible: {str(e)}")
         query_service_status = "unavailable"
     
+    # Determinar estado general
+    is_healthy = all(s == "available" for s in [supabase_status, query_service_status])
+    
     return HealthResponse(
-        status="healthy" if all(s == "available" for s in [supabase_status, query_service_status]) else "degraded",
+        success=True,  # Añadir el campo success requerido
+        status="healthy" if is_healthy else "degraded",
         components={
             "supabase": supabase_status,
             "query_service": query_service_status
         },
-        version=settings.service_version
+        version=settings.service_version,
+        message="Servicio de agente operativo" if is_healthy else "Servicio de agente con funcionalidad limitada"
     )
 
 
