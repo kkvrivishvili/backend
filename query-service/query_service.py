@@ -51,6 +51,7 @@ from common.tracking import track_query, track_token_usage
 from common.rate_limiting import setup_rate_limiting
 from common.utils import prepare_service_request
 from common.errors import setup_error_handling, handle_service_error_simple, ServiceError
+from common.swagger import configure_swagger_ui, add_example_to_endpoint
 
 # Configuración de la aplicación FastAPI
 app = FastAPI(
@@ -83,9 +84,9 @@ app = FastAPI(
         "name": "Equipo de Desarrollo de Linktree AI",
         "email": "dev@linktree.ai"
     },
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
-    openapi_url="/api/openapi.json",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
     openapi_tags=[
         {
             "name": "query",
@@ -104,6 +105,165 @@ app = FastAPI(
             "description": "Verificación de estado del servicio"
         }
     ]
+)
+
+# Configurar Swagger UI con opciones estandarizadas
+configure_swagger_ui(
+    app=app,
+    service_name="Query Service",
+    service_description="""
+    API para realizar consultas RAG (Retrieval-Augmented Generation) y gestionar colecciones
+    de documentos para búsqueda semántica.
+    
+    Este servicio permite buscar información relevante en colecciones de documentos y obtener
+    respuestas generadas por modelos LLM que aprovechan el contexto extraído de los documentos
+    para producir respuestas precisas y fundamentadas.
+    """,
+    version="1.2.0",
+    tags=[
+        {
+            "name": "query",
+            "description": "Operaciones de consulta RAG"
+        },
+        {
+            "name": "collections",
+            "description": "Gestión de colecciones de documentos"
+        },
+        {
+            "name": "documents",
+            "description": "Gestión de documentos"
+        },
+        {
+            "name": "models",
+            "description": "Gestión de modelos LLM"
+        }
+    ]
+)
+
+# Agregar ejemplos para los endpoints principales
+add_example_to_endpoint(
+    app=app,
+    path="/query",
+    method="post",
+    request_example={
+        "query": "¿Cuál es el presupuesto asignado al proyecto X para 2023?",
+        "collection_name": "documentos_financieros",
+        "top_k": 5,
+        "similarity_cutoff": 0.7,
+        "model": "gpt-3.5-turbo",
+        "context_strategy": "simple"
+    },
+    response_example={
+        "success": True,
+        "message": "Consulta procesada exitosamente",
+        "answer": "El presupuesto total asignado para el proyecto X es de $150,000 según la documentación proporcionada.",
+        "sources": [
+            {
+                "document_id": "doc_123456",
+                "document_name": "Presupuesto_2023.pdf",
+                "similarity": 0.89,
+                "content": "El presupuesto total asignado para el proyecto X durante el año fiscal 2023 es de $150,000.",
+                "metadata": {
+                    "page": 5,
+                    "timestamp": "2023-05-15T14:30:00Z"
+                }
+            }
+        ],
+        "processing_time": 0.75,
+        "model_used": "gpt-3.5-turbo"
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/collections",
+    method="get",
+    response_example={
+        "success": True,
+        "message": "Colecciones obtenidas correctamente",
+        "collections": [
+            {
+                "collection_id": "col_123456",
+                "name": "Documentación Técnica",
+                "description": "Documentación técnica de productos",
+                "document_count": 45,
+                "created_at": "2023-04-12T10:20:30Z",
+                "updated_at": "2023-06-15T11:45:22Z"
+            },
+            {
+                "collection_id": "col_789012",
+                "name": "Políticas Internas",
+                "description": "Documentos de políticas y procedimientos",
+                "document_count": 18,
+                "created_at": "2023-05-05T09:10:15Z",
+                "updated_at": "2023-06-10T14:30:45Z"
+            }
+        ],
+        "count": 2
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/collections",
+    method="post",
+    request_example={
+        "name": "Manuales de Usuario",
+        "description": "Colección de manuales de usuario para productos"
+    },
+    response_example={
+        "success": True,
+        "message": "Colección creada exitosamente",
+        "collection_id": "col_123456",
+        "name": "Manuales de Usuario",
+        "description": "Colección de manuales de usuario para productos",
+        "created_at": "2023-06-15T14:22:30Z"
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/llm/models",
+    method="get",
+    response_example={
+        "success": True,
+        "message": "Modelos LLM disponibles obtenidos correctamente",
+        "models": {
+            "gpt-3.5-turbo": {
+                "provider": "openai",
+                "description": "Modelo de propósito general con buen balance entre rendimiento y costo",
+                "max_tokens": 4096,
+                "tier_required": "standard"
+            },
+            "gpt-4": {
+                "provider": "openai",
+                "description": "Modelo avanzado para tareas complejas",
+                "max_tokens": 8192,
+                "tier_required": "premium"
+            }
+        },
+        "default_model": "gpt-3.5-turbo",
+        "subscription_tier": "premium"
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/status",
+    method="get",
+    response_example={
+        "success": True,
+        "message": "Servicio en funcionamiento",
+        "service": "query-service",
+        "version": "1.2.0",
+        "dependencies": {
+            "database": "healthy",
+            "vector_store": "healthy",
+            "embedding_service": "healthy",
+            "llm_service": "healthy"
+        },
+        "timestamp": "2023-06-15T16:45:30Z"
+    }
 )
 
 # Configurar manejo de errores y rate limiting

@@ -36,6 +36,7 @@ from common.context import (
     with_tenant_context, with_full_context, 
     
 )
+from common.swagger import configure_swagger_ui, add_example_to_endpoint
 
 # Inicializar logging usando la configuración centralizada
 init_logging()
@@ -78,9 +79,9 @@ app = FastAPI(
         "name": "Equipo de Desarrollo de Linktree AI",
         "email": "dev@linktree.ai"
     },
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
-    openapi_url="/api/openapi.json",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
     openapi_tags=[
         {
             "name": "ingest",
@@ -91,6 +92,129 @@ app = FastAPI(
             "description": "Verificación de estado del servicio"
         }
     ]
+)
+
+# Configurar Swagger UI con opciones estandarizadas
+configure_swagger_ui(
+    app=app,
+    service_name="Ingestion Service",
+    service_description="""
+    API para gestionar la ingesta, procesamiento e indexación de documentos en el sistema RAG.
+    
+    Este servicio permite cargar documentos, procesarlos en fragmentos adecuados para RAG,
+    extraer metadatos relevantes, y vectorizarlos para su posterior consulta a través
+    del Query Service.
+    """,
+    version="1.2.0",
+    tags=[
+        {
+            "name": "documents",
+            "description": "Operaciones de ingesta y gestión de documentos"
+        },
+        {
+            "name": "ingestion",
+            "description": "Control de procesos de ingesta"
+        },
+        {
+            "name": "jobs",
+            "description": "Gestión de trabajos de procesamiento"
+        },
+        {
+            "name": "health",
+            "description": "Verificación de estado del servicio"
+        }
+    ]
+)
+
+# Agregar ejemplos para los endpoints principales
+add_example_to_endpoint(
+    app=app,
+    path="/ingest",
+    method="post",
+    request_example={
+        "documents": [
+            {
+                "text": "Este es un ejemplo de texto para ingestión",
+                "metadata": {
+                    "document_id": "doc_123456",
+                    "source": "manual",
+                    "author": "Equipo de Desarrollo",
+                    "created_at": "2023-06-15T14:22:30Z",
+                    "document_type": "manual",
+                    "custom_metadata": {
+                        "filename": "manual_producto_xyz.pdf"
+                    }
+                }
+            }
+        ],
+        "collection_name": "default",
+        "chunk_size": 500,
+        "chunk_overlap": 100
+    },
+    response_example={
+        "success": True,
+        "message": "Documentos procesados exitosamente",
+        "document_ids": ["doc_123456"],
+        "node_count": 10
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/ingest-file",
+    method="post",
+    request_example={
+        "file": "<archivo_binario>",
+        "collection_name": "default",
+        "document_type": "manual",
+        "author": "Equipo de Desarrollo"
+    },
+    response_example={
+        "success": True,
+        "message": "Archivo procesado exitosamente",
+        "document_ids": ["doc_123456"],
+        "node_count": 10
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/documents/{document_id}",
+    method="delete",
+    response_example={
+        "success": True,
+        "message": "Documento eliminado exitosamente",
+        "document_id": "doc_123456",
+        "deleted_chunks": 10
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/collections/{collection_name}",
+    method="delete",
+    response_example={
+        "success": True,
+        "message": "Colección eliminada exitosamente",
+        "collection_name": "default",
+        "deleted_chunks": 50
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/status",
+    method="get",
+    response_example={
+        "success": True,
+        "message": "Servicio en funcionamiento",
+        "status": "healthy",
+        "components": {
+            "supabase": "available",
+            "embedding_service": "available"
+        },
+        "version": "1.2.0"
+    }
 )
 
 # Configurar manejo de errores y rate limiting

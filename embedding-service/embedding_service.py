@@ -43,6 +43,7 @@ from common.errors import setup_error_handling, handle_service_error_simple, Ser
 from common.tracking import track_embedding_usage
 from common.rate_limiting import setup_rate_limiting
 from common.logging import init_logging
+from common.swagger import configure_swagger_ui, add_example_to_endpoint
 
 # Inicializar logging usando la configuración centralizada
 init_logging()
@@ -80,13 +81,169 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    openapi_url="/openapi.json"
+)
+
+# Configurar Swagger UI con opciones estandarizadas
+configure_swagger_ui(
+    app=app,
+    service_name="Embedding Service",
+    service_description="""
+    API para generación de embeddings vectoriales de alta calidad para texto.
+    
+    Este servicio proporciona endpoints para transformar texto en vectores densos que capturan
+    significado semántico, facilitando búsquedas por similitud, clustering y otras operaciones vectoriales.
+    
+    Soporta múltiples modelos de embeddings, caché y aislamiento multi-tenant para optimizar
+    rendimiento y costos.
+    """,
+    version="1.2.0",
+    tags=[
+        {
+            "name": "embeddings",
+            "description": "Operaciones de generación de embeddings"
+        },
+        {
+            "name": "models",
+            "description": "Gestión de modelos de embeddings"
+        },
+        {
+            "name": "cache",
+            "description": "Gestión de caché de embeddings"
+        }
+    ]
 )
 
 # Configurar manejo de errores y rate limiting
 setup_error_handling(app)
 setup_rate_limiting(app)
 
-# Add CORS middleware
+# Agregar ejemplos para los endpoints principales
+add_example_to_endpoint(
+    app=app,
+    path="/embed",
+    method="post",
+    request_example={
+        "text": "Este texto será convertido a un vector de embedding",
+        "model": "text-embedding-3-small",
+        "cache_enabled": True
+    },
+    response_example={
+        "success": True,
+        "message": "Embedding generado exitosamente",
+        "embedding": [0.0231, -0.0345, 0.0721, 0.0123, -0.0892],  # Truncado para brevedad
+        "model": "text-embedding-3-small",
+        "dimensions": 1536,
+        "processing_time": 0.235
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/embed-batch",
+    method="post",
+    request_example={
+        "texts": [
+            {"text": "Primer texto de ejemplo", "id": "doc1"},
+            {"text": "Segundo texto de ejemplo", "id": "doc2"}
+        ],
+        "model": "text-embedding-3-small",
+        "cache_enabled": True
+    },
+    response_example={
+        "success": True,
+        "message": "Embeddings generados exitosamente",
+        "embeddings": [
+            {
+                "id": "doc1",
+                "embedding": [0.0231, -0.0345, 0.0721],  # Truncado para brevedad
+                "cached": False
+            },
+            {
+                "id": "doc2",
+                "embedding": [0.0156, -0.0127, 0.0498],  # Truncado para brevedad
+                "cached": False
+            }
+        ],
+        "model": "text-embedding-3-small",
+        "dimensions": 1536,
+        "processing_time": 0.358
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/models",
+    method="get",
+    response_example={
+        "success": True,
+        "message": "Modelos de embedding disponibles obtenidos correctamente",
+        "models": {
+            "text-embedding-3-small": {
+                "dimensions": 1536,
+                "description": "OpenAI text-embedding-3-small model, suitable for most applications",
+                "max_tokens": 8191
+            },
+            "text-embedding-ada-002": {
+                "dimensions": 1536,
+                "description": "OpenAI legacy model, maintained for backwards compatibility",
+                "max_tokens": 8191
+            }
+        },
+        "default_model": "text-embedding-3-small",
+        "subscription_tier": "pro",
+        "tenant_id": "tenant123"
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/cache/stats",
+    method="get",
+    response_example={
+        "success": True,
+        "message": "Estadísticas de caché obtenidas correctamente",
+        "tenant_id": "tenant123",
+        "agent_id": None,
+        "conversation_id": None,
+        "cache_enabled": True,
+        "cached_embeddings": 250,
+        "memory_usage_bytes": 15728640,
+        "memory_usage_mb": 15.0
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/cache/clear",
+    method="delete",
+    response_example={
+        "success": True,
+        "message": "Se han eliminado 35 claves de caché",
+        "keys_deleted": 35
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/status",
+    method="get",
+    response_example={
+        "success": True,
+        "message": "Servicio en funcionamiento",
+        "service": "embedding-service",
+        "version": "1.2.0",
+        "dependencies": {
+            "database": "healthy",
+            "redis": "healthy",
+            "openai": "healthy",
+            "ollama": "healthy"
+        },
+        "timestamp": "2023-06-15T16:45:30Z"
+    }
+)
+
+# Configurar CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Cambiar en producción
@@ -359,7 +516,7 @@ async def generate_embeddings(
     )
 
 
-@app.post("/embed/batch", response_model=EmbeddingResponse)
+@app.post("/embed-batch", response_model=EmbeddingResponse)
 @handle_service_error_simple
 @with_full_context
 async def batch_generate_embeddings(
@@ -484,7 +641,7 @@ async def list_available_models(
     3. Inclusión de modelos premium si el nivel de suscripción lo permite
     4. Adición de modelos locales (Ollama) si están habilitados en la configuración
     
-    ## Dependencias
+    ## Dependencias verificadas
     - Supabase: Para verificación del nivel de suscripción del tenant
     - Ollama (opcional): Para información de modelos locales disponibles
     

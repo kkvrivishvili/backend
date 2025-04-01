@@ -42,6 +42,7 @@ from common.utils import track_usage, sanitize_content, prepare_service_request
 from common.errors import handle_service_error_simple, ServiceError, create_error_response
 from common.logging import init_logging
 from common.ollama import get_llm_model, is_using_ollama
+from common.swagger import configure_swagger_ui, add_example_to_endpoint
 from common.context import (
     TenantContext, FullContext, get_current_tenant_id, get_current_agent_id, 
     get_current_conversation_id, with_tenant_context, with_full_context, 
@@ -93,50 +94,249 @@ app = FastAPI(
     
     ## Dependencias
     - Redis: Para caché de sesiones y gestión de conversaciones
-    - Supabase: Para almacenamiento de configuración y herramientas
-    - Query Service: Para capacidades de RAG integradas
-    - Embedding Service: Para procesamiento semántico
-    - OpenAI API (opcional): Para modelos de generación en la nube
-    - Ollama (opcional): Para modelos de generación locales
-    
-    ## Estándares de API
-    Todos los endpoints siguen estos estándares:
-    - Respuestas estandarizadas que extienden BaseResponse
-    - Manejo de errores consistente con códigos de estado HTTP apropiados
-    - Sistema de contexto multinivel para operaciones
-    - Control de acceso basado en suscripción
+    - Supabase: Para almacenamiento de configuración y mensajes
+    - OpenAI API: Para modelos LLM
+    - Embedding Service: Para vectorización de texto
+    - Query Service: Para funcionalidades RAG
     """,
     version="1.2.0",
-    contact={
-        "name": "Equipo de Desarrollo de Linktree AI",
-        "email": "dev@linktree.ai"
-    },
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
-    openapi_url="/api/openapi.json",
-    openapi_tags=[
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
+    lifespan=lifespan
+)
+
+# Configurar Swagger UI con opciones estandarizadas
+configure_swagger_ui(
+    app=app,
+    service_name="Agent Service",
+    service_description="""
+    API para gestión de agentes conversacionales inteligentes con capacidades avanzadas.
+    
+    Este servicio permite crear, configurar y utilizar agentes conversacionales basados en LLM
+    que pueden acceder a información estructurada, usar herramientas externas y mantener
+    conversaciones persistentes con memoria de contexto.
+    """,
+    version="1.2.0",
+    tags=[
         {
             "name": "agents",
-            "description": "Gestión de agentes conversacionales"
+            "description": "Operaciones de gestión de agentes"
         },
         {
             "name": "conversations",
-            "description": "Gestión de conversaciones"
+            "description": "Operaciones de gestión de conversaciones"
+        },
+        {
+            "name": "chat",
+            "description": "Endpoints de interacción conversacional"
         },
         {
             "name": "tools",
             "description": "Gestión de herramientas para agentes"
-        },
-        {
-            "name": "chat",
-            "description": "Interacción conversacional con agentes"
-        },
-        {
-            "name": "health",
-            "description": "Verificación de estado del servicio"
         }
-    ],
-    lifespan=lifespan
+    ]
+)
+
+# Agregar ejemplos para los endpoints principales
+add_example_to_endpoint(
+    app=app,
+    path="/agents",
+    method="get",
+    response_example={
+        "success": True,
+        "message": "Agentes obtenidos exitosamente",
+        "agents": [
+            {
+                "agent_id": "ag_123456789",
+                "name": "Customer Support Agent",
+                "description": "Asistente para soporte al cliente",
+                "model": "gpt-3.5-turbo",
+                "is_public": False,
+                "created_at": "2023-06-15T10:30:45Z",
+                "updated_at": "2023-06-15T10:30:45Z"
+            },
+            {
+                "agent_id": "ag_987654321",
+                "name": "Sales Assistant",
+                "description": "Asistente para ventas",
+                "model": "gpt-4",
+                "is_public": True,
+                "created_at": "2023-06-10T14:22:33Z",
+                "updated_at": "2023-06-14T09:15:20Z"
+            }
+        ],
+        "count": 2
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/agents",
+    method="post",
+    request_example={
+        "name": "Technical Support Bot",
+        "description": "Asistente técnico para productos de hardware",
+        "system_prompt": "Eres un asistente técnico especializado en productos de hardware. Tu objetivo es ayudar a resolver problemas técnicos de manera clara y efectiva.",
+        "model": "gpt-4",
+        "tools": [
+            {
+                "name": "search_documentation",
+                "description": "Buscar en la documentación técnica",
+                "type": "function",
+                "function": {
+                    "name": "search_documentation",
+                    "description": "Busca información en la documentación técnica",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Términos de búsqueda"
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            }
+        ],
+        "is_public": False,
+        "rag_config": {
+            "collections": ["technical_docs"],
+            "enabled": True
+        }
+    },
+    response_example={
+        "success": True,
+        "message": "Agente creado exitosamente",
+        "agent_id": "ag_123456789",
+        "name": "Technical Support Bot",
+        "description": "Asistente técnico para productos de hardware",
+        "model": "gpt-4",
+        "system_prompt": "Eres un asistente técnico especializado en productos de hardware...",
+        "tools": [
+            {
+                "name": "search_documentation",
+                "description": "Buscar en la documentación técnica",
+                "type": "function"
+            }
+        ],
+        "is_public": False,
+        "created_at": "2023-06-15T10:30:45Z",
+        "updated_at": "2023-06-15T10:30:45Z"
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/chat",
+    method="post",
+    request_example={
+        "message": "¿Cómo puedo restablecer mi dispositivo a la configuración de fábrica?",
+        "agent_id": "ag_123456789",
+        "conversation_id": "conv_987654321",
+        "context": {"product_id": "XYZ-100"},
+        "stream": False
+    },
+    response_example={
+        "success": True,
+        "message": "Consulta procesada exitosamente",
+        "conversation_id": "conv_987654321",
+        "message": {
+            "role": "assistant",
+            "content": "Para restablecer tu dispositivo XYZ-100 a la configuración de fábrica, sigue estos pasos:\n\n1. Apaga el dispositivo completamente\n2. Mantén presionados los botones de volumen + y encendido simultáneamente por 10 segundos\n3. Cuando aparezca el menú de recuperación, selecciona 'Wipe data/factory reset'\n4. Confirma la operación\n\nTen en cuenta que esto borrará todos tus datos personales. Asegúrate de hacer una copia de seguridad antes de proceder.",
+            "metadata": {
+                "processing_time": 0.853
+            }
+        },
+        "thinking": "El usuario quiere saber cómo restablecer el dispositivo XYZ-100. Buscaré en la documentación técnica para obtener los pasos específicos...",
+        "tools_used": ["search_documentation"],
+        "processing_time": 0.853,
+        "sources": [
+            {
+                "document_id": "doc_456789",
+                "document_name": "Manual_XYZ-100.pdf",
+                "page": 42,
+                "content": "Restablecimiento de fábrica: Apague el dispositivo. Mantenga presionados los botones de volumen + y encendido durante 10 segundos..."
+            }
+        ]
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/conversations",
+    method="get",
+    response_example={
+        "success": True,
+        "message": "Conversaciones obtenidas exitosamente",
+        "conversations": [
+            {
+                "conversation_id": "conv_987654321",
+                "agent_id": "ag_123456789",
+                "title": "Consulta sobre productos",
+                "created_at": "2023-06-15T10:30:45Z",
+                "updated_at": "2023-06-15T10:35:22Z",
+                "message_count": 4,
+                "last_message": "Gracias por la información..."
+            },
+            {
+                "conversation_id": "conv_456789123",
+                "agent_id": "ag_123456789",
+                "title": "Problema técnico",
+                "created_at": "2023-06-14T15:20:33Z",
+                "updated_at": "2023-06-14T15:45:10Z",
+                "message_count": 8,
+                "last_message": "El problema ha sido resuelto..."
+            }
+        ],
+        "count": 2
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/agents/{agent_id}",
+    method="delete",
+    response_example={
+        "success": True,
+        "message": "Agente ag_123456789 eliminado exitosamente",
+        "agent_id": "ag_123456789",
+        "deleted": True,
+        "conversations_deleted": 5
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/conversations/{conversation_id}",
+    method="delete",
+    response_example={
+        "success": True,
+        "message": "Conversación conv_987654321 eliminada exitosamente",
+        "conversation_id": "conv_987654321",
+        "deleted": True,
+        "messages_deleted": 8
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/status",
+    method="get",
+    response_example={
+        "success": True,
+        "message": "Servicio en funcionamiento",
+        "service": "agent-service",
+        "version": "1.2.0",
+        "dependencies": {
+            "database": "healthy",
+            "redis": "healthy",
+            "embedding_service": "healthy",
+            "llm_service": "healthy"
+        },
+        "timestamp": "2023-06-15T16:45:30Z"
+    }
 )
 
 # Configurar CORS
