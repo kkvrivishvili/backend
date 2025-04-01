@@ -13,7 +13,8 @@ import redis
 from fastapi import FastAPI, HTTPException, Depends, status, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Dict, List, Optional, Any, Tuple, Union
 
 # Importaciones para LangChain 0.3.x modular
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
@@ -1199,435 +1200,124 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
     )
 
 
-# Función para obtener información del inquilino
-@with_tenant_context
-async def get_tenant_info() -> Optional[TenantInfo]:
+# Modelos para el endpoint público
+class PublicChatRequest(BaseModel):
+    """Modelo para solicitudes de chat público."""
+    message: str
+    session_id: Optional[str] = None
+    tenant_slug: str
+    context: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+class PublicTenantInfo(BaseModel):
+    """Información básica de un tenant para acceso público."""
+    tenant_id: str
+    name: str
+    token_quota: int = 0
+    tokens_used: int = 0
+    has_quota: bool = True
+
+# Función para verificar un tenant público por su slug
+async def verify_public_tenant(tenant_slug: str) -> PublicTenantInfo:
     """
-    Obtiene información del inquilino desde Supabase.
+    Verifica que un tenant exista y sea público basado en su slug.
     
+    Args:
+        tenant_slug: Slug del tenant a verificar
+        
     Returns:
-        Optional[TenantInfo]: Información del inquilino o None si no se encuentra
+        PublicTenantInfo: Información del tenant
+        
+    Raises:
+        ServiceError: Si el tenant no existe o no es público
     """
-    # El tenant_id ya está disponible en el contexto gracias al decorador
-    tenant_id = get_current_tenant_id()
-        
     try:
-        # Inicializar cliente de Supabase
         supabase = get_supabase_client()
+        tenant_data = await supabase.table("tenants") \
+            .select("tenant_id, name, public_profile, token_quota, tokens_used") \
+            .eq("slug", tenant_slug) \
+            .single() \
+            .execute()
         
-        # Consultar información del inquilino
-        response = supabase.table("tenants").select("*").eq("id", tenant_id).execute()
+        if not tenant_data.data:
+            raise ServiceError(
+                message=f"Tenant with slug '{tenant_slug}' not found",
+                status_code=404,
+                error_code="tenant_not_found"
+            )
         
-        # Verificar si se encontró el inquilino
-        if not response.data or len(response.data) == 0:
-            logging.warning(f"Inquilino no encontrado: {tenant_id}")
-            return None
+        tenant = tenant_data.data
         
-        # Obtener datos del inquilino
-        tenant_data = response.data[0]
+        # Verificar que el tenant tenga perfil público
+        if not tenant.get("public_profile", False):
+            raise ServiceError(
+                message=f"Tenant with slug '{tenant_slug}' does not have a public profile",
+                status_code=403,
+                error_code="tenant_not_public"
+            )
         
-        # Construir y devolver información del inquilino
-        return TenantInfo(
-            id=tenant_data.get("id"),
-            name=tenant_data.get("name"),
-            openai_api_key=tenant_data.get("openai_api_key") or os.getenv("OPENAI_API_KEY"),
-            api_quotas=tenant_data.get("api_quotas", {}),
-            allowed_models=tenant_data.get("allowed_models", []),
-            config=tenant_data.get("config", {})
+        # Verificar cuota de tokens
+        token_quota = tenant.get("token_quota", 0)
+        tokens_used = tenant.get("tokens_used", 0)
+        has_quota = token_quota > tokens_used
+        
+        return PublicTenantInfo(
+            tenant_id=tenant["tenant_id"],
+            name=tenant.get("name", "Unknown"),
+            token_quota=token_quota,
+            tokens_used=tokens_used,
+            has_quota=has_quota
         )
     except Exception as e:
-        logging.error(f"Error al obtener información del inquilino {tenant_id}: {e}")
-        return None
-
-
-# Endpoints para gestión de conversaciones
-
-@app.get("/conversations", response_model=ConversationsListResponse)
-@handle_service_error_simple
-@with_tenant_context
-async def list_conversations(
-    limit: int = 50,
-    offset: int = 0,
-    agent_id: Optional[str] = None,
-    status: Optional[str] = None,
-    tenant_info: TenantInfo = Depends(verify_tenant)
-) -> ConversationsListResponse:
-    """
-    Lista todas las conversaciones de un tenant.
-    
-    Args:
-        limit: Límite de resultados
-        offset: Desplazamiento para paginación
-        agent_id: Filtrar por ID de agente (opcional)
-        status: Filtrar por estado (opcional)
-        tenant_info: Información del tenant (inyectada por Depends)
-        
-    Returns:
-        ConversationsListResponse: Lista de conversaciones
-    """
-    tenant_id = get_current_tenant_id()
-    
-    # El contexto ya está establecido por el decorador @with_tenant_context
-    supabase = get_supabase_client()
-    
-    # Crear query base
-    query = supabase.from_("ai.conversations").select(
-        "*", count="exact"
-    ).eq("tenant_id", tenant_id).order("created_at", ascending=False)
-    
-    # Aplicar filtros
-    if agent_id:
-        query = query.eq("agent_id", agent_id)
-    
-    if status:
-        query = query.eq("status", status)
-    
-    # Aplicar paginación
-    query = query.range(offset, offset + limit - 1)
-    
-    # Ejecutar consulta
-    result = await query.execute()
-    
-    # Procesar resultados
-    if not result.data:
-        conversations = []
-        total = 0
-    else:
-        conversations = result.data
-        total = result.count
-            
-        # Convertir a objetos ConversationResponse
-        conversations = [
-            ConversationResponse(
-                conversation_id=conv["conversation_id"],
-                tenant_id=conv["tenant_id"],
-                agent_id=conv["agent_id"],
-                title=conv["title"],
-                status=conv["status"],
-                context=conv["context"],
-                client_reference_id=conv["client_reference_id"],
-                metadata=conv["metadata"],
-                created_at=conv["created_at"],
-                updated_at=conv["updated_at"]
-            ) for conv in conversations
-        ]
-    
-    return ConversationsListResponse(
-        conversations=conversations,
-        total=total,
-        limit=limit,
-        offset=offset
-    )
-
-@app.get("/conversations/{conversation_id}", response_model=ConversationResponse)
-@handle_service_error_simple
-@with_full_context
-async def get_conversation(
-    conversation_id: str,
-    tenant_info: TenantInfo = Depends(verify_tenant)
-) -> ConversationResponse:
-    """
-    Obtiene los detalles de una conversación.
-    
-    Args:
-        conversation_id: ID de la conversación
-        tenant_info: Información del tenant (inyectada por Depends)
-        
-    Returns:
-        ConversationResponse: Detalles de la conversación
-    """
-    tenant_id = get_current_tenant_id()
-    
-    supabase = get_supabase_client()
-    
-    # Obtener la conversación verificando que pertenezca al tenant
-    result = await supabase.from_("ai.conversations") \
-        .select("*") \
-        .eq("tenant_id", tenant_id) \
-        .eq("conversation_id", conversation_id) \
-        .single() \
-        .execute()
-    
-    if not result.data:
-        logger.warning(f"Intento de acceso a conversación no existente: {conversation_id} por tenant {tenant_id}")
+        if isinstance(e, ServiceError):
+            raise e
+        logger.error(f"Error verifying public tenant: {str(e)}")
         raise ServiceError(
-            message=f"Conversation with ID {conversation_id} not found",
-            status_code=404,
-            error_code="conversation_not_found"
-        )
-    
-    # Convertir a ConversationResponse
-    conversation = result.data
-    agent_id = conversation["agent_id"]
-    
-    # Obtener información adicional sobre la conversación
-    # Contar mensajes en la conversación
-    messages_count = await supabase.from_("ai.messages") \
-        .select("*", count="exact") \
-        .eq("conversation_id", conversation_id) \
-        .execute()
-    
-    conversation_count = messages_count.count if messages_count.count is not None else 0
-    
-    # Crear respuesta
-    return ConversationResponse(
-        conversation_id=conversation["conversation_id"],
-        tenant_id=conversation["tenant_id"],
-        agent_id=conversation["agent_id"],
-        title=conversation["title"],
-        status=conversation["status"],
-        context=conversation["context"],
-        client_reference_id=conversation["client_reference_id"],
-        metadata=conversation["metadata"],
-        created_at=conversation["created_at"],
-        updated_at=conversation["updated_at"],
-        messages_count=conversation_count
-    )
-
-@app.get("/conversations/{conversation_id}/messages", response_model=MessageListResponse)
-@handle_service_error_simple
-@with_full_context
-async def get_conversation_messages(
-    conversation_id: str,
-    tenant_info: TenantInfo = Depends(verify_tenant),
-    limit: int = 50,
-    offset: int = 0
-) -> MessageListResponse:
-    """
-    Obtiene los mensajes de una conversación.
-    
-    Args:
-        conversation_id: ID de la conversación
-        tenant_info: Información del tenant (inyectada por Depends)
-        limit: Límite de resultados
-        offset: Desplazamiento para paginación
-        
-    Returns:
-        MessageListResponse: Lista de mensajes
-    """
-    tenant_id = get_current_tenant_id()
-    
-    supabase = get_supabase_client()
-    
-    # Verificar que la conversación pertenezca al tenant y obtener agent_id
-    conv_check = await supabase.from_("ai.conversations").select(
-        "conversation_id, agent_id"
-    ).eq("conversation_id", conversation_id).eq("tenant_id", tenant_id).single().execute()
-    
-    if not conv_check.data:
-        logger.warning(f"Conversación {conversation_id} no encontrada para tenant {tenant_id}")
-        raise ServiceError(
-            message="Conversation not found",
-            status_code=404,
-            error_code="conversation_not_found"
-        )
-    
-    # Obtener mensajes de la conversación con paginación
-    messages_query = await supabase.from_("ai.messages") \
-        .select("*", count="exact") \
-        .eq("conversation_id", conversation_id) \
-        .order("created_at", options={"ascending": False}) \
-        .range(offset, offset + limit - 1) \
-        .execute()
-    
-    total_count = messages_query.count if messages_query.count is not None else 0
-    
-    # Transformar a modelo de respuesta
-    messages = []
-    for msg in messages_query.data:
-        messages.append(
-            MessageResponse(
-                message_id=msg["message_id"],
-                conversation_id=msg["conversation_id"],
-                user_message=msg["user_message"],
-                assistant_message=msg["assistant_message"],
-                thinking=msg["thinking"],
-                tools_used=msg["tools_used"],
-                processing_time=msg["processing_time"],
-                metadata=msg["metadata"],
-                created_at=msg["created_at"]
-            )
-        )
-    
-    return MessageListResponse(
-        messages=messages,
-        count=len(messages),
-        total=total_count,
-        limit=limit,
-        offset=offset
-    )
-
-@app.post("/conversations", response_model=ConversationResponse)
-@handle_service_error_simple
-@with_agent_context
-async def create_conversation(
-    request: ConversationCreate,
-    tenant_info: TenantInfo = Depends(verify_tenant)
-) -> ConversationResponse:
-    """
-    Crea una nueva conversación.
-    
-    Args:
-        request: Datos para crear la conversación
-        tenant_info: Información del tenant (inyectada por Depends)
-        
-    Returns:
-        ConversationResponse: Detalles de la conversación creada
-    """
-    tenant_id = get_current_tenant_id()
-    agent_id = get_current_agent_id()
-    
-    supabase = get_supabase_client()
-    
-    # Verificar que el agente existe y pertenece al tenant
-    agent_check = await supabase.from_("ai.agent_configs") \
-        .select("*") \
-        .eq("tenant_id", tenant_id) \
-        .eq("agent_id", agent_id) \
-        .single() \
-        .execute()
-    
-    if not agent_check.data:
-        logger.warning(f"Intento de crear conversación para agente inexistente: {agent_id}")
-        raise ServiceError(
-            message=f"Agent with ID {agent_id} not found",
-            status_code=404, 
-            error_code="agent_not_found"
-        )
-    
-    # Generar ID para la nueva conversación
-    conversation_id = str(uuid.uuid4())
-    
-    # Preparar datos de la conversación
-    conversation_data = {
-        "conversation_id": conversation_id,
-        "tenant_id": tenant_id,
-        "agent_id": agent_id,
-        "title": request.title,
-        "status": request.status or "active",
-        "context": request.context or {},
-        "client_reference_id": request.client_reference_id,
-        "metadata": request.metadata or {}
-    }
-    
-    # Crear conversación en la base de datos
-    result = await supabase.from_("ai.conversations") \
-        .insert(conversation_data) \
-        .single() \
-        .execute()
-    
-    if result.error:
-        logger.error(f"Error creando conversación para tenant '{tenant_id}', agent '{agent_id}': {result.error}")
-        raise ServiceError(f"Error creating conversation: {result.error}")
-    
-    created_conversation = result.data
-    
-    # Crear respuesta
-    return ConversationResponse(
-        conversation_id=created_conversation["conversation_id"],
-        tenant_id=created_conversation["tenant_id"],
-        agent_id=created_conversation["agent_id"],
-        title=created_conversation["title"],
-        status=created_conversation["status"],
-        context=created_conversation["context"],
-        client_reference_id=created_conversation["client_reference_id"],
-        metadata=created_conversation["metadata"],
-        created_at=created_conversation["created_at"],
-        updated_at=created_conversation["updated_at"]
-    )
-
-@app.patch("/conversations/{conversation_id}", response_model=ConversationResponse)
-@handle_service_error_simple
-@with_full_context
-async def update_conversation(
-    conversation_id: str,
-    update_data: Dict[str, Any],
-    tenant_info: TenantInfo = Depends(verify_tenant)
-) -> ConversationResponse:
-    """
-    Actualiza una conversación existente.
-    
-    Args:
-        conversation_id: ID de la conversación
-        update_data: Datos a actualizar (title, status, context, client_reference_id, metadata)
-        tenant_info: Información del tenant (inyectada por Depends)
-        
-    Returns:
-        ConversationResponse: Detalles de la conversación actualizada
-    """
-    tenant_id = get_current_tenant_id()
-    
-    # El contexto ya está establecido por el decorador @with_full_context
-    supabase = get_supabase_client()
-    
-    # Verificar que la conversación existe y pertenece al tenant
-    conv_result = await supabase.from_("ai.conversations").select(
-        "*"
-    ).eq("conversation_id", conversation_id).eq("tenant_id", tenant_id).single().execute()
-    
-    if not conv_result.data:
-        logger.warning(f"Conversación {conversation_id} no encontrada para tenant {tenant_id}")
-        raise ServiceError(
-            message="Conversation not found",
-            status_code=404,
-            error_code="conversation_not_found"
-        )
-    
-    # Limitar los campos que se pueden actualizar
-    allowed_fields = ["title", "status", "context", "client_reference_id", "metadata"]
-    update_fields = {k: v for k, v in update_data.items() if k in allowed_fields}
-    
-    if not update_fields:
-        raise ServiceError(
-            message="No valid fields to update. Allowed fields: title, status, context, client_reference_id, metadata",
-            status_code=400,
-            error_code="no_valid_fields"
-        )
-    
-    # Preparar datos para actualizar
-    if "context" in update_fields and isinstance(update_fields["context"], dict):
-        update_fields["context"] = json.dumps(update_fields["context"])
-    
-    if "metadata" in update_fields and isinstance(update_fields["metadata"], dict):
-        update_fields["metadata"] = json.dumps(update_fields["metadata"])
-    
-    # Actualizar conversación
-    update_result = await supabase.from_("ai.conversations").update(
-        update_fields
-    ).eq("conversation_id", conversation_id).execute()
-    
-    if not update_result.data:
-        raise ServiceError(
-            message="Error updating conversation",
+            message="Error verifying tenant",
             status_code=500,
-            error_code="update_failed"
+            error_code="tenant_verification_error",
+            details={"error": str(e)}
         )
+
+# Función para registrar una sesión pública
+async def register_public_session(tenant_id: str, session_id: str, agent_id: str, tokens_used: int = 0) -> str:
+    """
+    Registra o actualiza una sesión pública y contabiliza tokens utilizados.
     
-    # Obtener detalles actualizados
-    result = await supabase.from_("ai.conversations").select(
-        "*"
-    ).eq("conversation_id", conversation_id).single().execute()
+    Args:
+        tenant_id: ID del tenant
+        session_id: ID de sesión proporcionado por el cliente o generado
+        agent_id: ID del agente utilizado
+        tokens_used: Cantidad de tokens utilizados en esta interacción
+        
+    Returns:
+        str: ID de sesión (el proporcionado o uno nuevo si era None)
+    """
+    # Generar session_id si no se proporcionó
+    if not session_id:
+        session_id = str(uuid.uuid4())
     
-    conv = result.data
-    
-    # Obtener conteo de mensajes
-    count_result = await supabase.from_("ai.chat_history").select(
-        "*", count="exact"
-    ).eq("conversation_id", conversation_id).execute()
-    
-    messages_count = count_result.count if count_result.count is not None else 0
-    
-    return ConversationResponse(
-        conversation_id=conv["conversation_id"],
-        tenant_id=conv["tenant_id"],
-        agent_id=conv["agent_id"],
-        title=conv["title"],
-        status=conv["status"],
-        context=conv["context"],
-        client_reference_id=conv["client_reference_id"],
-        metadata=conv["metadata"],
-        created_at=conv["created_at"],
-        updated_at=conv["updated_at"],
-        last_message_at=conv.get("last_message_at"),
-        messages_count=messages_count
-    )
+    try:
+        supabase = get_supabase_client()
+        
+        # Llamar a la función de Supabase para registrar sesión
+        result = await supabase.rpc(
+            "record_public_session",
+            {
+                "p_tenant_id": tenant_id,
+                "p_session_id": session_id,
+                "p_agent_id": agent_id,
+                "p_tokens_used": tokens_used
+            }
+        ).execute()
+        
+        if result.error:
+            logger.error(f"Error registering public session: {result.error}")
+        
+        return session_id
+    except Exception as e:
+        logger.error(f"Error registering public session: {str(e)}")
+        # No lanzamos excepción para no interrumpir el flujo del chat
+        return session_id
+
+# ... Resto del código ...
