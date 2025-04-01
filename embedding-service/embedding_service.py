@@ -95,10 +95,10 @@ app.add_middleware(
 )
 
 # Modelo de embedding con caché
-class CachedOpenAIEmbedding:
+class CachedEmbeddingProvider:
     """
-    Modelo OpenAI o Ollama Embedding con soporte de caché.
-    Soporta contexto multinivel (tenant, agente, conversación).
+    Proveedor de embeddings con soporte de caché.
+    Soporta múltiples backends (OpenAI, Ollama) y contexto multinivel (tenant, agente, conversación).
     """
     
     @with_full_context
@@ -294,10 +294,6 @@ async def generate_embeddings(
     start_time = time.time()
     tenant_id = tenant_info.tenant_id
     
-    # Los IDs de agent y conversation ya están disponibles en el contexto gracias al decorador
-    agent_id = get_current_agent_id()
-    conversation_id = get_current_conversation_id()
-    
     # Check quotas
     await check_tenant_quotas(tenant_info)
     
@@ -324,20 +320,18 @@ async def generate_embeddings(
     # Add context info to metadata
     for meta in metadata:
         meta["tenant_id"] = tenant_id
-        if agent_id:
-            meta["agent_id"] = agent_id
-        if conversation_id:
-            meta["conversation_id"] = conversation_id
+        meta["agent_id"] = get_current_agent_id()
+        meta["conversation_id"] = get_current_conversation_id()
     
     # Count cache hits for stats
     cache_hits = 0
     if redis_client:
         for text in request.texts:
-            if get_cached_embedding(text, tenant_id, model_name, agent_id, conversation_id):
+            if get_cached_embedding(text, tenant_id, model_name, get_current_agent_id(), get_current_conversation_id()):
                 cache_hits += 1
     
     # Initialize embedding model - no es necesario pasar los IDs explícitamente
-    embed_model = CachedOpenAIEmbedding(
+    embed_model = CachedEmbeddingProvider(
         model_name=model_name
     )
     
@@ -350,8 +344,8 @@ async def generate_embeddings(
         request.texts,
         model_name,
         cache_hits,
-        agent_id,
-        conversation_id
+        get_current_agent_id(),
+        get_current_conversation_id()
     )
     
     return EmbeddingResponse(
@@ -415,10 +409,6 @@ async def batch_generate_embeddings(
     start_time = time.time()
     tenant_id = tenant_info.tenant_id
     
-    # Los IDs de agent y conversation ya están disponibles en el contexto gracias al decorador
-    agent_id = get_current_agent_id()
-    conversation_id = get_current_conversation_id()
-    
     # Check quotas
     await check_tenant_quotas(tenant_info)
     
@@ -436,20 +426,18 @@ async def batch_generate_embeddings(
     # Add context info to metadata
     for meta in metadata:
         meta["tenant_id"] = tenant_id
-        if agent_id:
-            meta["agent_id"] = agent_id
-        if conversation_id:
-            meta["conversation_id"] = conversation_id
+        meta["agent_id"] = get_current_agent_id()
+        meta["conversation_id"] = get_current_conversation_id()
     
     # Count cache hits for stats
     cache_hits = 0
     if redis_client:
         for text in texts:
-            if get_cached_embedding(text, tenant_id, model_name, agent_id, conversation_id):
+            if get_cached_embedding(text, tenant_id, model_name, get_current_agent_id(), get_current_conversation_id()):
                 cache_hits += 1
     
     # Initialize embedding model - no es necesario pasar los IDs explícitamente
-    embed_model = CachedOpenAIEmbedding(
+    embed_model = CachedEmbeddingProvider(
         model_name=model_name
     )
     
@@ -462,8 +450,8 @@ async def batch_generate_embeddings(
         texts,
         model_name,
         cache_hits,
-        agent_id,
-        conversation_id
+        get_current_agent_id(),
+        get_current_conversation_id()
     )
     
     return EmbeddingResponse(
@@ -786,7 +774,39 @@ def get_available_models_for_tier(tier: str) -> Dict[str, Dict[str, Any]]:
         }
     }
     
-    return basic_models.copy()
+    # Modelos adicionales para niveles premium
+    pro_models = {
+        "text-embedding-3-large": {
+            "dimensions": 3072,
+            "description": "OpenAI text-embedding-3-large model, para alta precisión y rendimiento",
+            "max_tokens": 8191
+        }
+    }
+    
+    # Modelos exclusivos para nivel enterprise
+    enterprise_models = {
+        "text-embedding-3-turbo": {
+            "dimensions": 3072,
+            "description": "Embeddings de mayor rendimiento, optimizados para RAG y búsquedas semánticas",
+            "max_tokens": 16000
+        },
+        "custom-domain-embedding": {
+            "dimensions": 4096,
+            "description": "Embeddings personalizados para dominios específicos con entrenamiento adicional",
+            "max_tokens": 32000
+        }
+    }
+    
+    # Devolver modelos según el nivel de suscripción
+    result = basic_models.copy()
+    
+    if tier.lower() in ['pro', 'business']:
+        result.update(pro_models)
+        
+    if tier.lower() in ['enterprise', 'business']:
+        result.update(enterprise_models)
+        
+    return result
 
 
 if __name__ == "__main__":

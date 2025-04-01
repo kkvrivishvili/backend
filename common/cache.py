@@ -419,17 +419,3 @@ def cache_get_memory_usage(pattern: Optional[str] = None) -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"Error getting memory usage: {str(e)}")
         return {"status": "error", "message": str(e)}
-
-
-def clear_tenant_cache(tenant_id: str) -> int:
-    """
-    Elimina todas las claves de caché relacionadas con un tenant.
-    
-    Args:
-        tenant_id: ID del tenant
-        
-    Returns:
-        int: Número de claves eliminadas
-    """
-    pattern = f"{tenant_id}:*"
-    return cache_delete_pattern(pattern)

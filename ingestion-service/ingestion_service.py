@@ -152,6 +152,10 @@ def process_document(
     Returns:
         List[Dict[str, Any]]: Lista de nodos procesados
     """
+    # Asegurar que custom_metadata existe y es un diccionario
+    if metadata.custom_metadata is None:
+        metadata.custom_metadata = {}
+    
     # Crear documento LlamaIndex
     document = Document(
         text=doc_text,
@@ -162,14 +166,17 @@ def process_document(
             "created_at": metadata.created_at,
             "document_type": metadata.document_type,
             "collection": collection_name,
-            **(metadata.custom_metadata or {})
+            **metadata.custom_metadata  # Ya verificamos que no es None
         }
     )
     
+    # Obtener configuración centralizada
+    settings = get_settings()
+    
     # Parsear documento en nodos
     parser = SimpleNodeParser.from_defaults(
-        chunk_size=512,
-        chunk_overlap=50
+        chunk_size=settings.default_chunk_size,
+        chunk_overlap=settings.default_chunk_overlap
     )
     
     nodes = parser.get_nodes_from_documents([document])
@@ -378,7 +385,6 @@ async def ingest_file(
     doc_id = str(uuid.uuid4())
     
     # Añadir ID de documento a metadatos
-    metadata.custom_metadata = metadata.custom_metadata or {}
     metadata.custom_metadata["document_id"] = doc_id
     
     # Procesar documento para obtener nodos
@@ -593,4 +599,5 @@ async def get_service_status() -> HealthResponse:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    settings = get_settings()
+    uvicorn.run(app, host="0.0.0.0", port=int(settings.ingestion_service_port))

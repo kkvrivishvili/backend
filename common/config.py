@@ -78,6 +78,14 @@ class Settings(BaseSettings):
     llm_frequency_penalty: float = Field(0.0, env="LLM_FREQUENCY_PENALTY")
     llm_presence_penalty: float = Field(0.0, env="LLM_PRESENCE_PENALTY")
     
+    # Parámetros para procesamiento RAG
+    similarity_cutoff: float = Field(0.7, env="SIMILARITY_CUTOFF")
+    similarity_top_k: int = Field(4, env="SIMILARITY_TOP_K")
+    
+    # Parámetros para chunking de documentos
+    default_chunk_size: int = Field(512, env="DEFAULT_CHUNK_SIZE")
+    default_chunk_overlap: int = Field(50, env="DEFAULT_CHUNK_OVERLAP")
+    
     # Configuración de puertos de servicios
     embedding_service_port: int = Field(8001, env="EMBEDDING_SERVICE_PORT")
     ingestion_service_port: int = Field(8000, env="INGESTION_SERVICE_PORT")
@@ -86,9 +94,7 @@ class Settings(BaseSettings):
     
     # Modos de ejecución
     testing_mode: bool = Field(False, env="TESTING_MODE")
-    # Nota: SKIP_SUPABASE está obsoleto y será eliminado en el futuro,
-    # usar LOAD_CONFIG_FROM_SUPABASE=false en su lugar
-    skip_supabase: bool = Field(False, env="SKIP_SUPABASE")
+    # Flag obsoleta eliminada: skip_supabase
     mock_openai: bool = Field(False, env="MOCK_OPENAI")
     
     # Service-specific settings
@@ -196,7 +202,7 @@ def get_settings() -> Settings:
     settings = Settings()
     
     # Determinar si debemos cargar configuraciones desde Supabase
-    should_load_from_supabase = settings.load_config_from_supabase and not settings.skip_supabase
+    should_load_from_supabase = settings.load_config_from_supabase
     
     if should_load_from_supabase:
         try:
@@ -223,8 +229,6 @@ def get_settings() -> Settings:
             logger.info(f"Configuración para tenant {tenant_id_to_use} cargada desde Supabase")
         except Exception as e:
             logger.error(f"Error al cargar configuraciones desde Supabase: {str(e)}")
-    elif settings.skip_supabase and settings.load_config_from_supabase:
-        logger.warning("SKIP_SUPABASE está activado, no se cargarán configuraciones desde Supabase aunque LOAD_CONFIG_FROM_SUPABASE esté habilitado")
     
     return settings
 

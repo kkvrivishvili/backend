@@ -423,7 +423,7 @@ async def initialize_agent_with_tools(agent_config: AgentConfig, tools: List[Too
     llm = ChatOpenAI(
         model=model,
         temperature=temperature,
-        openai_api_key=agent_config.tenant_info.openai_api_key,
+        openai_api_key=settings.openai_api_key,  # Usar la clave de API de la configuración global
         streaming=agent_config.streaming if agent_config.streaming is not None else False
     )
     
@@ -450,6 +450,96 @@ async def initialize_agent_with_tools(agent_config: AgentConfig, tools: List[Too
         handle_parsing_errors=True,
         return_intermediate_steps=True
     )
+
+
+# Implementar la función execute_agent que falta
+@handle_service_error_simple
+@with_full_context
+async def execute_agent(
+    tenant_info: TenantInfo,
+    agent_config: AgentConfig,
+    query: str,
+    session_id: str,
+    streaming: bool = False
+) -> Dict[str, Any]:
+    """
+    Ejecuta un agente con una consulta y herramientas configuradas.
+    
+    Args:
+        tenant_info: Información del tenant
+        agent_config: Configuración del agente
+        query: Consulta del usuario
+        session_id: ID de sesión o conversación
+        streaming: Si se debe utilizar streaming para la respuesta
+        
+    Returns:
+        Dict[str, Any]: Respuesta del agente con la respuesta, thinking steps, herramientas usadas
+    """
+    logger.info(f"Ejecutando agente {agent_config.agent_id} con query: {query[:50]}...")
+    
+    # Seleccionar el manejador de callbacks apropiado según el modo
+    if streaming:
+        callback_handler = StreamingCallbackHandler()
+    else:
+        callback_handler = AgentCallbackHandler()
+    
+    # Crear herramientas para el agente
+    tools = create_agent_tools(agent_config)
+    
+    # Inicializar agente con herramientas
+    agent_executor = initialize_agent_with_tools(
+        agent_config=agent_config,
+        tools=tools,
+        callback_handler=callback_handler
+    )
+    
+    # Configurar el contexto de ejecución
+    agent_config_dict = RunnableConfig(
+        callbacks=[callback_handler],
+        tags=[f"tenant:{tenant_info.tenant_id}", f"agent:{agent_config.agent_id}", f"session:{session_id}"],
+    )
+    
+    # Ejecutar el agente con la consulta
+    start_time = time.time()
+    try:
+        result = await agent_executor.ainvoke(
+            {"input": sanitize_content(query)},
+            config=agent_config_dict
+        )
+        
+        # Extraer respuesta
+        answer = result.get("output", "")
+        
+        # Si la respuesta está vacía, proporcionar una respuesta predeterminada
+        if not answer or answer.strip() == "":
+            answer = "Lo siento, no pude generar una respuesta. Por favor, intenta reformular tu pregunta."
+        
+        # Calcular tokens aproximados (estimación)
+        input_tokens = estimate_token_count(query)
+        output_tokens = estimate_token_count(answer)
+        
+        # Construir resultado
+        response = {
+            "answer": sanitize_content(answer),
+            "thinking": callback_handler.get_thinking_steps() if hasattr(callback_handler, "get_thinking_steps") else None,
+            "tools_used": callback_handler.get_tools_used() if hasattr(callback_handler, "get_tools_used") else None,
+            "tokens": input_tokens + output_tokens,
+            "sources": []  # Si hay fuentes, se extraerían de los resultados de herramientas
+        }
+        
+        logger.info(f"Agente {agent_config.agent_id} ejecutado correctamente en {time.time() - start_time:.2f}s")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error ejecutando agente {agent_config.agent_id}: {str(e)}")
+        # Devolver respuesta de error pero no lanzar excepción para mantener la conversación
+        return {
+            "answer": f"Lo siento, ocurrió un error al procesar tu solicitud: {str(e)}",
+            "thinking": "Error durante la ejecución del agente",
+            "tools_used": [],
+            "tokens": estimate_token_count(query),
+            "error": str(e)
+        }
 
 
 # Endpoint para verificar el estado
@@ -1185,18 +1275,87 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
             error_code="missing_agent_config"
         )
     
-    # Ejecutar agente
-    response = await execute_agent(
-        tenant_info=tenant_info,
-        agent_config=agent_config,
-        query=chat_request.query,
-        session_id=chat_request.session_id,
-        streaming=False
-    )
+    # Crear un generador de streaming para SSE
+    async def event_generator():
+        # Setup inicial
+        try:
+            # Configurar el streaming callback handler
+            streaming_handler = StreamingCallbackHandler()
+            
+            # Crear herramientas para el agente
+            tools = create_agent_tools(agent_config)
+            
+            # Inicializar agente con herramientas
+            agent_executor = initialize_agent_with_tools(
+                agent_config=agent_config,
+                tools=tools,
+                callback_handler=streaming_handler
+            )
+            
+            # Configurar el contexto de ejecución
+            agent_config_dict = RunnableConfig(
+                callbacks=[streaming_handler],
+                tags=[f"tenant:{tenant_info.tenant_id}", f"agent:{agent_id}", f"session:{conversation_id}"],
+            )
+            
+            # Iniciar ejecución en segundo plano
+            task = asyncio.create_task(
+                agent_executor.ainvoke(
+                    {"input": sanitize_content(chat_request.message)},
+                    config=agent_config_dict
+                )
+            )
+            
+            # Enviar evento inicial
+            yield f"data: {json.dumps({'type': 'start'})}\n\n"
+            
+            # Enviar tokens a medida que se generan
+            while not task.done():
+                tokens = streaming_handler.get_tokens()
+                if tokens:
+                    yield f"data: {json.dumps({'type': 'token', 'content': tokens})}\n\n"
+                    
+                tool_outputs = streaming_handler.get_tool_outputs()
+                if tool_outputs:
+                    yield f"data: {json.dumps({'type': 'tool', 'content': tool_outputs})}\n\n"
+                
+                await asyncio.sleep(0.1)
+            
+            # Completado, obtener respuesta final
+            result = await task
+            
+            # Enviar resultado completo
+            yield f"data: {json.dumps({'type': 'complete', 'content': sanitize_content(result.get('output', ''))})}\n\n"
+            
+            # Evento final
+            yield f"data: {json.dumps({'type': 'end'})}\n\n"
+            
+            # Registrar uso en segundo plano
+            asyncio.create_task(
+                track_usage(
+                    tenant_id=tenant_id,
+                    operation="agent_query_stream",
+                    metadata={
+                        "agent_id": agent_id,
+                        "conversation_id": conversation_id,
+                        "tokens": estimate_token_count(result.get("output", "")),
+                        "llm_model": agent_config.llm_model
+                    }
+                )
+            )
+            
+        except Exception as e:
+            logger.error(f"Error en streaming: {str(e)}")
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
     
-    return AgentResponse(
-        output=response.get("output", ""),
-        intermediate_steps=response.get("intermediate_steps", [])
+    # Devolver respuesta de streaming
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        }
     )
 
 

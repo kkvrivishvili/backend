@@ -105,20 +105,31 @@ http_client = httpx.AsyncClient(timeout=30.0)
 llama_debug = LlamaDebugHandler(print_trace_on_end=False)
 callback_manager = CallbackManager([llama_debug])
 
-# Clase auxiliar para mantener compatibilidad con el código existente
-class ResponseSynthesizer:
-    @classmethod
-    def from_args(cls, response_mode="compact", llm=None, callback_manager=None, **kwargs):
-        if response_mode == "compact":
-            return CompactAndRefine(llm=llm, callback_manager=callback_manager, **kwargs)
-        elif response_mode == "refine":
-            return Refine(llm=llm, callback_manager=callback_manager, **kwargs)
-        elif response_mode == "tree_summarize":
-            return TreeSummarize(llm=llm, callback_manager=callback_manager, **kwargs)
-        elif response_mode == "simple_summarize":
-            return SimpleSummarize(llm=llm, callback_manager=callback_manager, **kwargs)
-        else:
-            return CompactAndRefine(llm=llm, callback_manager=callback_manager, **kwargs)
+# Función para obtener el sintetizador de respuesta adecuado
+def get_response_synthesizer(response_mode="compact", llm=None, callback_manager=None, **kwargs):
+    """
+    Obtiene el sintetizador de respuesta adecuado según el modo solicitado.
+    
+    Args:
+        response_mode: Modo de respuesta ('compact', 'refine', 'tree_summarize', 'simple_summarize')
+        llm: Modelo de lenguaje a utilizar
+        callback_manager: Gestor de callbacks para log y monitoreo
+        **kwargs: Argumentos adicionales para el sintetizador
+        
+    Returns:
+        BaseSynthesizer: Sintetizador de respuesta configurado
+    """
+    if response_mode == "compact":
+        return CompactAndRefine(llm=llm, callback_manager=callback_manager, **kwargs)
+    elif response_mode == "refine":
+        return Refine(llm=llm, callback_manager=callback_manager, **kwargs)
+    elif response_mode == "tree_summarize":
+        return TreeSummarize(llm=llm, callback_manager=callback_manager, **kwargs)
+    elif response_mode == "simple_summarize":
+        return SimpleSummarize(llm=llm, callback_manager=callback_manager, **kwargs)
+    else:
+        # Default a CompactAndRefine como fallback
+        return CompactAndRefine(llm=llm, callback_manager=callback_manager, **kwargs)
 
 # Obtener embedding a través del servicio de embeddings
 @with_full_context
@@ -174,16 +185,19 @@ async def generate_embedding(text: str) -> List[float]:
 
 # Crear LLM basado en el tier del tenant
 @with_tenant_context
-def get_llm_for_tenant(tenant_info: TenantInfo, requested_model: Optional[str] = None) -> Any:
+def get_llm_for_tenant(tenant_info: TenantInfo, requested_model: Optional[str] = None):
     """
     Obtiene el LLM adecuado según nivel de suscripción del tenant.
+    
+    Implementa una abstracción compatible con la interfaz de LlamaIndex sobre
+    distintos backends de modelos (OpenAI, Ollama).
     
     Args:
         tenant_info: Información del tenant
         requested_model: Modelo solicitado (opcional)
         
     Returns:
-        Any: Cliente LLM configurado (OpenAI o Ollama)
+        BaseLanguageModel: Cliente LLM compatible con la interfaz de LlamaIndex
     """
     settings = get_settings()
     
@@ -194,15 +208,21 @@ def get_llm_for_tenant(tenant_info: TenantInfo, requested_model: Optional[str] =
         model_type="llm"
     )
     
+    # Configuración común a todos los modelos
+    common_params = {
+        "temperature": settings.llm_temperature,
+        "max_tokens": settings.llm_max_tokens
+    }
+    
     # Configurar el LLM según si usamos Ollama u OpenAI
     if settings.use_ollama:
-        return get_llm_model(model_name)
+        # get_llm_model ya devuelve un modelo compatible con la interfaz de LlamaIndex
+        return get_llm_model(model_name, **common_params)
     else:
         return OpenAI(
             model=model_name,
             api_key=settings.openai_api_key,
-            temperature=settings.llm_temperature,
-            max_tokens=settings.llm_max_tokens
+            **common_params
         )
 
 
@@ -249,14 +269,14 @@ async def create_query_engine(
     
     # Configurar postprocesador de similitud
     node_postprocessor = SimilarityPostprocessor(
-        similarity_cutoff=0.7
+        similarity_cutoff=settings.similarity_cutoff
     )
     
     # Obtener LLM adecuado para el tenant
     llm = get_llm_for_tenant(tenant_info, llm_model)
     
-    # Crear sintetizador de respuesta
-    response_synthesizer = ResponseSynthesizer.from_args(
+    # Crear sintetizador de respuesta usando la función actualizada
+    response_synthesizer = get_response_synthesizer(
         response_mode=response_mode,
         llm=llm,
         callback_manager=callback_manager
