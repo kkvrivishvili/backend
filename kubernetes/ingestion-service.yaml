@@ -18,7 +18,7 @@ spec:
       - name: ingestion-service
         image: linktree-ai/ingestion-service:latest
         ports:
-        - containerPort: 8000
+        - containerPort: 8004
         env:
         - name: OPENAI_API_KEY
           valueFrom:
@@ -42,6 +42,7 @@ spec:
               key: redis-url
         - name: EMBEDDING_SERVICE_URL
           value: "http://embedding-service:8001"
+        # Variable obsoleta - Se mantiene por compatibilidad pero será eliminada en próximas versiones
         - name: SKIP_SUPABASE
           value: "true"
         - name: TESTING_MODE
@@ -60,7 +61,7 @@ spec:
         readinessProbe:
           httpGet:
             path: /health
-            port: 8000
+            port: 8004
           initialDelaySeconds: 30
           periodSeconds: 10
           timeoutSeconds: 5
@@ -68,7 +69,7 @@ spec:
         livenessProbe:
           httpGet:
             path: /health
-            port: 8000
+            port: 8004
           initialDelaySeconds: 40
           periodSeconds: 20
           timeoutSeconds: 5
@@ -82,6 +83,6 @@ spec:
   selector:
     app: ingestion-service
   ports:
-  - port: 8000
-    targetPort: 8000
+  - port: 8004
+    targetPort: 8004
   type: ClusterIP

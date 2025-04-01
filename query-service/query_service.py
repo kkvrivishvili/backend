@@ -37,7 +37,10 @@ from common.context import (
 )
 from common.models import (
     TenantInfo, QueryRequest, QueryResponse, QueryContextItem,
-    DocumentsListResponse, HealthResponse, AgentTool, AgentConfig, AgentRequest, AgentResponse, ChatMessage, ChatRequest, ChatResponse
+    DocumentsListResponse, HealthResponse, AgentTool, AgentConfig, AgentRequest, AgentResponse, ChatMessage, ChatRequest, ChatResponse,
+    CollectionsListResponse, CollectionInfo, LlmModelInfo, LlmModelsListResponse,
+    TenantStatsResponse, UsageByModel, TokensUsage, DailyUsage, CollectionDocCount,
+    CollectionToolResponse, CollectionCreationResponse, CollectionUpdateResponse, CollectionStatsResponse
 )
 from common.auth import (
     verify_tenant, check_tenant_quotas, validate_model_access, 
@@ -68,16 +71,39 @@ app = FastAPI(
     - OpenAI API (opcional): Para modelos de generación en la nube
     - Ollama (opcional): Para modelos de generación locales
     
-    ## Variables de entorno
-    - REDIS_URL: Conexión con Redis
-    - SUPABASE_URL/KEY: Credenciales de Supabase
-    - OPENAI_API_KEY: Clave de API para OpenAI
-    - EMBEDDING_SERVICE_URL: URL del servicio de embeddings
-    - USE_OLLAMA: Habilitar uso de modelos locales
+    ## Estándares de API
+    Todos los endpoints siguen estos estándares:
+    - Respuestas estandarizadas que extienden BaseResponse
+    - Manejo de errores consistente con códigos de estado HTTP apropiados
+    - Sistema de contexto multinivel para operaciones
+    - Control de acceso basado en suscripción
     """,
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    version="1.2.0",
+    contact={
+        "name": "Equipo de Desarrollo de Linktree AI",
+        "email": "dev@linktree.ai"
+    },
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
+    openapi_tags=[
+        {
+            "name": "query",
+            "description": "Operaciones de consulta RAG"
+        },
+        {
+            "name": "collections",
+            "description": "Gestión de colecciones de documentos"
+        },
+        {
+            "name": "models",
+            "description": "Información sobre modelos LLM disponibles"
+        },
+        {
+            "name": "health",
+            "description": "Verificación de estado del servicio"
+        }
+    ]
 )
 
 # Configurar manejo de errores y rate limiting
@@ -184,7 +210,7 @@ async def generate_embedding(text: str) -> List[float]:
 
 
 # Crear LLM basado en el tier del tenant
-@with_tenant_context
+@with_full_context
 def get_llm_for_tenant(tenant_info: TenantInfo, requested_model: Optional[str] = None):
     """
     Obtiene el LLM adecuado según nivel de suscripción del tenant.
@@ -227,7 +253,7 @@ def get_llm_for_tenant(tenant_info: TenantInfo, requested_model: Optional[str] =
 
 
 # Crear motor de consulta para el tenant
-@with_tenant_context
+@with_full_context
 async def create_query_engine(
     tenant_info: TenantInfo,
     collection_name: str,
@@ -292,7 +318,7 @@ async def create_query_engine(
     
     return query_engine, debug_handler
 
-@app.post("/query", response_model=QueryResponse)
+@app.post("/query", response_model=QueryResponse, tags=["query"])
 @handle_service_error_simple
 @with_full_context
 async def process_query(
@@ -424,9 +450,9 @@ async def process_query(
         collection_name=collection_name
     )
 
-@app.get("/documents", response_model=DocumentsListResponse)
+@app.get("/documents", response_model=DocumentsListResponse, tags=["collections"])
 @handle_service_error_simple
-@with_tenant_context
+@with_full_context
 async def list_documents(
     collection_name: Optional[str] = None,
     limit: int = 50,
@@ -472,12 +498,12 @@ async def list_documents(
     )
 
 
-@app.get("/collections", response_model=Dict[str, Any])
+@app.get("/collections", response_model=CollectionsListResponse, tags=["collections"])
 @handle_service_error_simple
-@with_tenant_context
+@with_full_context
 async def list_collections(
     tenant_info: TenantInfo = Depends(verify_tenant)
-) -> Dict[str, Any]:
+) -> CollectionsListResponse:
     """
     Lista todas las colecciones para el tenant actual.
     
@@ -485,36 +511,56 @@ async def list_collections(
         tenant_info: Información del tenant (inyectada)
         
     Returns:
-        dict: Colecciones con estadísticas
+        CollectionsListResponse: Lista de colecciones con información detallada
     """
     # El tenant_id ya está disponible en el contexto gracias al decorador
     tenant_id = tenant_info.tenant_id
     
     # Obtener colecciones del tenant
     supabase = get_supabase_client()
-    collections = supabase.table("collections").select("*").eq("tenant_id", tenant_id).execute().data
+    collections_data = supabase.table("collections").select("*").eq("tenant_id", tenant_id).execute().data
+    
+    # Preparar la lista de colecciones
+    collections = []
     
     # Obtener estadísticas para cada colección
-    for collection in collections:
+    for collection in collections_data:
         # Contar documentos
         docs_count = supabase.table("documents").select(
             "count", count="exact"
         ).eq("tenant_id", tenant_id).eq("collection_name", collection["name"]).execute()
         
-        collection["documents_count"] = docs_count.count if hasattr(docs_count, "count") else 0
+        document_count = docs_count.count if hasattr(docs_count, "count") else 0
+        
+        # Crear objeto CollectionInfo
+        collection_info = CollectionInfo(
+            collection_id=collection.get("id", ""),
+            name=collection.get("name", ""),
+            description=collection.get("description"),
+            document_count=document_count,
+            created_at=collection.get("created_at"),
+            updated_at=collection.get("updated_at"),
+            metadata=collection.get("metadata", {})
+        )
+        
+        collections.append(collection_info)
     
-    return {
-        "tenant_id": tenant_id,
-        "collections": collections
-    }
+    # Retornar respuesta estandarizada
+    return CollectionsListResponse(
+        success=True,
+        tenant_id=tenant_id,
+        collections=collections,
+        total=len(collections),
+        message="Colecciones obtenidas exitosamente"
+    )
 
 
-@app.get("/llm/models", response_model=Dict[str, Any])
+@app.get("/llm/models", response_model=LlmModelsListResponse, tags=["models"])
 @handle_service_error_simple
-@with_tenant_context
+@with_full_context
 async def list_llm_models(
     tenant_info: TenantInfo = Depends(verify_tenant)
-) -> Dict[str, Any]:
+) -> LlmModelsListResponse:
     """
     Obtiene los modelos LLM disponibles para el tenant actual según su nivel de suscripción.
     
@@ -522,7 +568,7 @@ async def list_llm_models(
         tenant_info: Información del tenant (inyectada)
         
     Returns:
-        dict: Modelos disponibles y configuración
+        LlmModelsListResponse: Modelos disponibles y configuración
     """
     # El tenant_id ya está disponible en el contexto gracias al decorador
     tenant_id = tenant_info.tenant_id
@@ -532,52 +578,61 @@ async def list_llm_models(
     
     # Modelos básicos para todos
     basic_models = {
-        "gpt-3.5-turbo": {
-            "description": "OpenAI GPT-3.5 Turbo, adecuado para la mayoría de tareas",
-            "max_tokens": 4096,
-            "premium": False
-        },
-        "llama3-8b": {
-            "description": "Llama 3 8B servido por Ollama, buen equilibrio entre rendimiento y eficiencia",
-            "max_tokens": 8192,
-            "premium": False
-        }
+        "gpt-3.5-turbo": LlmModelInfo(
+            model_id="gpt-3.5-turbo",
+            description="OpenAI GPT-3.5 Turbo, adecuado para la mayoría de tareas",
+            max_tokens=4096,
+            premium=False,
+            provider="openai"
+        ),
+        "llama3-8b": LlmModelInfo(
+            model_id="llama3-8b",
+            description="Llama 3 8B servido por Ollama, buen equilibrio entre rendimiento y eficiencia",
+            max_tokens=8192,
+            premium=False,
+            provider="ollama"
+        )
     }
     
     # Modelos premium solo para niveles superiores
     premium_models = {
-        "gpt-4": {
-            "description": "OpenAI GPT-4, capacidades avanzadas de razonamiento",
-            "max_tokens": 8192,
-            "premium": True
-        },
-        "claude-3-haiku": {
-            "description": "Anthropic Claude 3 Haiku, veloz y eficiente",
-            "max_tokens": 200000,
-            "premium": True
-        }
+        "gpt-4": LlmModelInfo(
+            model_id="gpt-4",
+            description="OpenAI GPT-4, capacidades avanzadas de razonamiento",
+            max_tokens=8192,
+            premium=True,
+            provider="openai"
+        ),
+        "llama3-70b": LlmModelInfo(
+            model_id="llama3-70b",
+            description="Llama 3 70B servido por Ollama, rendimiento cercano a GPT-4",
+            max_tokens=8192,
+            premium=True,
+            provider="ollama"
+        )
     }
     
-    result = {
-        "tenant_id": tenant_id,
-        "subscription_tier": tier,
-        "available_models": basic_models,
-        "default_model": settings.default_llm_model
-    }
+    # Combinar según nivel de suscripción
+    available_models = basic_models.copy()
+    if tier in ["pro", "business", "enterprise"]:
+        available_models.update(premium_models)
     
-    # Agregar modelos premium para niveles superiores
-    if tier in ["pro", "enterprise"]:
-        result["available_models"].update(premium_models)
-    
-    return result
+    # Retornar respuesta estandarizada
+    return LlmModelsListResponse(
+        success=True,
+        tenant_id=tenant_id,
+        subscription_tier=tier,
+        models=available_models,
+        message="Modelos LLM disponibles obtenidos exitosamente"
+    )
 
 
-@app.get("/stats", response_model=Dict[str, Any])
+@app.get("/stats", response_model=TenantStatsResponse, tags=["query"])
 @handle_service_error_simple
-@with_tenant_context
+@with_full_context
 async def get_tenant_stats(
     tenant_info: TenantInfo = Depends(verify_tenant)
-) -> Dict[str, Any]:
+) -> TenantStatsResponse:
     """
     Obtiene estadísticas de uso para el tenant actual.
     
@@ -585,7 +640,7 @@ async def get_tenant_stats(
         tenant_info: Información del tenant (inyectada)
         
     Returns:
-        dict: Estadísticas de uso
+        TenantStatsResponse: Estadísticas detalladas de uso
     """
     # El tenant_id ya está disponible en el contexto gracias al decorador
     tenant_id = tenant_info.tenant_id
@@ -595,33 +650,59 @@ async def get_tenant_stats(
         supabase = get_supabase_client()
         
         # Solicitudes por modelo
-        usage_by_model = supabase.table("usage_logs").select(
+        usage_by_model_data = supabase.table("usage_logs").select(
             "model", "count"
         ).eq("tenant_id", tenant_id).eq("operation_type", "query").group_by("model").execute().data
+        
+        # Convertir a modelo Pydantic
+        usage_by_model = [
+            UsageByModel(model=item.get("model", "unknown"), count=item.get("count", 0))
+            for item in usage_by_model_data
+        ]
         
         # Tokens totales
         tokens_data = supabase.table("usage_logs").select(
             "sum(tokens_in) as tokens_in, sum(tokens_out) as tokens_out"
         ).eq("tenant_id", tenant_id).execute().data[0]
         
+        tokens = TokensUsage(
+            tokens_in=tokens_data.get("tokens_in", 0) or 0,
+            tokens_out=tokens_data.get("tokens_out", 0) or 0
+        )
+        
         # Solicitudes por día (últimos 30 días)
         thirty_days_ago = (datetime.now() - timedelta(days=30)).isoformat()
-        daily_usage = supabase.table("usage_logs").select(
+        daily_usage_data = supabase.table("usage_logs").select(
             "date_trunc('day', created_at) as date, count(*)"
         ).eq("tenant_id", tenant_id).gte("created_at", thirty_days_ago).group_by("date").order("date").execute().data
         
+        # Convertir a modelo Pydantic
+        daily_usage = [
+            DailyUsage(date=item.get("date", ""), count=item.get("count", 0))
+            for item in daily_usage_data
+        ]
+        
         # Documentos por colección
-        docs_by_collection = supabase.table("documents").select(
+        docs_by_collection_data = supabase.table("documents").select(
             "collection_name, count(*)"
         ).eq("tenant_id", tenant_id).group_by("collection_name").execute().data
         
-        return {
-            "tenant_id": tenant_id,
-            "requests_by_model": usage_by_model,
-            "tokens": tokens_data,
-            "daily_usage": daily_usage,
-            "documents_by_collection": docs_by_collection
-        }
+        # Convertir a modelo Pydantic
+        docs_by_collection = [
+            CollectionDocCount(collection_name=item.get("collection_name", "default"), count=item.get("count", 0))
+            for item in docs_by_collection_data
+        ]
+        
+        # Retornar respuesta estandarizada
+        return TenantStatsResponse(
+            success=True,
+            tenant_id=tenant_id,
+            requests_by_model=usage_by_model,
+            tokens=tokens,
+            daily_usage=daily_usage,
+            documents_by_collection=docs_by_collection,
+            message="Estadísticas de uso obtenidas exitosamente"
+        )
         
     except Exception as e:
         logger.error(f"Error getting tenant stats: {str(e)}")
@@ -632,8 +713,8 @@ async def get_tenant_stats(
         )
 
 
-@app.get("/status", response_model=HealthResponse)
-@app.get("/health", response_model=HealthResponse)
+@app.get("/status", response_model=HealthResponse, tags=["health"])
+@app.get("/health", response_model=HealthResponse, tags=["health"])
 @handle_service_error_simple
 async def get_service_status() -> HealthResponse:
     """
@@ -750,14 +831,14 @@ async def get_service_status() -> HealthResponse:
     )
 
 
-@app.post("/collections", response_model=Dict[str, Any])
+@app.post("/collections", response_model=CollectionCreationResponse, tags=["collections"])
 @handle_service_error_simple
-@with_tenant_context
+@with_full_context
 async def create_collection(
     name: str,
     description: Optional[str] = None,
     tenant_info: TenantInfo = Depends(verify_tenant)
-) -> Dict[str, Any]:
+) -> CollectionCreationResponse:
     """
     Crea una nueva colección para el tenant actual.
     
@@ -767,7 +848,7 @@ async def create_collection(
         tenant_info: Información del tenant (inyectada)
         
     Returns:
-        dict: Datos de la colección creada
+        CollectionCreationResponse: Datos de la colección creada
     """
     # El tenant_id ya está disponible en el contexto gracias al decorador
     tenant_id = tenant_info.tenant_id
@@ -801,19 +882,26 @@ async def create_collection(
             error_code="CREATION_FAILED"
         )
     
-    return result.data[0]
+    return CollectionCreationResponse(
+        collection_id=result.data[0]["id"],
+        name=result.data[0]["name"],
+        description=result.data[0]["description"],
+        created_at=result.data[0]["created_at"],
+        updated_at=result.data[0]["updated_at"],
+        metadata=result.data[0]["metadata"]
+    )
 
 
-@app.put("/collections/{collection_id}", response_model=Dict[str, Any])
+@app.put("/collections/{collection_id}", response_model=CollectionUpdateResponse, tags=["collections"])
 @handle_service_error_simple
-@with_tenant_context
+@with_full_context
 async def update_collection(
     collection_id: str,
     name: str,
     description: Optional[str] = None,
     is_active: bool = True,
     tenant_info: TenantInfo = Depends(verify_tenant)
-) -> Dict[str, Any]:
+) -> CollectionUpdateResponse:
     """
     Actualiza una colección existente.
     
@@ -825,7 +913,7 @@ async def update_collection(
         tenant_info: Información del tenant (inyectada)
         
     Returns:
-        dict: Datos de la colección actualizada
+        CollectionUpdateResponse: Datos de la colección actualizada
     """
     # El tenant_id ya está disponible en el contexto gracias al decorador
     tenant_id = tenant_info.tenant_id
@@ -866,16 +954,22 @@ async def update_collection(
             error_code="UPDATE_FAILED"
         )
     
-    return result.data[0]
+    return CollectionUpdateResponse(
+        collection_id=collection_id,
+        name=name,
+        description=description,
+        is_active=is_active,
+        updated_at=result.data[0]["updated_at"]
+    )
 
 
-@app.get("/collections/{collection_id}/stats", response_model=Dict[str, Any])
+@app.get("/collections/{collection_id}/stats", response_model=CollectionStatsResponse, tags=["collections"])
 @handle_service_error_simple
-@with_tenant_context
+@with_full_context
 async def get_collection_stats(
     collection_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
-) -> Dict[str, Any]:
+) -> CollectionStatsResponse:
     """
     Obtiene estadísticas de una colección.
     
@@ -884,7 +978,7 @@ async def get_collection_stats(
         tenant_info: Información del tenant (inyectada)
         
     Returns:
-        dict: Estadísticas de la colección
+        CollectionStatsResponse: Estadísticas de la colección
     """
     # El tenant_id ya está disponible en el contexto gracias al decorador
     tenant_id = tenant_info.tenant_id
@@ -944,25 +1038,25 @@ async def get_collection_stats(
     
     queries_count = queries_result.data[0]["count"] if queries_result.data else 0
     
-    return {
-        "tenant_id": tenant_id,
-        "collection_id": collection_id,
-        "collection_name": collection_name,
-        "chunks_count": chunks_count,
-        "unique_documents_count": unique_docs_count,
-        "queries_count": queries_count,
-        "last_updated": collection_result.data[0].get("updated_at")
-    }
+    return CollectionStatsResponse(
+        tenant_id=tenant_id,
+        collection_id=collection_id,
+        collection_name=collection_name,
+        chunks_count=chunks_count,
+        unique_documents_count=unique_docs_count,
+        queries_count=queries_count,
+        last_updated=collection_result.data[0].get("updated_at")
+    )
 
 
 # Endpoint para obtener configuración de colección para integración con agentes
-@app.get("/collections/{collection_id}/tools", response_model=Dict[str, Any])
+@app.get("/collections/{collection_id}/tools", response_model=CollectionToolResponse, tags=["collections"])
 @handle_service_error_simple
-@with_tenant_context
+@with_full_context
 async def get_collection_tool(
     collection_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
-) -> Dict[str, Any]:
+) -> CollectionToolResponse:
     """
     Obtiene configuración de herramienta para una colección.
     Útil para integración con servicio de agentes.
@@ -972,44 +1066,51 @@ async def get_collection_tool(
         tenant_info: Información del tenant (inyectada)
         
     Returns:
-        AgentTool: Configuración de herramienta
+        CollectionToolResponse: Configuración de herramienta
     """
     # El tenant_id ya está disponible en el contexto gracias al decorador
     tenant_id = tenant_info.tenant_id
     
-    # Verificar que la colección existe
+    # Verificar existencia de la colección
     supabase = get_supabase_client()
-    collection_result = supabase.table("ai.collections").select("*") \
-        .eq("id", collection_id) \
-        .execute()
+    result = supabase.table("collections").select("*").eq("id", collection_id).eq("tenant_id", tenant_id).execute()
     
-    if not collection_result.data:
+    if not result.data:
         raise ServiceError(
-            message=f"Colección {collection_id} no encontrada",
+            message=f"Collection {collection_id} not found or not accessible",
             status_code=404,
-            error_code="NOT_FOUND"
+            error_code="COLLECTION_NOT_FOUND"
         )
     
-    # Verificar pertenencia al tenant
-    if collection_result.data[0]["tenant_id"] != tenant_id:
-        raise ServiceError(
-            message="Solo puedes acceder a tus propias colecciones",
-            status_code=403,
-            error_code="FORBIDDEN"
-        )
-    
-    collection = collection_result.data[0]
+    collection = result.data[0]
     
     # Crear configuración de herramienta
     tool = AgentTool(
-        name=f"search_{collection['name']}",
-        description=f"Search for information in the {collection['name']} collection. {collection.get('description', '')}",
-        collection_id=collection['name'],
-        tool_type="rag_search",
+        name=f"collection_{collection_id}",
+        description=f"Search in the '{collection['name']}' knowledge base",
+        display_name=collection['name'],
+        type="function",
+        function={
+            "name": f"search_{collection_id}",
+            "description": f"Search for information in the '{collection['name']}' knowledge base",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search query"}
+                },
+                "required": ["query"]
+            }
+        },
         parameters={"top_k": 3}
     )
     
-    return tool
+    return CollectionToolResponse(
+        success=True,
+        collection_id=collection_id,
+        collection_name=collection["name"],
+        tenant_id=tenant_id,
+        tool=tool
+    )
 
 if __name__ == "__main__":
     import uvicorn

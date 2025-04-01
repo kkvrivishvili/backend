@@ -98,17 +98,43 @@ app = FastAPI(
     - OpenAI API (opcional): Para modelos de generación en la nube
     - Ollama (opcional): Para modelos de generación locales
     
-    ## Variables de entorno
-    - REDIS_URL: Conexión con Redis
-    - SUPABASE_URL/KEY: Credenciales de Supabase
-    - OPENAI_API_KEY: Clave de API para OpenAI
-    - EMBEDDING_SERVICE_URL: URL del servicio de embeddings
-    - QUERY_SERVICE_URL: URL del servicio de consulta
-    - USE_OLLAMA: Habilitar uso de modelos locales
+    ## Estándares de API
+    Todos los endpoints siguen estos estándares:
+    - Respuestas estandarizadas que extienden BaseResponse
+    - Manejo de errores consistente con códigos de estado HTTP apropiados
+    - Sistema de contexto multinivel para operaciones
+    - Control de acceso basado en suscripción
     """,
-    version=settings.service_version,
-    docs_url="/docs",
-    redoc_url="/redoc",
+    version="1.2.0",
+    contact={
+        "name": "Equipo de Desarrollo de Linktree AI",
+        "email": "dev@linktree.ai"
+    },
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
+    openapi_tags=[
+        {
+            "name": "agents",
+            "description": "Gestión de agentes conversacionales"
+        },
+        {
+            "name": "conversations",
+            "description": "Gestión de conversaciones"
+        },
+        {
+            "name": "tools",
+            "description": "Gestión de herramientas para agentes"
+        },
+        {
+            "name": "chat",
+            "description": "Interacción conversacional con agentes"
+        },
+        {
+            "name": "health",
+            "description": "Verificación de estado del servicio"
+        }
+    ],
     lifespan=lifespan
 )
 
@@ -543,8 +569,8 @@ async def execute_agent(
 
 
 # Endpoint para verificar el estado
-@app.get("/status", response_model=HealthResponse)
-@app.get("/health", response_model=HealthResponse)
+@app.get("/status", response_model=HealthResponse, tags=["health"])
+@app.get("/health", response_model=HealthResponse, tags=["health"])
 @handle_service_error_simple
 async def get_service_status() -> HealthResponse:
     """
@@ -620,7 +646,7 @@ async def get_service_status() -> HealthResponse:
 
 
 # Endpoint para crear un agente
-@app.post("/agents", response_model=AgentResponse)
+@app.post("/agents", response_model=AgentResponse, tags=["agents"])
 @handle_service_error_simple
 @with_tenant_context
 async def create_agent(request: AgentRequest, tenant_info: TenantInfo = Depends(verify_tenant)) -> AgentResponse:
@@ -689,7 +715,7 @@ async def create_agent(request: AgentRequest, tenant_info: TenantInfo = Depends(
 
 
 # Endpoint para obtener un agente
-@app.get("/agents/{agent_id}", response_model=AgentResponse)
+@app.get("/agents/{agent_id}", response_model=AgentResponse, tags=["agents"])
 @handle_service_error_simple
 @with_agent_context
 async def get_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tenant)) -> AgentResponse:
@@ -747,7 +773,7 @@ async def get_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tena
 
 
 # Endpoint para listar agentes
-@app.get("/agents", response_model=List[AgentResponse])
+@app.get("/agents", response_model=List[AgentResponse], tags=["agents"])
 @handle_service_error_simple
 @with_tenant_context
 async def list_agents(tenant_info: TenantInfo = Depends(verify_tenant)) -> List[AgentResponse]:
@@ -798,7 +824,7 @@ async def list_agents(tenant_info: TenantInfo = Depends(verify_tenant)) -> List[
 
 
 # Endpoint para actualizar un agente
-@app.put("/agents/{agent_id}", response_model=AgentResponse)
+@app.put("/agents/{agent_id}", response_model=AgentResponse, tags=["agents"])
 @handle_service_error_simple
 @with_agent_context
 async def update_agent(
@@ -891,7 +917,7 @@ async def update_agent(
 
 
 # Endpoint para eliminar un agente
-@app.delete("/agents/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/agents/{agent_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["agents"])
 @handle_service_error_simple
 @with_agent_context
 async def delete_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tenant)):
@@ -937,7 +963,7 @@ async def delete_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_t
 
 
 # Endpoint para chatear con un agente
-@app.post("/agents/{agent_id}/chat", response_model=ChatResponse)
+@app.post("/agents/{agent_id}/chat", response_model=ChatResponse, tags=["chat"])
 @handle_service_error_simple
 @with_full_context
 async def chat_with_agent(
@@ -1147,7 +1173,7 @@ async def chat_with_agent(
 
 
 # Endpoint para chatear con un agente
-@app.post("/chat", response_model=AgentResponse)
+@app.post("/chat", response_model=AgentResponse, tags=["chat"])
 @handle_service_error_simple(on_error_response={"output": "Error procesando la consulta", "intermediate_steps": []})
 @with_tenant_context
 async def chat(chat_request: ChatRequest, request: Request) -> AgentResponse:
@@ -1236,7 +1262,7 @@ async def chat(chat_request: ChatRequest, request: Request) -> AgentResponse:
 
 
 # Endpoint para streaming de chat con el agente
-@app.post("/chat/stream")
+@app.post("/chat/stream", tags=["chat"])
 @handle_service_error_simple
 @with_tenant_context
 async def chat_stream(chat_request: ChatRequest, request: Request):
@@ -1480,7 +1506,7 @@ def estimate_token_count(text: str) -> int:
 
 
 
-@app.post("/public/chat/{agent_id}", response_model=ChatResponse)
+@app.post("/public/chat/{agent_id}", response_model=ChatResponse, tags=["chat"])
 @handle_service_error_simple
 @with_full_context
 async def public_chat_with_agent(

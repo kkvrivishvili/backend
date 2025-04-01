@@ -303,3 +303,125 @@ class PublicChatRequest(BaseModel):
     tenant_slug: str
     context: Optional[Dict[str, Any]] = None
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+
+class CollectionInfo(BaseModel):
+    """Información sobre una colección de documentos."""
+    collection_id: str
+    name: str
+    description: Optional[str] = None
+    document_count: int = 0
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+
+class CollectionsListResponse(BaseResponse):
+    """Respuesta con lista de colecciones para un tenant."""
+    tenant_id: str
+    collections: List[CollectionInfo]
+    total: int
+
+
+class LlmModelInfo(BaseModel):
+    """Información sobre un modelo LLM disponible."""
+    model_id: str
+    description: str
+    max_tokens: int
+    premium: bool = False
+    provider: str = "openai"
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+
+class LlmModelsListResponse(BaseResponse):
+    """Respuesta con lista de modelos LLM disponibles para un tenant."""
+    tenant_id: str
+    subscription_tier: str
+    models: Dict[str, LlmModelInfo]
+
+
+class UsageByModel(BaseModel):
+    """Estadísticas de uso por modelo."""
+    model: str
+    count: int
+
+
+class TokensUsage(BaseModel):
+    """Información de tokens consumidos."""
+    tokens_in: int = 0
+    tokens_out: int = 0
+
+
+class DailyUsage(BaseModel):
+    """Uso diario de la API."""
+    date: str
+    count: int
+
+
+class CollectionDocCount(BaseModel):
+    """Conteo de documentos por colección."""
+    collection_name: str
+    count: int
+
+
+class TenantStatsResponse(BaseResponse):
+    """Respuesta con estadísticas de uso de un tenant."""
+    tenant_id: str
+    requests_by_model: List[UsageByModel] = Field(default_factory=list)
+    tokens: TokensUsage
+    daily_usage: List[DailyUsage] = Field(default_factory=list)
+    documents_by_collection: List[CollectionDocCount] = Field(default_factory=list)
+
+
+class CollectionToolResponse(BaseResponse):
+    """Respuesta con información de la colección para integración con herramientas."""
+    collection_id: str
+    collection_name: str
+    tenant_id: str
+    tool: Optional[AgentTool] = None
+
+
+class CollectionCreationResponse(BaseResponse):
+    """Respuesta para creación de colecciones."""
+    collection_id: str
+    name: str
+    description: Optional[str] = None
+    tenant_id: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+
+class CollectionUpdateResponse(BaseResponse):
+    """Respuesta para actualización de colecciones."""
+    collection_id: str
+    name: str
+    description: Optional[str] = None
+    tenant_id: str
+    is_active: bool = True
+    updated_at: Optional[str] = None
+
+
+class CollectionStatsResponse(BaseResponse):
+    """Respuesta con estadísticas de una colección."""
+    tenant_id: str
+    collection_id: str
+    collection_name: str
+    chunks_count: int = 0
+    unique_documents_count: int = 0
+    queries_count: int = 0
+    last_updated: Optional[str] = None
+
+
+class DeleteDocumentResponse(BaseResponse):
+    """Respuesta para operación de eliminación de documento."""
+    document_id: str
+    deleted: bool
+    collection_name: Optional[str] = None
+
+
+class DeleteCollectionResponse(BaseResponse):
+    """Respuesta para operación de eliminación de colección."""
+    collection_name: str
+    deleted: bool
+    documents_deleted: int = 0

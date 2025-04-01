@@ -21,7 +21,7 @@ from llama_index.core.schema import MetadataMode
 # Importar nuestra biblioteca común
 from common.models import (
     TenantInfo, DocumentIngestionRequest, DocumentMetadata, 
-    IngestionResponse, HealthResponse
+    IngestionResponse, HealthResponse, DeleteDocumentResponse, DeleteCollectionResponse
 )
 from common.auth import verify_tenant, check_tenant_quotas
 from common.config import get_settings
@@ -66,16 +66,31 @@ app = FastAPI(
     - Embedding Service: Para vectorización de documentos
     - Ollama (opcional): Para modelos de embedding locales
     
-    ## Variables de entorno
-    - REDIS_URL: Conexión con Redis
-    - SUPABASE_URL/KEY: Credenciales de Supabase
-    - EMBEDDING_SERVICE_URL: URL del servicio de embeddings
-    - OLLAMA_API_URL: URL de Ollama para modelos locales (opcional)
-    - MAX_CHUNK_SIZE: Tamaño máximo de segmentos de texto
+    ## Estándares de API
+    Todos los endpoints siguen estos estándares:
+    - Respuestas estandarizadas que extienden BaseResponse
+    - Manejo de errores consistente con códigos de estado HTTP apropiados
+    - Sistema de contexto multinivel para operaciones
+    - Control de acceso basado en suscripción
     """,
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    version="1.2.0",
+    contact={
+        "name": "Equipo de Desarrollo de Linktree AI",
+        "email": "dev@linktree.ai"
+    },
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
+    openapi_tags=[
+        {
+            "name": "ingest",
+            "description": "Operaciones de ingestión de documentos"
+        },
+        {
+            "name": "health",
+            "description": "Verificación de estado del servicio"
+        }
+    ]
 )
 
 # Configurar manejo de errores y rate limiting
@@ -246,7 +261,7 @@ async def index_documents_task(node_data_list: List[Dict[str, Any]], collection_
     except Exception as e:
         logger.error(f"Error en la tarea de indexación: {str(e)}", exc_info=True)
 
-@app.post("/ingest", response_model=IngestionResponse)
+@app.post("/ingest", response_model=IngestionResponse, tags=["ingest"])
 @handle_service_error_simple
 @with_full_context
 async def ingest_documents(
@@ -334,7 +349,7 @@ async def ingest_documents(
         node_count=total_nodes
     )
 
-@app.post("/ingest-file", response_model=IngestionResponse)
+@app.post("/ingest-file", response_model=IngestionResponse, tags=["ingest"])
 @handle_service_error_simple
 @with_full_context
 async def ingest_file(
@@ -408,13 +423,13 @@ async def ingest_file(
         node_count=len(node_data)
     )
 
-@app.delete("/documents/{document_id}", response_model=Dict[str, Any])
+@app.delete("/documents/{document_id}", response_model=DeleteDocumentResponse, tags=["ingest"])
 @handle_service_error_simple
 @with_full_context
 async def delete_document(
     document_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
-) -> Dict[str, Any]:
+) -> DeleteDocumentResponse:
     """
     Elimina un documento específico.
     
@@ -453,19 +468,19 @@ async def delete_document(
     deleted_count = len(delete_result.data) if delete_result.data else 0
     logger.info(f"Documento {document_id} eliminado con {deleted_count} chunks")
     
-    return {
-        "success": True,
-        "message": f"Documento {document_id} eliminado exitosamente",
-        "deleted_chunks": deleted_count
-    }
+    return DeleteDocumentResponse(
+        success=True,
+        message=f"Documento {document_id} eliminado exitosamente",
+        deleted_chunks=deleted_count
+    )
 
-@app.delete("/collections/{collection_name}", response_model=Dict[str, Any])
+@app.delete("/collections/{collection_name}", response_model=DeleteCollectionResponse, tags=["ingest"])
 @handle_service_error_simple
 @with_tenant_context
 async def delete_collection(
     collection_name: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
-) -> Dict[str, Any]:
+) -> DeleteCollectionResponse:
     """
     Elimina una colección completa de documentos.
     
@@ -513,14 +528,14 @@ async def delete_collection(
     deleted_count = len(delete_result.data) if delete_result.data else 0
     logger.info(f"Colección {collection_name} eliminada con {deleted_count} chunks")
     
-    return {
-        "success": True,
-        "message": f"Colección {collection_name} eliminada exitosamente",
-        "deleted_chunks": deleted_count
-    }
+    return DeleteCollectionResponse(
+        success=True,
+        message=f"Colección {collection_name} eliminada exitosamente",
+        deleted_chunks=deleted_count
+    )
 
-@app.get("/status", response_model=HealthResponse)
-@app.get("/health", response_model=HealthResponse)
+@app.get("/status", response_model=HealthResponse, tags=["health"])
+@app.get("/health", response_model=HealthResponse, tags=["health"])
 @handle_service_error_simple
 async def get_service_status() -> HealthResponse:
     """
