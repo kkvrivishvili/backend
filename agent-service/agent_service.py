@@ -339,6 +339,131 @@ add_example_to_endpoint(
     }
 )
 
+# Agregar ejemplos para endpoints que muestren el uso de collection_id
+add_example_to_endpoint(
+    app=app,
+    path="/agents/{agent_id}/chat",
+    method="post",
+    request_example={
+        "message": "¿Qué información tenemos sobre el proyecto Alpha?",
+        "session_id": "conv_123456",
+        "context": {
+            "prior_topic": "Documentación de proyectos",
+            "user_role": "Project Manager"
+        },
+        "stream": False
+    },
+    response_example={
+        "conversation_id": "conv_123456",
+        "message": {
+            "role": "assistant",
+            "content": "Según los documentos que he consultado, el proyecto Alpha es una iniciativa estratégica que comenzó en enero de 2023. Su objetivo principal es desarrollar una plataforma de análisis de datos en tiempo real para el sector financiero."
+        },
+        "thinking": "Voy a buscar información sobre el proyecto Alpha en la documentación disponible...",
+        "tools_used": [
+            {
+                "name": "consultar_documentos",
+                "input": "proyecto Alpha documentación",
+                "output": "El proyecto Alpha es una iniciativa estratégica que comenzó en enero de 2023. Su objetivo principal es desarrollar una plataforma de análisis de datos en tiempo real para el sector financiero."
+            }
+        ],
+        "sources": [
+            {
+                "document": "proyecto_alpha_resumen.pdf",
+                "page": 2,
+                "text": "El proyecto Alpha es una iniciativa estratégica que comenzó en enero de 2023...",
+                "collection_id": "550e8400-e29b-41d4-a716-446655440000",
+                "collection_name": "documentacion_proyectos"
+            }
+        ],
+        "processing_time": 1.23
+    },
+    request_schema_description="Solicitud para interactuar con un agente mediante chat"
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/agents",
+    method="post",
+    request_example={
+        "name": "Asistente de Documentación",
+        "description": "Asistente para consultar documentación técnica",
+        "agent_type": "conversational",
+        "llm_model": "gpt-3.5-turbo",
+        "tools": [
+            {
+                "name": "consultar_documentacion",
+                "description": "Consulta la documentación técnica de nuestros productos",
+                "type": "rag",
+                "metadata": {
+                    "collection_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "collection_name": "documentacion_tecnica",
+                    "similarity_top_k": 3,
+                    "response_mode": "compact"
+                },
+                "is_active": True
+            }
+        ],
+        "system_prompt": "Eres un asistente especializado en documentación técnica. Usa la herramienta RAG para buscar información específica en nuestra documentación.",
+        "memory_enabled": True,
+        "memory_window": 10
+    },
+    response_example={
+        "success": True,
+        "agent_id": "12345678-90ab-cdef-1234-567890abcdef",
+        "name": "Asistente de Documentación",
+        "description": "Asistente para consultar documentación técnica",
+        "agent_type": "conversational",
+        "llm_model": "gpt-3.5-turbo",
+        "tools": [
+            {
+                "name": "consultar_documentacion",
+                "description": "Consulta la documentación técnica de nuestros productos",
+                "type": "rag",
+                "metadata": {
+                    "collection_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "collection_name": "documentacion_tecnica"
+                },
+                "is_active": True
+            }
+        ],
+        "system_prompt": "Eres un asistente especializado en documentación técnica. Usa la herramienta RAG para buscar información específica en nuestra documentación.",
+        "memory_enabled": True,
+        "memory_window": 10
+    },
+    request_schema_description="Solicitud para crear un agente con herramientas RAG"
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/tools/rag",
+    method="post",
+    request_example={
+        "name": "consultar_documentos",
+        "description": "Consultar documentos técnicos para obtener información específica",
+        "type": "rag",
+        "metadata": {
+            "collection_id": "550e8400-e29b-41d4-a716-446655440000",
+            "collection_name": "documentacion_tecnica",
+            "similarity_top_k": 3,
+            "response_mode": "compact"
+        },
+        "is_active": True
+    },
+    response_example={
+        "success": True,
+        "tool_id": "tool_123456",
+        "name": "consultar_documentos",
+        "description": "Consultar documentos técnicos para obtener información específica",
+        "type": "rag",
+        "metadata": {
+            "collection_id": "550e8400-e29b-41d4-a716-446655440000",
+            "collection_name": "documentacion_tecnica"
+        }
+    },
+    request_schema_description="Configuración de herramienta RAG para consulta de documentos"
+)
+
 # Configurar CORS
 app.add_middleware(
     CORSMiddleware,
@@ -463,6 +588,7 @@ async def create_rag_tool(tool_config: AgentTool, tenant_id: str, agent_id: Opti
     Returns:
         Tool: Herramienta de LangChain configurada
     """
+    collection_id = tool_config.metadata.get("collection_id")
     collection_name = tool_config.metadata.get("collection_name", "default")
     similarity_top_k = tool_config.metadata.get("similarity_top_k", 4)
     response_mode = tool_config.metadata.get("response_mode", "compact")
@@ -477,10 +603,17 @@ async def create_rag_tool(tool_config: AgentTool, tenant_id: str, agent_id: Opti
             # Preparar solicitud para el servicio de consultas
             query_request = {
                 "query": query,
-                "collection_name": collection_name,
                 "similarity_top_k": similarity_top_k,
                 "response_mode": response_mode,
             }
+            
+            # Incluir collection_id si está disponible
+            if collection_id:
+                query_request["collection_id"] = collection_id
+                
+            # Incluir collection_name para compatibilidad
+            if collection_name:
+                query_request["collection_name"] = collection_name
             
             # Incluir agent_id en la solicitud si está disponible
             if agent_id:
@@ -711,10 +844,10 @@ async def execute_agent(
         callback_handler = AgentCallbackHandler()
     
     # Crear herramientas para el agente
-    tools = create_agent_tools(agent_config)
+    tools = await create_agent_tools(agent_config)
     
     # Inicializar agente con herramientas
-    agent_executor = initialize_agent_with_tools(
+    agent_executor = await initialize_agent_with_tools(
         agent_config=agent_config,
         tools=tools,
         callback_handler=callback_handler
@@ -1436,9 +1569,9 @@ async def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
     
     if not agent_config:
         raise ServiceError(
-            message="Se requiere una configuración de agente",
+            message="Configuración del agente no proporcionada",
             status_code=400,
-            error_code="missing_agent_config" 
+            error_code="missing_agent_config"
         )
     
     # Crear la configuración del agente
@@ -1514,7 +1647,7 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
         Flujo de eventos SSE con la respuesta del agente
     """
     tenant_id = get_current_tenant_id()
-    # El tenant_id debe obtenerse del contexto, no necesitamos pasarlo explícitamente
+    # El tenant_id debe obtenerse del contexto aquí, no necesitamos pasarlo explícitamente
     tenant_info = await get_tenant_info()
     
     if not tenant_info:
@@ -1538,87 +1671,60 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
             error_code="missing_agent_config"
         )
     
-    # Crear un generador de streaming para SSE
-    async def event_generator():
-        # Setup inicial
-        try:
-            # Configurar el streaming callback handler
-            streaming_handler = StreamingCallbackHandler()
-            
-            # Crear herramientas para el agente
-            tools = create_agent_tools(agent_config)
-            
-            # Inicializar agente con herramientas
-            agent_executor = initialize_agent_with_tools(
-                agent_config=agent_config,
-                tools=tools,
-                callback_handler=streaming_handler
-            )
-            
-            # Configurar el contexto de ejecución
-            agent_config_dict = RunnableConfig(
-                callbacks=[streaming_handler],
-                tags=[f"tenant:{tenant_info.tenant_id}", f"agent:{agent_id}", f"session:{conversation_id}"],
-            )
-            
-            # Iniciar ejecución en segundo plano
-            task = asyncio.create_task(
-                agent_executor.ainvoke(
-                    {"input": sanitize_content(chat_request.message)},
-                    config=agent_config_dict
-                )
-            )
-            
-            # Enviar evento inicial
-            yield f"data: {json.dumps({'type': 'start'})}\n\n"
-            
-            # Enviar tokens a medida que se generan
-            while not task.done():
-                tokens = streaming_handler.get_tokens()
-                if tokens:
-                    yield f"data: {json.dumps({'type': 'token', 'content': tokens})}\n\n"
-                    
-                tool_outputs = streaming_handler.get_tool_outputs()
-                if tool_outputs:
-                    yield f"data: {json.dumps({'type': 'tool', 'content': tool_outputs})}\n\n"
-                
-                await asyncio.sleep(0.1)
-            
-            # Completado, obtener respuesta final
-            result = await task
-            
-            # Enviar resultado completo
-            yield f"data: {json.dumps({'type': 'complete', 'content': sanitize_content(result.get('output', ''))})}\n\n"
-            
-            # Evento final
-            yield f"data: {json.dumps({'type': 'end'})}\n\n"
-            
-            # Registrar uso en segundo plano
-            asyncio.create_task(
-                track_usage(
-                    tenant_id=tenant_id,
-                    operation="agent_query_stream",
-                    metadata={
-                        "agent_id": agent_id,
-                        "conversation_id": conversation_id,
-                        "tokens": estimate_token_count(result.get("output", "")),
-                        "llm_model": agent_config.llm_model
-                    }
-                )
-            )
-            
-        except Exception as e:
-            logger.error(f"Error en streaming: {str(e)}")
-            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+    # Crear la configuración del agente
+    try:
+        if isinstance(agent_config, str):
+            agent_config = json.loads(agent_config)
+        
+        # Convertir a modelo pydantic
+        agent_config = AgentConfig(**agent_config)
+    except Exception as e:
+        logger.error(f"Error al analizar la configuración del agente: {e}")
+        raise ServiceError(
+            message=f"Formato de configuración de agente inválido: {str(e)}",
+            status_code=400, 
+            error_code="invalid_agent_config"
+        )
     
-    # Devolver respuesta de streaming
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-        }
+    # Validar acceso al modelo
+    validate_model_access(tenant_info.subscription_tier, agent_config.llm_model)
+    
+    # Ejecutar el agente con o sin streaming según la solicitud
+    result = await execute_agent(
+        tenant_info=tenant_info,
+        agent_config=agent_config,
+        query=chat_request.message,
+        session_id=chat_request.session_id,
+        streaming=False
+    )
+    
+    # Agregar tracking de uso
+    try:
+        await track_usage(
+            tenant_id=tenant_id,
+            operation="agent_query",
+            metadata={
+                "agent_id": agent_id,
+                "conversation_id": conversation_id,
+                "tokens": result.get("tokens", 0),
+                "llm_model": agent_config.llm_model
+            }
+        )
+    except Exception as e:
+        logger.warning(f"Error al registrar uso: {e}")
+    
+    # Devolver resultado
+    return ChatResponse(
+        conversation_id=chat_request.session_id,
+        message=ChatMessage(
+            role="assistant",
+            content=result["answer"]
+        ),
+        thinking=result.get("thinking", None),
+        tools_used=result.get("tools_used", None),
+        processing_time=0,
+        sources=result.get("sources", None),
+        context=chat_request.context
     )
 
 
@@ -2088,3 +2194,33 @@ async def list_conversations(
             status_code=500,
             error_code="LIST_FAILED"
         )
+
+@with_tenant_context
+async def create_agent_tools(agent_config: AgentConfig) -> List[Tool]:
+    """
+    Crea herramientas para el agente LangChain.
+    
+    Args:
+        agent_config: Configuración del agente
+        
+    Returns:
+        Lista de herramientas de LangChain
+    """
+    tools = []
+    tenant_id = get_current_tenant_id()
+    
+    # Procesar cada herramienta en la configuración
+    for tool_config in agent_config.tools:
+        if not tool_config.is_active:
+            continue
+            
+        if tool_config.type == "rag":
+            # Crear herramienta RAG para búsqueda de documentos
+            rag_tool = await create_rag_tool(
+                tool_config=tool_config,
+                tenant_id=tenant_id,
+                agent_id=agent_config.agent_id if hasattr(agent_config, 'agent_id') else None
+            )
+            tools.append(rag_tool)
+    
+    return tools

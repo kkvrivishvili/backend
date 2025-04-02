@@ -9,6 +9,7 @@ import logging
 import uuid
 import httpx
 from typing import List, Dict, Any, Optional
+from datetime import datetime
 
 from fastapi import FastAPI, Depends, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,7 +22,8 @@ from llama_index.core.schema import MetadataMode
 # Importar nuestra biblioteca común
 from common.models import (
     TenantInfo, DocumentIngestionRequest, DocumentMetadata, 
-    IngestionResponse, HealthResponse, DeleteDocumentResponse, DeleteCollectionResponse
+    IngestionResponse, HealthResponse, DeleteDocumentResponse, DeleteCollectionResponse,
+    CollectionCreationResponse, CollectionInfo
 )
 from common.auth import verify_tenant, check_tenant_quotas
 from common.config import get_settings
@@ -90,6 +92,10 @@ app = FastAPI(
         {
             "name": "health",
             "description": "Verificación de estado del servicio"
+        },
+        {
+            "name": "collections",
+            "description": "Operaciones de gestión de colecciones"
         }
     ]
 )
@@ -122,6 +128,10 @@ configure_swagger_ui(
         {
             "name": "health",
             "description": "Verificación de estado del servicio"
+        },
+        {
+            "name": "collections",
+            "description": "Operaciones de gestión de colecciones"
         }
     ]
 )
@@ -147,6 +157,7 @@ add_example_to_endpoint(
                 }
             }
         ],
+        "collection_id": "550e8400-e29b-41d4-a716-446655440000",
         "collection_name": "default",
         "chunk_size": 500,
         "chunk_overlap": 100
@@ -156,7 +167,8 @@ add_example_to_endpoint(
         "message": "Documentos procesados exitosamente",
         "document_ids": ["doc_123456"],
         "node_count": 10
-    }
+    },
+    request_schema_description="Solicitud para procesar e indexar documentos en la base de datos vectorial"
 )
 
 add_example_to_endpoint(
@@ -165,6 +177,7 @@ add_example_to_endpoint(
     method="post",
     request_example={
         "file": "<archivo_binario>",
+        "collection_id": "550e8400-e29b-41d4-a716-446655440000",
         "collection_name": "default",
         "document_type": "manual",
         "author": "Equipo de Desarrollo"
@@ -174,7 +187,8 @@ add_example_to_endpoint(
         "message": "Archivo procesado exitosamente",
         "document_ids": ["doc_123456"],
         "node_count": 10
-    }
+    },
+    request_schema_description="Solicitud para ingerir y procesar un archivo"
 )
 
 add_example_to_endpoint(
@@ -185,19 +199,25 @@ add_example_to_endpoint(
         "success": True,
         "message": "Documento eliminado exitosamente",
         "document_id": "doc_123456",
+        "collection_id": "550e8400-e29b-41d4-a716-446655440000",
+        "collection_name": "documentos_legales",
+        "deleted": True,
         "deleted_chunks": 10
-    }
+    },
+    request_schema_description="Eliminar un documento específico y todos sus fragmentos"
 )
 
 add_example_to_endpoint(
     app=app,
-    path="/collections/{collection_name}",
+    path="/collections/{collection_id}",
     method="delete",
     response_example={
         "success": True,
         "message": "Colección eliminada exitosamente",
-        "collection_name": "default",
-        "deleted_chunks": 50
+        "collection_id": "550e8400-e29b-41d4-a716-446655440000",
+        "collection_name": "documentos_legales",
+        "deleted": True,
+        "documents_deleted": 50
     }
 )
 
@@ -214,6 +234,23 @@ add_example_to_endpoint(
             "embedding_service": "available"
         },
         "version": "1.2.0"
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/collections",
+    method="post",
+    request_example={
+        "name": "documentos_legales",
+        "description": "Colección de documentos legales y contratos"
+    },
+    response_example={
+        "success": True,
+        "message": "Colección creada correctamente",
+        "collection_id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "documentos_legales",
+        "description": "Colección de documentos legales y contratos"
     }
 )
 
@@ -275,10 +312,11 @@ async def generate_embeddings(texts: List[str]) -> List[List[float]]:
         raise ServiceError(f"Error al generar embeddings: {str(e)}")
 
 # Procesar documento y crear nodos
-def process_document(
+async def process_document(
     doc_text: str, 
     metadata: DocumentMetadata,
-    collection_name: str
+    collection_id: Optional[str] = None,
+    collection_name: str = "default"
 ) -> List[Dict[str, Any]]:
     """
     Procesa un documento, lo divide en nodos y prepara metadatos.
@@ -286,33 +324,29 @@ def process_document(
     Args:
         doc_text: Texto del documento
         metadata: Metadatos del documento
+        collection_id: ID único de la colección (UUID)
         collection_name: Nombre de la colección
         
     Returns:
         List[Dict[str, Any]]: Lista de nodos procesados
     """
-    # Asegurar que custom_metadata existe y es un diccionario
-    if metadata.custom_metadata is None:
-        metadata.custom_metadata = {}
-    
     # Crear documento LlamaIndex
     document = Document(
         text=doc_text,
         metadata={
             "tenant_id": metadata.tenant_id,
+            "document_id": metadata.document_id if hasattr(metadata, 'document_id') else str(uuid.uuid4()),
             "source": metadata.source,
             "author": metadata.author,
-            "created_at": metadata.created_at,
+            "created_at": metadata.created_at or datetime.now().isoformat(),
             "document_type": metadata.document_type,
-            "collection": collection_name,
-            **metadata.custom_metadata  # Ya verificamos que no es None
+            "collection_id": collection_id,  # Nueva propiedad para identificación única
+            "collection": collection_name,  # Mantener para compatibilidad
+            "custom_metadata": metadata.custom_metadata or {}
         }
     )
     
-    # Obtener configuración centralizada
-    settings = get_settings()
-    
-    # Parsear documento en nodos
+    # Procesar en nodos más pequeños
     parser = SimpleNodeParser.from_defaults(
         chunk_size=settings.default_chunk_size,
         chunk_overlap=settings.default_chunk_overlap
@@ -320,68 +354,87 @@ def process_document(
     
     nodes = parser.get_nodes_from_documents([document])
     
-    # Procesar todos los nodos y devolver datos
-    node_data = []
-    for node in nodes:
-        node_id = str(uuid.uuid4())
+    # Convertir nodos a formato compatible con Supabase
+    node_data_list = []
+    for i, node in enumerate(nodes):
         node_text = node.get_content(metadata_mode=MetadataMode.NONE)
-        node_metadata = node.metadata
-        
-        node_data.append({
-            "id": node_id,
+        node_metadata = node.metadata.copy()
+        node_metadata["node_id"] = f"{node_metadata.get('document_id', 'unknown')}_node_{i}"
+        node_metadata["node_index"] = i
+        node_data_list.append({
             "text": node_text,
             "metadata": node_metadata
         })
     
-    return node_data
+    # Logs
+    logger.info(
+        f"Documento procesado: {len(node_data_list)} nodos generados. " + 
+        f"Colección: {collection_name} (ID: {collection_id}), " +
+        f"Tenant: {metadata.tenant_id}"
+    )
+    
+    return node_data_list
 
 # Background task para indexar documentos
-@handle_service_error_simple
-@with_full_context
-async def index_documents_task(node_data_list: List[Dict[str, Any]], collection_name: str):
+async def index_documents_task(node_data_list: List[Dict[str, Any]], collection_id: Optional[str] = None, collection_name: str = "default"):
     """
     Tarea en segundo plano para indexar documentos.
     
     Args:
         node_data_list: Lista de nodos a indexar
+        collection_id: ID único de la colección (UUID)
         collection_name: Nombre de la colección
     """
     try:
-        # Los IDs de contexto ya están disponibles gracias al decorador
-        tenant_id = get_current_tenant_id()
-        agent_id = get_current_agent_id()
-        conversation_id = get_current_conversation_id()
+        if not node_data_list:
+            logger.warning("No hay nodos para indexar")
+            return
         
-        # Obtener vector store para este tenant
-        vector_store = get_tenant_vector_store(tenant_id, collection_name)
+        # Extraer tenant_id del primer nodo
+        tenant_id = node_data_list[0]["metadata"]["tenant_id"]
         
-        logger.info(f"Indexando {len(node_data_list)} nodos en colección {collection_name}")
+        # Obtener store para la combinación tenant/colección
+        vector_store = get_tenant_vector_store(tenant_id, collection_name, collection_id)
         
-        # Convertir nodos a documentos de LlamaIndex
-        documents = []
-        for node_data in node_data_list:
-            # Crear documento
-            doc = Document(
-                text=node_data["text"],
-                metadata=node_data["metadata"]
-            )
-            documents.append(doc)
+        logger.info(f"Indexando {len(node_data_list)} nodos en colección {collection_name} (ID: {collection_id})")
         
-        # Generar textos para embeddings
-        texts = [doc.get_content(metadata_mode=MetadataMode.NONE) for doc in documents]
-        
-        # Generar embeddings
+        # Generar embeddings para los textos
+        texts = [node["text"] for node in node_data_list]
         embeddings = await generate_embeddings(texts)
         
-        # Indexar documentos en la base de datos vectorial
-        for i, doc in enumerate(documents):
-            vector_store.add(
-                documents=[doc],
-                embeddings=[embeddings[i]] if embeddings else None
-            )
+        # Insertar en Supabase con sus metadatos
+        data_to_insert = []
+        for i, node in enumerate(node_data_list):
+            data_to_insert.append({
+                "tenant_id": tenant_id,
+                "content": node["text"],
+                "metadata": node["metadata"],
+                "embedding": embeddings[i] if i < len(embeddings) else None
+            })
         
-        logger.info(f"Indexación completada para {len(node_data_list)} nodos en colección {collection_name}")
-    
+        # Insertar en la tabla de document_chunks
+        supabase = get_supabase_client()
+        result = await supabase.table("document_chunks").insert(data_to_insert).execute()
+        
+        if result.error:
+            logger.error(f"Error insertando chunks: {result.error}")
+            return
+            
+        # Actualizar contador de documentos para el tenant
+        doc_ids = set()
+        for node in node_data_list:
+            if "document_id" in node["metadata"]:
+                doc_ids.add(node["metadata"]["document_id"])
+        
+        # Incrementar contador de documentos
+        if doc_ids:
+            await supabase.rpc(
+                "increment_document_count",
+                {"p_tenant_id": tenant_id, "p_count": len(doc_ids)}
+            ).execute()
+            
+        logger.info(f"Indexación completada para {len(node_data_list)} nodos en colección {collection_name} (ID: {collection_id})")
+        
     except Exception as e:
         logger.error(f"Error en la tarea de indexación: {str(e)}", exc_info=True)
 
@@ -414,7 +467,8 @@ async def ingest_documents(
     Args:
         request: Solicitud con documentos a ingerir (DocumentIngestionRequest)
             - documents: Lista de documentos con texto y metadatos
-            - collection_name: Nombre de la colección donde almacenar (opcional, default: "default")
+            - collection_id: ID único de la colección (opcional)
+            - collection_name: Nombre amigable de la colección (opcional, default: "default")
             - chunk_size: Tamaño máximo de cada fragmento de texto (opcional)
             - chunk_overlap: Cantidad de solapamiento entre fragmentos (opcional)
         background_tasks: Tareas en segundo plano (inyectado por FastAPI)
@@ -431,74 +485,146 @@ async def ingest_documents(
         ServiceError: En caso de errores durante el procesamiento o almacenamiento
         HTTPException: Para errores de validación o autorización
     """
-    # Verificar cuotas del tenant
-    await check_tenant_quotas(tenant_info)
+    # Los IDs de contexto ya están disponibles gracias al decorador
+    tenant_id = tenant_info.tenant_id
+    agent_id = get_current_agent_id()
+    conversation_id = get_current_conversation_id()
     
+    # Validar cuota y límites del tenant
+    await check_tenant_quotas(tenant_id)
+    
+    # Usar collection_id si está disponible, sino usar collection_name
+    collection_id = request.collection_id
     collection_name = request.collection_name or "default"
     
-    total_nodes = 0
-    document_ids = []
-    node_data_list = []
+    # Si tenemos collection_id pero no collection_name, intentar obtener el nombre
+    if collection_id and not collection_name or collection_name == "default":
+        try:
+            supabase = get_supabase_client()
+            collection_result = await supabase.table("collections").select("name").eq("collection_id", collection_id).execute()
+            if collection_result.data and len(collection_result.data) > 0:
+                collection_name = collection_result.data[0].get("name", "default")
+        except Exception as e:
+            logger.warning(f"Error al obtener nombre de colección para ID {collection_id}: {str(e)}")
+    
+    # Si no tenemos collection_id pero sí collection_name, intentar obtener el ID
+    if not collection_id and collection_name and collection_name != "default":
+        try:
+            supabase = get_supabase_client()
+            collection_result = await supabase.table("collections").select("collection_id").eq("name", collection_name).eq("tenant_id", tenant_id).execute()
+            if collection_result.data and len(collection_result.data) > 0:
+                collection_id = collection_result.data[0].get("collection_id")
+        except Exception as e:
+            logger.warning(f"Error al obtener ID de colección para nombre {collection_name}: {str(e)}")
+    
+    # Verificar que hay documentos para procesar
+    if not request.documents or len(request.documents) == 0:
+        return IngestionResponse(
+            success=False,
+            message="No se proporcionaron documentos para procesar",
+            document_ids=[],
+            nodes_count=0
+        )
     
     # Procesar cada documento
-    for doc in request.documents:
-        # Verificar que el texto no esté vacío
-        if not doc.text or not doc.text.strip():
-            continue
-        
-        # Procesar el documento
-        nodes = process_document(
-            doc.text, 
-            doc.metadata,
-            collection_name
-        )
-        
-        # Añadir nodos a la lista para indexación
-        node_data_list.extend(nodes)
-        
-        # Actualizar contadores
-        document_ids.append(doc.metadata.document_id)
-        total_nodes += len(nodes)
+    all_nodes = []
+    document_ids = []
     
-    # Iniciar tarea en segundo plano para indexar documentos
-    if node_data_list:
+    try:
+        for i, document_text in enumerate(request.documents):
+            # Obtener metadatos para este documento
+            metadata = request.document_metadatas[i] if i < len(request.document_metadatas) else DocumentMetadata(
+                source="api",
+                document_type="text",
+                tenant_id=tenant_id
+            )
+            
+            # Asegurarse que tenant_id está establecido
+            metadata.tenant_id = tenant_id
+            
+            # Generar document_id si no está presente
+            if not hasattr(metadata, 'document_id') or not metadata.document_id:
+                document_id = str(uuid.uuid4())
+                metadata.document_id = document_id
+            else:
+                document_id = metadata.document_id
+                
+            document_ids.append(document_id)
+            
+            # Procesar documento en nodos
+            nodes = await process_document(
+                document_text, 
+                metadata,
+                collection_id,
+                collection_name
+            )
+            
+            all_nodes.extend(nodes)
+    
+        # Programar la indexación como tarea en segundo plano
         background_tasks.add_task(
             index_documents_task,
-            node_data_list, 
+            all_nodes,
+            collection_id,
             collection_name
         )
-    
-    return IngestionResponse(
-        success=True,
-        message="Documentos procesados exitosamente",
-        document_ids=document_ids,
-        node_count=total_nodes
-    )
+        
+        return IngestionResponse(
+            success=True,
+            message=f"{len(document_ids)} documentos procesados exitosamente con {len(all_nodes)} nodos",
+            document_ids=document_ids,
+            nodes_count=len(all_nodes)
+        )
+        
+    except Exception as e:
+        logger.error(f"Error procesando documentos: {str(e)}", exc_info=True)
+        raise ServiceError(
+            message=f"Error procesando documentos: {str(e)}",
+            status_code=500,
+            error_code="processing_error"
+        )
 
-@app.post("/ingest-file", response_model=IngestionResponse, tags=["ingest"])
+@app.post("/ingest-file", response_model=IngestionResponse, tags=["documents"])
 @handle_service_error_simple
 @with_full_context
 async def ingest_file(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    collection_id: Optional[str] = Form(None),
     collection_name: str = Form("default"),
     document_type: str = Form(...),
     author: Optional[str] = Form(None),
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> IngestionResponse:
     """
-    Ingiere un archivo subido.
+    Ingiere un archivo subido y lo procesa para búsqueda vectorial.
+    
+    Este endpoint permite subir archivos (PDF, TXT, DOCX, etc.) para ser
+    procesados, segmentados e indexados en la colección especificada.
+    
+    ## Flujo de procesamiento
+    1. Validación de permisos y cuotas del tenant
+    2. Extracción de texto del archivo según su formato
+    3. Segmentación en fragmentos más pequeños según configuración
+    4. Generación de embeddings para cada fragmento
+    5. Almacenamiento en la colección especificada
     
     Args:
-        background_tasks: Tareas en segundo plano
-        file: Archivo a ingerir
-        collection_name: Nombre de la colección
-        document_type: Tipo de documento
-        author: Autor del documento
+        background_tasks: Tareas en segundo plano (inyectado por FastAPI)
+        file: Archivo a ingerir (multipart/form-data)
+        collection_id: ID único de la colección (UUID)
+        collection_name: Nombre amigable de la colección (para compatibilidad)
+        document_type: Tipo de documento (ej: "legal", "manual", "reporte")
+        author: Autor del documento (opcional)
         tenant_info: Información del tenant (inyectada)
         
     Returns:
-        dict: Respuesta con ID de documento y contador de nodos
+        IngestionResponse: Respuesta con ID de documento y contador de nodos
+            - document_ids: Lista con el ID único asignado al documento
+            - nodes_count: Cantidad de fragmentos generados
+    
+    Raises:
+        ServiceError: Si hay error en la extracción o procesamiento
     """
     # Los IDs de contexto ya están disponibles gracias al decorador
     tenant_id = tenant_info.tenant_id
@@ -506,39 +632,62 @@ async def ingest_file(
     conversation_id = get_current_conversation_id()
     
     # Verificar cuotas del tenant
-    await check_tenant_quotas(tenant_info)
+    await check_tenant_quotas(tenant_id)
+    
+    # Si tenemos collection_id pero no collection_name, intentar obtener el nombre
+    if collection_id and (not collection_name or collection_name == "default"):
+        try:
+            supabase = get_supabase_client()
+            collection_result = await supabase.table("collections").select("name").eq("collection_id", collection_id).execute()
+            if collection_result.data and len(collection_result.data) > 0:
+                collection_name = collection_result.data[0].get("name", "default")
+        except Exception as e:
+            logger.warning(f"Error al obtener nombre de colección para ID {collection_id}: {str(e)}")
+    
+    # Si no tenemos collection_id pero sí collection_name, intentar obtener el ID
+    if not collection_id and collection_name and collection_name != "default":
+        try:
+            supabase = get_supabase_client()
+            collection_result = await supabase.table("collections").select("collection_id").eq("name", collection_name).eq("tenant_id", tenant_id).execute()
+            if collection_result.data and len(collection_result.data) > 0:
+                collection_id = collection_result.data[0].get("collection_id")
+        except Exception as e:
+            logger.warning(f"Error al obtener ID de colección para nombre {collection_name}: {str(e)}")
     
     # Leer contenido del archivo
     content = await file.read()
-    file_text = content.decode("utf-8")
+    file_text = content.decode("utf-8", errors="ignore")
     
-    # Crear metadatos
+    # Crear documento_id
+    doc_id = str(uuid.uuid4())
+    
+    # Crear metadata
     metadata = DocumentMetadata(
         source=file.filename,
         author=author,
-        created_at=None,  # Se rellenará automáticamente
+        created_at=datetime.now().isoformat(),
         document_type=document_type,
         tenant_id=tenant_id,
-        custom_metadata={"filename": file.filename}
+        custom_metadata={
+            "filename": file.filename,
+            "content_type": file.content_type
+        }
     )
-    
-    # Generar ID de documento
-    doc_id = str(uuid.uuid4())
-    
-    # Añadir ID de documento a metadatos
-    metadata.custom_metadata["document_id"] = doc_id
+    metadata.document_id = doc_id
     
     # Procesar documento para obtener nodos
-    node_data = process_document(
+    node_data = await process_document(
         doc_text=file_text,
         metadata=metadata,
+        collection_id=collection_id,
         collection_name=collection_name
     )
     
-    # Programar tarea en segundo plano para indexar documentos
+    # Programar indexación en segundo plano
     background_tasks.add_task(
         index_documents_task,
         node_data,
+        collection_id,
         collection_name
     )
     
@@ -548,10 +697,10 @@ async def ingest_file(
         success=True,
         message=f"Archivo {file.filename} procesado exitosamente",
         document_ids=[doc_id],
-        node_count=len(node_data)
+        nodes_count=len(node_data)
     )
 
-@app.delete("/documents/{document_id}", response_model=DeleteDocumentResponse, tags=["ingest"])
+@app.delete("/documents/{document_id}", response_model=DeleteDocumentResponse, tags=["documents"])
 @handle_service_error_simple
 @with_full_context
 async def delete_document(
@@ -559,108 +708,297 @@ async def delete_document(
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> DeleteDocumentResponse:
     """
-    Elimina un documento específico.
+    Elimina un documento específico y todos sus fragmentos asociados.
+    
+    Este endpoint permite eliminar permanentemente un documento y todos
+    los fragmentos de texto (chunks) asociados a él. Esta operación es 
+    irreversible y debe usarse con precaución.
+    
+    ## Flujo de procesamiento
+    1. Validación de permisos del tenant
+    2. Verificación de existencia del documento
+    3. Eliminación de todos los fragmentos asociados al documento
+    4. Actualización de metadatos y contadores
     
     Args:
-        document_id: ID del documento
+        document_id: ID único del documento a eliminar
         tenant_info: Información del tenant (inyectada)
         
     Returns:
-        dict: Resultado de la operación
+        DeleteDocumentResponse: Resultado de la operación
+            - success: True si la operación fue exitosa
+            - document_id: ID del documento eliminado
+            - collection_id: ID de la colección a la que pertenecía (si está disponible)
+            - collection_name: Nombre de la colección (para referencia)
+            - deleted: True si se eliminó correctamente
+            - deleted_chunks: Cantidad de fragmentos eliminados
+    
+    Raises:
+        ServiceError: Si el documento no existe o hay error en la eliminación
     """
     # Los IDs de contexto ya están disponibles gracias al decorador
     tenant_id = tenant_info.tenant_id
     
     supabase = get_supabase_client()
     
-    # Eliminar chunks de documento
-    delete_result = await supabase.table("document_chunks").delete() \
-        .eq("tenant_id", tenant_id) \
-        .eq("metadata->>document_id", document_id) \
-        .execute()
+    try:
+        # Primero verificar si existe el documento
+        verify_result = await supabase.table("document_chunks").select("metadata") \
+            .eq("tenant_id", tenant_id) \
+            .eq("metadata->>document_id", document_id) \
+            .limit(1) \
+            .execute()
+            
+        if not verify_result.data or len(verify_result.data) == 0:
+            raise ServiceError(
+                message=f"Documento {document_id} no encontrado",
+                status_code=404,
+                error_code="document_not_found"
+            )
+        
+        # Obtener información de la colección
+        collection_id = None
+        collection_name = None
+        if verify_result.data and len(verify_result.data) > 0:
+            metadata = verify_result.data[0].get("metadata", {})
+            collection_id = metadata.get("collection_id")
+            collection_name = metadata.get("collection", "default")
     
-    if delete_result.error:
-        logger.error(f"Error eliminando documento {document_id}: {delete_result.error}")
-        raise ServiceError(
-            message=f"Error eliminando documento: {delete_result.error}",
-            status_code=500,
-            error_code="DELETE_FAILED"
+        # Eliminar chunks de documento
+        delete_result = await supabase.table("document_chunks").delete() \
+            .eq("tenant_id", tenant_id) \
+            .eq("metadata->>document_id", document_id) \
+            .execute()
+        
+        if delete_result.error:
+            logger.error(f"Error eliminando documento {document_id}: {delete_result.error}")
+            raise ServiceError(
+                message=f"Error eliminando documento: {delete_result.error}",
+                status_code=500,
+                error_code="delete_error"
+            )
+        
+        # Decrementar contador de documentos
+        await supabase.rpc(
+            "decrement_document_count",
+            {"p_tenant_id": tenant_id, "p_count": 1}
+        ).execute()
+        
+        deleted_count = len(delete_result.data) if delete_result.data else 0
+        logger.info(f"Documento {document_id} eliminado con {deleted_count} chunks")
+        
+        return DeleteDocumentResponse(
+            success=True,
+            message=f"Documento {document_id} eliminado exitosamente",
+            document_id=document_id,
+            collection_id=collection_id,
+            collection_name=collection_name,
+            deleted=True,
+            deleted_chunks=deleted_count
         )
     
-    # Actualizar contador de documentos para el tenant
-    await supabase.rpc(
-        "decrement_document_count",
-        {"p_tenant_id": tenant_id, "p_count": 1}
-    ).execute()
-    
-    deleted_count = len(delete_result.data) if delete_result.data else 0
-    logger.info(f"Documento {document_id} eliminado con {deleted_count} chunks")
-    
-    return DeleteDocumentResponse(
-        success=True,
-        message=f"Documento {document_id} eliminado exitosamente",
-        deleted_chunks=deleted_count
-    )
+    except ServiceError:
+        raise
+    except Exception as e:
+        logger.error(f"Error al eliminar documento {document_id}: {str(e)}")
+        raise ServiceError(
+            message=f"Error al eliminar el documento: {str(e)}",
+            status_code=500,
+            error_code="delete_document_error"
+        )
 
-@app.delete("/collections/{collection_name}", response_model=DeleteCollectionResponse, tags=["ingest"])
+@app.delete("/collections/{collection_id}", response_model=DeleteCollectionResponse, tags=["collections"])
 @handle_service_error_simple
 @with_tenant_context
 async def delete_collection(
-    collection_name: str,
+    collection_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
 ) -> DeleteCollectionResponse:
     """
     Elimina una colección completa de documentos.
     
+    Este endpoint elimina todos los documentos y fragmentos asociados a una colección
+    específica identificada por su UUID único. Esta operación es irreversible
+    y debe usarse con precaución.
+    
+    ## Flujo de procesamiento
+    1. Validación de permisos del tenant
+    2. Verificación de existencia de la colección
+    3. Eliminación de todos los documentos asociados
+    4. Eliminación de todos los fragmentos de texto (chunks) asociados
+    5. Actualización de metadatos y registros de uso
+    
     Args:
-        collection_name: Nombre de la colección
-        tenant_info: Información del tenant (inyectada)
+        collection_id: ID único (UUID) de la colección a eliminar
+        tenant_info: Información del tenant (inyectada mediante verify_tenant)
         
     Returns:
-        dict: Resultado de la operación
+        DeleteCollectionResponse: Resultado de la operación
+            - success: True si la operación fue exitosa
+            - collection_id: ID de la colección eliminada
+            - collection_name: Nombre de la colección (para referencia)
+            - deleted: True si se eliminó correctamente
+            - documents_deleted: Cantidad de documentos/fragmentos eliminados
+    
+    Raises:
+        ServiceError: Si la colección no existe o hay error en la eliminación
     """
-    # El tenant_id ya está disponible en el contexto gracias al decorador
     tenant_id = tenant_info.tenant_id
     
     supabase = get_supabase_client()
+    collection_name = None
     
-    # Eliminar chunks de documento para esta colección
-    delete_result = await supabase.table("document_chunks").delete() \
-        .eq("tenant_id", tenant_id) \
-        .eq("metadata->>collection", collection_name) \
-        .execute()
-    
-    if delete_result.error:
-        logger.error(f"Error eliminando colección {collection_name}: {delete_result.error}")
-        raise ServiceError(
-            message=f"Error eliminando colección: {delete_result.error}",
-            status_code=500,
-            error_code="DELETE_FAILED"
-        )
-    
-    # Actualizar contador de documentos para el tenant
-    if delete_result.data and len(delete_result.data) > 0:
-        # Estimar contador de documentos (aproximado)
-        doc_ids = set()
-        for item in delete_result.data:
-            if "metadata" in item and "document_id" in item["metadata"]:
-                doc_ids.add(item["metadata"]["document_id"])
+    try:
+        # Verificar que la colección existe y obtener su nombre
+        collection_result = await supabase.table("collections").select("*").eq("tenant_id", tenant_id).eq("collection_id", collection_id).execute()
         
-        # Decrementar contador de documentos
-        if doc_ids:
-            await supabase.rpc(
-                "decrement_document_count",
-                {"p_tenant_id": tenant_id, "p_count": len(doc_ids)}
-            ).execute()
+        if not collection_result.data or len(collection_result.data) == 0:
+            raise ServiceError(
+                message=f"Colección con ID {collection_id} no encontrada",
+                status_code=404,
+                error_code="collection_not_found"
+            )
+        
+        collection_name = collection_result.data[0].get("name", "")
+        
+        # Eliminar todos los chunks de la colección
+        delete_result = await supabase.table("document_chunks").delete() \
+            .eq("tenant_id", tenant_id) \
+            .eq("metadata->>collection_id", collection_id) \
+            .execute()
+        
+        if delete_result.error:
+            logger.error(f"Error eliminando colección {collection_id} ({collection_name}): {delete_result.error}")
+            raise ServiceError(
+                message=f"Error al eliminar la colección: {delete_result.error}",
+                status_code=500,
+                error_code="delete_error"
+            )
+        
+        # También eliminar registros que usan el campo collection viejo (para compatibilidad)
+        delete_legacy_result = await supabase.table("document_chunks").delete() \
+            .eq("tenant_id", tenant_id) \
+            .eq("metadata->>collection", collection_name) \
+            .execute()
+        
+        # Para compatibilidad, también eliminar la colección de la tabla de colecciones
+        await supabase.table("collections").delete().eq("collection_id", collection_id).execute()
+        
+        # Calcular total de documentos eliminados
+        deleted_count = len(delete_result.data) + (len(delete_legacy_result.data) if hasattr(delete_legacy_result, 'data') else 0)
+        
+        logger.info(f"Colección {collection_id} ({collection_name}) eliminada con {deleted_count} chunks")
+        
+        return DeleteCollectionResponse(
+            success=True,
+            message=f"Colección {collection_name} eliminada exitosamente",
+            collection_id=collection_id,
+            collection_name=collection_name,
+            deleted=True,
+            documents_deleted=deleted_count
+        )
+        
+    except ServiceError:
+        raise
+    except Exception as e:
+        logger.error(f"Error al eliminar colección {collection_id}: {str(e)}")
+        raise ServiceError(
+            message=f"Error al eliminar la colección: {str(e)}",
+            status_code=500,
+            error_code="delete_collection_error"
+        )
+
+@app.post("/collections", response_model=CollectionCreationResponse, tags=["collections"])
+@handle_service_error_simple
+@with_tenant_context
+async def create_collection(
+    name: str,
+    description: Optional[str] = None,
+    tenant_info: TenantInfo = Depends(verify_tenant)
+) -> CollectionCreationResponse:
+    """
+    Crea una nueva colección para organizar documentos.
     
-    deleted_count = len(delete_result.data) if delete_result.data else 0
-    logger.info(f"Colección {collection_name} eliminada con {deleted_count} chunks")
+    Este endpoint permite crear una colección con un nombre amigable y descripción
+    para organizar documentos relacionados. Cada colección recibe un identificador
+    único (UUID) que se utiliza en operaciones posteriores.
     
-    return DeleteCollectionResponse(
-        success=True,
-        message=f"Colección {collection_name} eliminada exitosamente",
-        deleted_chunks=deleted_count
-    )
+    ## Flujo de procesamiento
+    1. Validación de permisos del tenant
+    2. Verificación de límites de colecciones según plan
+    3. Generación de UUID para la colección
+    4. Registro en base de datos
+    
+    Args:
+        name: Nombre amigable para la colección
+        description: Descripción detallada (opcional)
+        tenant_info: Información del tenant (inyectada)
+        
+    Returns:
+        CollectionCreationResponse: Detalles de la colección creada
+            - collection_id: UUID único asignado a la colección
+            - name: Nombre amigable
+            - description: Descripción proporcionada
+    
+    Raises:
+        ServiceError: Si ocurre un error durante la creación o hay duplicados
+    """
+    tenant_id = tenant_info.tenant_id
+    
+    # Generar UUID para la colección
+    collection_id = str(uuid.uuid4())
+    
+    # Preparar metadatos para la colección
+    now = datetime.now().isoformat()
+    
+    # Registro de la colección en Supabase (tabla de colecciones)
+    supabase = get_supabase_client()
+    try:
+        # Verificar si ya existe una colección con el mismo nombre
+        existing = await supabase.table("collections").select("*").eq("tenant_id", tenant_id).eq("name", name).execute()
+        
+        if existing.data and len(existing.data) > 0:
+            raise ServiceError(
+                message=f"Ya existe una colección con el nombre '{name}'",
+                status_code=409,
+                error_code="collection_exists"
+            )
+        
+        # Insertar nueva colección
+        collection_data = {
+            "collection_id": collection_id,
+            "tenant_id": tenant_id,
+            "name": name,
+            "description": description,
+            "created_at": now,
+            "updated_at": now,
+            "is_active": True
+        }
+        
+        await supabase.table("collections").insert(collection_data).execute()
+        
+        logger.info(f"Colección '{name}' (ID: {collection_id}) creada para tenant {tenant_id}")
+        
+        return CollectionCreationResponse(
+            success=True,
+            message=f"Colección '{name}' creada correctamente",
+            collection_id=collection_id,
+            name=name,
+            description=description,
+            tenant_id=tenant_id,
+            created_at=now,
+            updated_at=now
+        )
+        
+    except ServiceError:
+        raise
+    except Exception as e:
+        logger.error(f"Error al crear colección '{name}': {str(e)}")
+        raise ServiceError(
+            message=f"Error al crear la colección: {str(e)}",
+            status_code=500,
+            error_code="collection_creation_error"
+        )
 
 @app.get("/status", response_model=HealthResponse, tags=["health"])
 @app.get("/health", response_model=HealthResponse, tags=["health"])

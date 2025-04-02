@@ -146,32 +146,33 @@ add_example_to_endpoint(
     path="/query",
     method="post",
     request_example={
-        "query": "¿Cuál es el presupuesto asignado al proyecto X para 2023?",
-        "collection_name": "documentos_financieros",
-        "top_k": 5,
-        "similarity_cutoff": 0.7,
-        "model": "gpt-3.5-turbo",
-        "context_strategy": "simple"
+        "query": "¿Cuáles son los principales beneficios de nuestro producto?",
+        "collection_id": "550e8400-e29b-41d4-a716-446655440000",
+        "collection_name": "documentacion_producto",
+        "similarity_top_k": 4,
+        "llm_model": "gpt-3.5-turbo",
+        "response_mode": "compact"
     },
     response_example={
         "success": True,
-        "message": "Consulta procesada exitosamente",
-        "answer": "El presupuesto total asignado para el proyecto X es de $150,000 según la documentación proporcionada.",
+        "query": "¿Cuáles son los principales beneficios de nuestro producto?",
+        "response": "Los principales beneficios incluyen: 1) Ahorro de tiempo, 2) Mejora de productividad, 3) Integración con otras herramientas",
         "sources": [
             {
-                "document_id": "doc_123456",
-                "document_name": "Presupuesto_2023.pdf",
-                "similarity": 0.89,
-                "content": "El presupuesto total asignado para el proyecto X durante el año fiscal 2023 es de $150,000.",
+                "text": "Nuestro producto permite ahorrar tiempo automatizando tareas repetitivas.",
                 "metadata": {
-                    "page": 5,
-                    "timestamp": "2023-05-15T14:30:00Z"
-                }
+                    "source": "manual_producto.pdf",
+                    "page": 5
+                },
+                "score": 0.92
             }
         ],
-        "processing_time": 0.75,
-        "model_used": "gpt-3.5-turbo"
-    }
+        "processing_time": 0.85,
+        "llm_model": "gpt-3.5-turbo",
+        "collection_id": "550e8400-e29b-41d4-a716-446655440000",
+        "collection_name": "documentacion_producto"
+    },
+    request_schema_description="Consulta RAG (Retrieval Augmented Generation)"
 )
 
 add_example_to_endpoint(
@@ -416,7 +417,8 @@ def get_llm_for_tenant(tenant_info: TenantInfo, requested_model: Optional[str] =
 @with_full_context
 async def create_query_engine(
     tenant_info: TenantInfo,
-    collection_name: str,
+    collection_id: Optional[str] = None,
+    collection_name: str = "default",
     llm_model: Optional[str] = None,
     similarity_top_k: int = 4,
     response_mode: str = "compact"
@@ -426,7 +428,8 @@ async def create_query_engine(
     
     Args:
         tenant_info: Información del tenant
-        collection_name: Nombre de la colección
+        collection_id: ID único de la colección (UUID)
+        collection_name: Nombre amigable de la colección (para compatibilidad)
         llm_model: Modelo LLM solicitado
         similarity_top_k: Número de resultados a recuperar
         response_mode: Modo de síntesis de respuesta
@@ -441,8 +444,28 @@ async def create_query_engine(
     debug_handler = LlamaDebugHandler()
     callback_manager = CallbackManager([debug_handler])
     
+    # Si tenemos collection_id pero no collection_name, intentar obtener el nombre
+    if collection_id and (not collection_name or collection_name == "default"):
+        try:
+            supabase = get_supabase_client()
+            collection_result = await supabase.table("collections").select("name").eq("collection_id", collection_id).execute()
+            if collection_result.data and len(collection_result.data) > 0:
+                collection_name = collection_result.data[0].get("name", "default")
+        except Exception as e:
+            logger.warning(f"Error al obtener nombre de colección para ID {collection_id}: {str(e)}")
+    
+    # Si no tenemos collection_id pero sí collection_name, intentar obtener el ID
+    if not collection_id and collection_name and collection_name != "default":
+        try:
+            supabase = get_supabase_client()
+            collection_result = await supabase.table("collections").select("collection_id").eq("name", collection_name).eq("tenant_id", tenant_id).execute()
+            if collection_result.data and len(collection_result.data) > 0:
+                collection_id = collection_result.data[0].get("collection_id")
+        except Exception as e:
+            logger.warning(f"Error al obtener ID de colección para nombre {collection_name}: {str(e)}")
+            
     # Obtener vector store para el tenant
-    vector_store = get_tenant_vector_store(tenant_id, collection_name)
+    vector_store = get_tenant_vector_store(tenant_id, collection_name, collection_id)
     
     # Crear índice sobre el vector store
     index = VectorStoreIndex.from_vector_store(vector_store)
@@ -508,7 +531,8 @@ async def process_query(
     Args:
         request: Solicitud de consulta (QueryRequest)
             - query: Texto de la consulta a procesar
-            - collection_name: Nombre de la colección a consultar (opcional, default: "default")
+            - collection_id: ID único de la colección (UUID)
+            - collection_name: Nombre amigable de la colección (para compatibilidad)
             - filters: Filtros adicionales para la búsqueda (opcional)
             - similarity_top_k: Número de documentos a recuperar (opcional)
             - model: Modelo LLM a utilizar (opcional, se usa el predeterminado si no se especifica)
@@ -526,6 +550,8 @@ async def process_query(
                 - text: Fragmento de texto utilizado
                 - metadata: Metadatos asociados al documento
             - model: Modelo utilizado para generar la respuesta
+            - collection_id: ID único de la colección (si está disponible)
+            - collection_name: Nombre de la colección (para referencia)
             - total_tokens: Cantidad de tokens utilizados
             - processing_time: Tiempo total de procesamiento en segundos
     
@@ -540,18 +566,20 @@ async def process_query(
     
     tenant_id = tenant_info.tenant_id
     query_text = request.query.strip()
+    collection_id = request.collection_id
     collection_name = request.collection_name or "default"
     
     if not query_text:
         raise ServiceError(
             message="Consulta vacía",
             status_code=400,
-            error_code="EMPTY_QUERY"
+            error_code="empty_query"
         )
     
     # Crear motor de consulta para el tenant
     query_engine, debug_handler = await create_query_engine(
         tenant_info=tenant_info,
+        collection_id=collection_id,
         collection_name=collection_name,
         llm_model=request.llm_model,
         similarity_top_k=request.similarity_top_k or 4,
@@ -607,6 +635,7 @@ async def process_query(
         agent_id=agent_id,
         conversation_id=conversation_id,
         llm_model=request.llm_model or get_settings().default_llm_model,
+        collection_id=collection_id,
         collection_name=collection_name
     )
 

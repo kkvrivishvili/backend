@@ -82,7 +82,8 @@ class DocumentIngestionRequest(BaseModel):
     tenant_id: str
     documents: List[str]  # Contenido de texto de los documentos
     document_metadatas: List[DocumentMetadata]  # Metadatos para cada documento
-    collection_name: Optional[str] = "default"  # Colección/namespace para los documentos
+    collection_id: Optional[str] = None  # ID único de la colección
+    collection_name: Optional[str] = "default"  # Nombre amigable de la colección (para compatibilidad)
     agent_id: Optional[str] = None  # ID del agente (contexto específico)
     conversation_id: Optional[str] = None  # ID de la conversación (contexto específico)
 
@@ -104,7 +105,8 @@ class QueryRequest(BaseModel):
     """Solicitud para realizar una consulta RAG."""
     tenant_id: str
     query: str
-    collection_name: Optional[str] = "default"
+    collection_id: Optional[str] = None  # ID único de la colección
+    collection_name: Optional[str] = "default"  # Nombre amigable de la colección (para compatibilidad)
     llm_model: Optional[str] = None
     similarity_top_k: Optional[int] = 4
     additional_metadata_filter: Optional[Dict[str, Any]] = None
@@ -302,7 +304,8 @@ class ToolsListResponse(BaseResponse):
 
 class RAGConfig(BaseModel):
     """Configuración para consultas RAG."""
-    collection_name: str = "default"
+    collection_id: Optional[str] = None  # ID único de la colección
+    collection_name: str = "default"  # Nombre amigable de la colección
     similarity_top_k: int = 4
     llm_model: Optional[str] = None
     response_mode: str = "compact"
@@ -436,7 +439,8 @@ class DailyUsage(BaseModel):
 
 class CollectionDocCount(BaseModel):
     """Conteo de documentos por colección."""
-    collection_name: str
+    collection_id: str
+    collection_name: str  # Para compatibilidad
     count: int
 
 
@@ -482,7 +486,7 @@ class CollectionStatsResponse(BaseResponse):
     """Respuesta con estadísticas de una colección."""
     tenant_id: str
     collection_id: str
-    collection_name: str
+    collection_name: str  # Nombre amigable para mostrar
     chunks_count: int = 0
     unique_documents_count: int = 0
     queries_count: int = 0
@@ -493,12 +497,14 @@ class DeleteDocumentResponse(BaseResponse):
     """Respuesta para operación de eliminación de documento."""
     document_id: str
     deleted: bool
-    collection_name: Optional[str] = None
+    collection_id: Optional[str] = None
+    collection_name: Optional[str] = None  # Para compatibilidad
 
 
 class DeleteCollectionResponse(BaseResponse):
     """Respuesta para operación de eliminación de colección."""
-    collection_name: str
+    collection_id: str
+    collection_name: Optional[str] = None  # Para compatibilidad
     deleted: bool
     documents_deleted: int = 0
 

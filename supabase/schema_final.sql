@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS ai.tenant_stats (
 -- Tabla de colecciones
 CREATE TABLE IF NOT EXISTS ai.collections (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    collection_id UUID NOT NULL DEFAULT uuid_generate_v4(), -- UUID para identificación externa
     tenant_id UUID NOT NULL REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     description TEXT,
@@ -88,7 +89,8 @@ CREATE TABLE IF NOT EXISTS ai.collections (
     metadata JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
-    UNIQUE(tenant_id, name)
+    UNIQUE(tenant_id, name),
+    UNIQUE(tenant_id, collection_id)
 );
 
 -- Tabla de chunks de documento
@@ -98,7 +100,7 @@ CREATE TABLE IF NOT EXISTS ai.document_chunks (
     content TEXT NOT NULL,
     metadata JSONB NOT NULL,
     embedding VECTOR(1536),
-    collection_id UUID REFERENCES ai.collections(id),
+    collection_id UUID REFERENCES ai.collections(collection_id),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
 
@@ -154,9 +156,11 @@ CREATE TABLE IF NOT EXISTS ai.chat_history (
 CREATE TABLE IF NOT EXISTS ai.agent_collections (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     agent_id UUID NOT NULL REFERENCES ai.agent_configs(agent_id) ON DELETE CASCADE,
+    collection_id UUID REFERENCES ai.collections(collection_id),
     collection_name TEXT NOT NULL,
     tenant_id UUID NOT NULL REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    UNIQUE(agent_id, collection_id),
     UNIQUE(agent_id, collection_name)
 );
 
@@ -734,6 +738,38 @@ BEGIN
     OFFSET p_offset;
 END;
 $$;
+
+-- Función para migrar colecciones existentes y asignar UUIDs
+CREATE OR REPLACE FUNCTION ai.migrate_collections_to_uuid() RETURNS INTEGER AS $$
+DECLARE
+    total_migrated INTEGER := 0;
+    r RECORD;
+BEGIN
+    -- Para cada colección que no tenga collection_id asignado
+    FOR r IN SELECT id FROM ai.collections WHERE collection_id IS NULL
+    LOOP
+        -- Asignar un UUID nuevo
+        UPDATE ai.collections 
+        SET collection_id = uuid_generate_v4()
+        WHERE id = r.id;
+        
+        total_migrated := total_migrated + 1;
+    END LOOP;
+    
+    -- Actualizar metadatos en document_chunks para incluir collection_id
+    UPDATE ai.document_chunks dc
+    SET metadata = jsonb_set(
+        metadata, 
+        '{collection_id}', 
+        to_jsonb(c.collection_id::text)
+    )
+    FROM ai.collections c
+    WHERE c.id = (dc.metadata->>'collection')::UUID 
+    AND dc.metadata->>'collection_id' IS NULL;
+    
+    RETURN total_migrated;
+END;
+$$ LANGUAGE plpgsql;
 
 -- POLÍTICAS DE SEGURIDAD ROW LEVEL SECURITY ------------------------------------
 

@@ -124,18 +124,24 @@ add_example_to_endpoint(
     path="/embed",
     method="post",
     request_example={
-        "text": "Este texto será convertido a un vector de embedding",
-        "model": "text-embedding-3-small",
+        "texts": ["Este es un texto de ejemplo para generar un embedding vectorial", "Este es otro texto para el mismo proceso"],
+        "model": "text-embedding-ada-002",
+        "collection_id": "550e8400-e29b-41d4-a716-446655440000",
+        "collection_name": "documentos_tecnicos",
         "cache_enabled": True
     },
     response_example={
         "success": True,
-        "message": "Embedding generado exitosamente",
-        "embedding": [0.0231, -0.0345, 0.0721, 0.0123, -0.0892],  # Truncado para brevedad
-        "model": "text-embedding-3-small",
-        "dimensions": 1536,
-        "processing_time": 0.235
-    }
+        "message": "Embeddings generados exitosamente",
+        "embeddings": [
+            [0.0023, -0.0118, 0.0074, "...omitido por brevedad..."],
+            [0.0043, -0.0157, 0.0102, "...omitido por brevedad..."]
+        ],
+        "model": "text-embedding-ada-002",
+        "collection_id": "550e8400-e29b-41d4-a716-446655440000", 
+        "collection_name": "documentos_tecnicos"
+    },
+    request_schema_description="Solicitud para generar embeddings vectoriales de múltiples textos"
 )
 
 add_example_to_endpoint(
@@ -143,32 +149,61 @@ add_example_to_endpoint(
     path="/embed-batch",
     method="post",
     request_example={
-        "texts": [
-            {"text": "Primer texto de ejemplo", "id": "doc1"},
-            {"text": "Segundo texto de ejemplo", "id": "doc2"}
+        "items": [
+            {
+                "text": "Este es un texto de ejemplo para procesamiento por lotes",
+                "metadata": {
+                    "source": "documento1.pdf",
+                    "page": 5,
+                    "document_id": "doc_123"
+                }
+            },
+            {
+                "text": "Otro fragmento de texto con metadatos diferentes",
+                "metadata": {
+                    "source": "documento2.docx",
+                    "page": 12,
+                    "document_id": "doc_456"
+                }
+            }
         ],
-        "model": "text-embedding-3-small",
+        "model": "text-embedding-ada-002",
+        "collection_id": "550e8400-e29b-41d4-a716-446655440000",
+        "collection_name": "documentos_tecnicos",
         "cache_enabled": True
     },
     response_example={
         "success": True,
-        "message": "Embeddings generados exitosamente",
+        "message": "Embeddings procesados exitosamente",
         "embeddings": [
+            [0.0023, -0.0118, 0.0074, "...omitido por brevedad..."],
+            [0.0043, -0.0157, 0.0102, "...omitido por brevedad..."]
+        ],
+        "items": [
             {
-                "id": "doc1",
-                "embedding": [0.0231, -0.0345, 0.0721],  # Truncado para brevedad
-                "cached": False
+                "text": "Este es un texto de ejemplo para procesamiento por lotes",
+                "metadata": {
+                    "source": "documento1.pdf",
+                    "page": 5,
+                    "document_id": "doc_123"
+                }
             },
             {
-                "id": "doc2",
-                "embedding": [0.0156, -0.0127, 0.0498],  # Truncado para brevedad
-                "cached": False
+                "text": "Otro fragmento de texto con metadatos diferentes",
+                "metadata": {
+                    "source": "documento2.docx",
+                    "page": 12,
+                    "document_id": "doc_456"
+                }
             }
         ],
-        "model": "text-embedding-3-small",
-        "dimensions": 1536,
-        "processing_time": 0.358
-    }
+        "model": "text-embedding-ada-002",
+        "collection_id": "550e8400-e29b-41d4-a716-446655440000",
+        "collection_name": "documentos_tecnicos",
+        "processing_time": 0.85,
+        "total_tokens": 42
+    },
+    request_schema_description="Solicitud para generar embeddings vectoriales en lote con metadatos asociados"
 )
 
 add_example_to_endpoint(
@@ -433,8 +468,10 @@ async def generate_embeddings(
     
     Args:
         request: Solicitud con textos para generar embeddings (EmbeddingRequest)
-            - text: Lista de textos para vectorizar
+            - texts: Lista de textos para vectorizar
             - model: Modelo a utilizar (opcional, se usa el predeterminado si no se especifica)
+            - collection_id: ID único de la colección (UUID)
+            - collection_name: Nombre amigable de la colección (para compatibilidad)
             - cache_enabled: Si se debe utilizar/actualizar caché (predeterminado: True)
         tenant_info: Información del tenant (inyectada mediante token de autenticación)
         
@@ -443,6 +480,8 @@ async def generate_embeddings(
             - success: True si la operación fue exitosa
             - embeddings: Lista de vectores de embeddings en formato de lista de flotantes
             - model: Modelo utilizado para generar los embeddings
+            - collection_id: ID único de la colección (si está disponible)
+            - collection_name: Nombre de la colección (para referencia)
             - total_tokens: Cantidad de tokens procesados
     
     Raises:
@@ -450,70 +489,71 @@ async def generate_embeddings(
         HTTPException: Para errores de validación o de autorización
     """
     start_time = time.time()
-    tenant_id = tenant_info.tenant_id
     
-    # Check quotas
+    # Obtener los IDs de contexto del decorador
+    tenant_id = get_current_tenant_id()
+    agent_id = get_current_agent_id()
+    conversation_id = get_current_conversation_id()
+    
+    # Verificar cuotas del tenant
     await check_tenant_quotas(tenant_info)
     
-    # Get authorized model for this tenant
-    model_name = validate_model_access(
-        tenant_info, 
-        request.model or settings.default_embedding_model,
-        model_type="embedding"
-    )
-    
-    # Check metadata validity
-    metadata = request.metadata or []
-    if metadata and len(metadata) != len(request.texts):
+    # Obtener textos a procesar
+    texts = request.texts
+    if not texts:
         raise ServiceError(
-            message="Si se proporciona metadata, debe tener la misma longitud que texts",
+            message="No se proporcionaron textos para generar embeddings",
             status_code=400,
-            error_code="INVALID_METADATA"
+            error_code="missing_texts"
         )
     
-    # Pad metadata if needed
-    while len(metadata) < len(request.texts):
-        metadata.append({})
+    # Obtener parámetros de la solicitud
+    model_name = request.model or settings.default_embedding_model
+    cache_enabled = request.cache_enabled
+    collection_id = request.collection_id
+    collection_name = request.collection_name or None
     
-    # Add context info to metadata
-    for meta in metadata:
-        meta["tenant_id"] = tenant_id
-        meta["agent_id"] = get_current_agent_id()
-        meta["conversation_id"] = get_current_conversation_id()
+    # Validar acceso al modelo solicitado
+    validate_model_access(tenant_info, model_name)
     
-    # Count cache hits for stats
-    cache_hits = 0
-    if redis_client:
-        for text in request.texts:
-            if get_cached_embedding(text, tenant_id, model_name, get_current_agent_id(), get_current_conversation_id()):
-                cache_hits += 1
+    # Crear proveedor de embeddings con caché
+    embedding_provider = CachedEmbeddingProvider(model_name=model_name)
     
-    # Initialize embedding model - no es necesario pasar los IDs explícitamente
-    embed_model = CachedEmbeddingProvider(
-        model_name=model_name
-    )
-    
-    # Generate embeddings
-    embeddings = await embed_model._aget_text_embedding_batch(request.texts)
-    
-    # Track usage
-    await track_embedding_usage(
-        tenant_id,
-        request.texts,
-        model_name,
-        cache_hits,
-        get_current_agent_id(),
-        get_current_conversation_id()
-    )
-    
-    return EmbeddingResponse(
-        success=True,
-        embeddings=embeddings,
-        model=model_name,
-        dimensions=len(embeddings[0]) if embeddings else settings.default_embedding_dimension,
-        processing_time=time.time() - start_time,
-        cached_count=cache_hits
-    )
+    try:
+        # Generar embeddings con soporte de caché
+        embeddings = await embedding_provider._aget_text_embedding_batch(texts)
+        
+        # Registrar uso
+        tokens_estimate = sum(len(text.split()) * 1.3 for text in texts)  # Estimación de tokens
+        await track_embedding_usage(
+            tenant_id=tenant_id,
+            model=model_name,
+            tokens=int(tokens_estimate),
+            agent_id=agent_id,
+            conversation_id=conversation_id
+        )
+        
+        processing_time = time.time() - start_time
+        logger.info(f"Generados {len(embeddings)} embeddings en {processing_time:.2f}s con modelo {model_name}")
+        
+        return EmbeddingResponse(
+            success=True,
+            message="Embeddings generados exitosamente",
+            embeddings=embeddings,
+            model=model_name,
+            collection_id=collection_id,
+            collection_name=collection_name,
+            processing_time=processing_time,
+            total_tokens=int(tokens_estimate)
+        )
+        
+    except Exception as e:
+        logger.error(f"Error generando embeddings: {str(e)}", exc_info=True)
+        raise ServiceError(
+            message=f"Error generando embeddings: {str(e)}",
+            status_code=500,
+            error_code="embedding_generation_error"
+        )
 
 
 @app.post("/embed-batch", response_model=EmbeddingResponse)
@@ -549,6 +589,8 @@ async def batch_generate_embeddings(
                 - text: Texto para vectorizar
                 - metadata: Diccionario con metadatos asociados al texto
             - model: Modelo a utilizar (opcional, se usa el predeterminado si no se especifica)
+            - collection_id: ID único de la colección (UUID)
+            - collection_name: Nombre amigable de la colección (para compatibilidad)
             - cache_enabled: Si se debe utilizar/actualizar caché (predeterminado: True)
         tenant_info: Información del tenant (inyectada mediante token de autenticación)
         
@@ -558,6 +600,8 @@ async def batch_generate_embeddings(
             - embeddings: Lista de vectores de embeddings en formato de lista de flotantes
             - items: Lista de objetos procesados con sus metadatos originales
             - model: Modelo utilizado para generar los embeddings
+            - collection_id: ID único de la colección (si está disponible)
+            - collection_name: Nombre de la colección (para referencia)
             - total_tokens: Cantidad de tokens procesados
     
     Raises:
@@ -565,61 +609,93 @@ async def batch_generate_embeddings(
         HTTPException: Para errores de validación o de autorización
     """
     start_time = time.time()
-    tenant_id = tenant_info.tenant_id
     
-    # Check quotas
+    # Obtener los IDs de contexto del decorador
+    tenant_id = get_current_tenant_id()
+    agent_id = get_current_agent_id()
+    conversation_id = get_current_conversation_id()
+    
+    # Verificar cuotas del tenant
     await check_tenant_quotas(tenant_info)
     
-    # Get authorized model for this tenant
-    model_name = validate_model_access(
-        tenant_info, 
-        request.model or settings.default_embedding_model,
-        model_type="embedding"
-    )
+    # Verificar que hay items para procesar
+    if not request.items or len(request.items) == 0:
+        raise ServiceError(
+            message="No se proporcionaron items para generar embeddings",
+            status_code=400,
+            error_code="missing_items"
+        )
     
-    # Extract texts and metadata
-    texts = [item.text for item in request.items]
-    metadata = [item.metadata for item in request.items]
+    # Obtener parámetros de la solicitud
+    model_name = request.model or settings.default_embedding_model
+    cache_enabled = request.cache_enabled
+    collection_id = request.collection_id
+    collection_name = request.collection_name or None
     
-    # Add context info to metadata
-    for meta in metadata:
-        meta["tenant_id"] = tenant_id
-        meta["agent_id"] = get_current_agent_id()
-        meta["conversation_id"] = get_current_conversation_id()
+    # Validar acceso al modelo solicitado
+    validate_model_access(tenant_info, model_name)
     
-    # Count cache hits for stats
-    cache_hits = 0
-    if redis_client:
-        for text in texts:
-            if get_cached_embedding(text, tenant_id, model_name, get_current_agent_id(), get_current_conversation_id()):
-                cache_hits += 1
+    # Extraer textos de los items manteniendo el mapeo con metadata
+    texts = []
+    for item in request.items:
+        if not item.text or not item.text.strip():
+            logger.warning("Item sin texto detectado, se omitirá")
+            continue
+        
+        # Añadir información de tenant y colección a la metadata
+        if not item.metadata:
+            item.metadata = {}
+            
+        # Asegurarse que la metadata tenga campos requeridos
+        item.metadata["tenant_id"] = tenant_id
+        
+        # Agregar collection_id y collection_name a metadata si están disponibles
+        if collection_id:
+            item.metadata["collection_id"] = collection_id
+        if collection_name:
+            item.metadata["collection"] = collection_name
+            
+        texts.append(item.text)
     
-    # Initialize embedding model - no es necesario pasar los IDs explícitamente
-    embed_model = CachedEmbeddingProvider(
-        model_name=model_name
-    )
+    # Crear proveedor de embeddings con caché
+    embedding_provider = CachedEmbeddingProvider(model_name=model_name)
     
-    # Generate embeddings
-    embeddings = await embed_model._aget_text_embedding_batch(texts)
-    
-    # Track usage
-    await track_embedding_usage(
-        tenant_id,
-        texts,
-        model_name,
-        cache_hits,
-        get_current_agent_id(),
-        get_current_conversation_id()
-    )
-    
-    return EmbeddingResponse(
-        success=True,
-        embeddings=embeddings,
-        model=model_name,
-        dimensions=len(embeddings[0]) if embeddings else settings.default_embedding_dimension,
-        processing_time=time.time() - start_time,
-        cached_count=cache_hits
-    )
+    try:
+        # Generar embeddings con soporte de caché
+        embeddings = await embedding_provider._aget_text_embedding_batch(texts)
+        
+        # Registrar uso
+        tokens_estimate = sum(len(text.split()) * 1.3 for text in texts)  # Estimación de tokens
+        await track_embedding_usage(
+            tenant_id=tenant_id,
+            model=model_name,
+            tokens=int(tokens_estimate),
+            agent_id=agent_id,
+            conversation_id=conversation_id
+        )
+        
+        processing_time = time.time() - start_time
+        logger.info(f"Generados {len(embeddings)} embeddings en {processing_time:.2f}s con modelo {model_name}")
+        
+        return EmbeddingResponse(
+            success=True,
+            message="Embeddings procesados exitosamente",
+            embeddings=embeddings,
+            items=request.items,
+            model=model_name,
+            collection_id=collection_id,
+            collection_name=collection_name,
+            processing_time=processing_time,
+            total_tokens=int(tokens_estimate)
+        )
+        
+    except Exception as e:
+        logger.error(f"Error generando embeddings en lote: {str(e)}", exc_info=True)
+        raise ServiceError(
+            message=f"Error generando embeddings en lote: {str(e)}",
+            status_code=500,
+            error_code="batch_embedding_error"
+        )
 
 
 @app.get("/models", response_model=ModelListResponse, tags=["models"])
