@@ -62,6 +62,13 @@ ON public.public_sessions(agent_id);
 CREATE INDEX IF NOT EXISTS idx_public_sessions_session
 ON public.public_sessions(session_id);
 
+-- Añadir restricción de llave foránea separada para permitir creación en cualquier orden
+ALTER TABLE public.public_sessions
+    ADD CONSTRAINT fk_public_sessions_agent
+    FOREIGN KEY (agent_id)
+    REFERENCES ai.agent_configs(agent_id)
+    ON DELETE CASCADE;
+
 -- ===========================================
 -- PARTE 3: TABLA DE CONFIGURACIONES MULTI-TENANT
 -- ===========================================

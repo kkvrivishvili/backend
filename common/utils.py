@@ -102,21 +102,45 @@ async def prepare_service_request(url: str, data: Dict[str, Any],
     if conversation_id is not None and "conversation_id" not in data:
         data["conversation_id"] = conversation_id
     
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            logger.debug(f"Enviando solicitud a {url} con contexto: tenant={tenant_id}, agent={agent_id}, conversation={conversation_id}")
-            response = await client.post(url, json=data)
-            
-            # Verificar respuesta
-            if response.status_code != 200:
-                logger.error(f"Error en solicitud a {url}: {response.status_code} - {response.text}")
-                raise ServiceError(f"Error en solicitud: {response.status_code} - {response.text}")
+    # Añadir reintentos y timeout variable
+    max_retries = 3
+    base_timeout = 30.0
+    retry_count = 0
+    
+    import httpx
+    import asyncio
+    
+    while retry_count < max_retries:
+        try:
+            timeout = base_timeout * (retry_count + 1)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                logger.debug(f"Enviando solicitud a {url} con contexto: tenant={tenant_id}, agent={agent_id}, conversation={conversation_id}")
+                headers = {"X-Tenant-ID": tenant_id}
+                if agent_id:
+                    headers["X-Agent-ID"] = agent_id
+                if conversation_id:
+                    headers["X-Conversation-ID"] = conversation_id
                 
-            return response.json()
-    except httpx.HTTPError as e:
-        logger.error(f"Error HTTP en solicitud a {url}: {str(e)}")
-        raise ServiceError(f"Error de conexión: {str(e)}")
-    except Exception as e:
-        logger.error(f"Error al enviar solicitud a {url}: {str(e)}")
-        raise ServiceError(f"Error en solicitud: {str(e)}")
+                response = await client.post(url, json=data, headers=headers)
+                
+                # Verificar respuesta
+                if response.status_code != 200:
+                    logger.error(f"Error en solicitud a {url}: {response.status_code} - {response.text}")
+                    retry_count += 1
+                    if retry_count >= max_retries:
+                        raise ServiceError(f"Error en solicitud: {response.status_code} - {response.text}")
+                    logger.warning(f"Reintentando solicitud ({retry_count}/{max_retries})...")
+                    await asyncio.sleep(1.0 * retry_count)  # Backoff lineal
+                    continue
+                    
+                return response.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Error HTTP en solicitud a {url}: {str(e)}")
+            retry_count += 1
+            if retry_count >= max_retries:
+                raise ServiceError(f"Error de conexión: {str(e)}")
+            logger.warning(f"Reintentando solicitud ({retry_count}/{max_retries})...")
+            await asyncio.sleep(1.0 * retry_count)
+        except Exception as e:
+            logger.error(f"Error al enviar solicitud a {url}: {str(e)}")
+            raise ServiceError(f"Error en solicitud: {str(e)}")

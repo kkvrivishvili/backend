@@ -246,7 +246,7 @@ def get_tenant_configurations(
         
         # Si no está en caché, consultar a la base de datos
         client = get_supabase_client()
-        query = client.table("ai.tenant_configurations").select(
+        query = client.table(get_table_name("tenant_configurations")).select(
             "config_key", "config_value", "config_type", "is_sensitive"
         ).eq("tenant_id", tenant_id).eq("environment", environment)
         
@@ -442,7 +442,7 @@ def set_tenant_configuration(
         if description:
             data["description"] = description
             
-        client.table("ai.tenant_configurations").upsert(data).execute()
+        client.table(get_table_name("tenant_configurations")).upsert(data).execute()
         
         # Invalidar caché
         apply_tenant_configuration_changes(tenant_id, environment, scope, scope_id)
@@ -613,7 +613,7 @@ def is_tenant_active(tenant_id: str) -> bool:
     
     try:
         client = get_supabase_client()
-        result = client.table("public.tenants").select("is_active").eq("tenant_id", tenant_id).execute()
+        result = client.table(get_table_name("tenants")).select("is_active").eq("tenant_id", tenant_id).execute()
         
         # Verificar que el tenant exista y esté activo
         is_active = False

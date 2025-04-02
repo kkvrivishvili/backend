@@ -15,7 +15,7 @@ else
     # Valores por defecto para pruebas locales
     export EMBEDDING_SERVICE_URL="http://localhost:8001"
     export QUERY_SERVICE_URL="http://localhost:8002"
-    export INGESTION_SERVICE_URL="http://localhost:8000"
+    export INGESTION_SERVICE_URL="http://localhost:8004"
     export AGENT_SERVICE_URL="http://localhost:8003"
 fi
 

@@ -5,7 +5,7 @@
 
 # Obtener configuraciones desde variables de entorno (establecidas por config.py)
 OLLAMA_URL="${OLLAMA_API_URL:-http://ollama:11434}"
-WAIT_TIMEOUT="${OLLAMA_WAIT_TIMEOUT:-300}"
+WAIT_TIMEOUT="${OLLAMA_WAIT_TIMEOUT:-600}"  # Aumentado a 10 minutos
 PULL_MODELS="${OLLAMA_PULL_MODELS:-true}"
 EMBEDDING_MODEL="${DEFAULT_OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}"
 LLM_MODEL="${DEFAULT_OLLAMA_LLM_MODEL:-llama2}"
@@ -55,6 +55,25 @@ if [ "$PULL_MODELS" = "true" ]; then
   fi
   
   log_message "Modelos descargados exitosamente"
+  
+  # Verificar que los modelos se descargaron correctamente
+  echo "Verificando disponibilidad de modelos..."
+     
+  # Verificar modelo de embeddings
+  if ! curl -s ${OLLAMA_URL}/api/tags | grep -q "\"${EMBEDDING_MODEL}\""; then
+      log_message "ADVERTENCIA: Modelo ${EMBEDDING_MODEL} no se encuentra disponible"
+  else
+      log_message "Modelo ${EMBEDDING_MODEL} verificado correctamente"
+  fi
+     
+  # Verificar modelo LLM
+  if [ ! -z "$LLM_MODEL" ]; then
+      if ! curl -s ${OLLAMA_URL}/api/tags | grep -q "\"${LLM_MODEL}\""; then
+          log_message "ADVERTENCIA: Modelo ${LLM_MODEL} no se encuentra disponible"
+      else
+          log_message "Modelo ${LLM_MODEL} verificado correctamente"
+      fi
+  fi
 else
   log_message "Omitiendo descarga de modelos (OLLAMA_PULL_MODELS=false)"
 fi
