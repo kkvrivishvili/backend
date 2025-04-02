@@ -93,6 +93,7 @@ class Settings(BaseSettings):
     agent_default_temperature: float = Field(0.7, description="Temperatura para LLM")
     max_tokens_per_response: int = Field(2048, description="Máximo de tokens por respuesta")
     system_prompt_template: str = Field("Eres un asistente AI llamado {agent_name}. {agent_instructions}", description="Plantilla para prompt de sistema")
+    agent_default_message_limit: int = Field(50, description="Número máximo de mensajes por defecto para el agente")
     
     # =========== Configuración de Embeddings ===========
     default_embedding_model: str = Field("text-embedding-3-small", description="Modelo de embeddings por defecto")
@@ -296,7 +297,7 @@ def get_tier_rate_limit(tier: str) -> int:
         tier: Nivel de suscripción ('free', 'pro', 'business')
         
     Returns:
-        int: Límite de tasa en peticiones por minuto
+        int: Número de solicitudes permitidas en el periodo
     """
     settings = get_settings()
     limits = {
@@ -305,6 +306,59 @@ def get_tier_rate_limit(tier: str) -> int:
         "business": settings.rate_limit_business_tier
     }
     return limits.get(tier, settings.rate_limit_free_tier)
+
+
+def get_tenant_rate_limit(tenant_id: str, tier: str, service_name: Optional[str] = None) -> int:
+    """
+    Obtiene el límite de tasa específico para un tenant, considerando las configuraciones personalizadas.
+    
+    Esta función extiende get_tier_rate_limit para incluir configuraciones 
+    específicas por tenant definidas en el sistema multi-tenant.
+    
+    Args:
+        tenant_id: ID del tenant
+        tier: Nivel de suscripción ('free', 'pro', 'business')
+        service_name: Nombre del servicio (opcional)
+        
+    Returns:
+        int: Límite de solicitudes personalizado para el tenant
+    """
+    # Obtener límite base según tier
+    default_limit = get_tier_rate_limit(tier)
+    
+    try:
+        # Obtener configuraciones específicas del tenant
+        tenant_configs = {}
+        if service_name:
+            # Si hay servicio especificado, cargar con ese ámbito
+            tenant_configs = get_effective_configurations(
+                tenant_id=tenant_id,
+                service_name=service_name,
+                environment=get_settings().environment
+            )
+        else:
+            # Cargar configuraciones generales de tenant
+            tenant_configs = get_effective_configurations(
+                tenant_id=tenant_id,
+                environment=get_settings().environment
+            )
+        
+        # Comprobar si existe configuración específica para rate limiting
+        rate_limit_key = f"rate_limit_{tier}_tier"
+        if rate_limit_key in tenant_configs:
+            try:
+                # Convertir a entero y devolver
+                return int(tenant_configs[rate_limit_key])
+            except (ValueError, TypeError):
+                # Si hay error en conversión, usar valor por defecto
+                logger.warning(f"Valor inválido para {rate_limit_key} en tenant {tenant_id}: {tenant_configs[rate_limit_key]}")
+    
+    except Exception as e:
+        # Si hay cualquier error, usar valor predeterminado
+        logger.warning(f"Error obteniendo configuración de rate limit para tenant {tenant_id}: {str(e)}")
+    
+    # Si no se encontró configuración o hubo error, retornar valor por defecto
+    return default_limit
 
 
 def get_tier_limits(tier: str) -> Dict[str, Any]:
@@ -422,3 +476,43 @@ def get_service_port(service_name: str) -> int:
         "agent": settings.agent_service_port
     }
     return ports.get(service_name, 8004)  # Puerto por defecto si no se encuentra
+
+
+# Funciones de entorno para configuración
+def is_development_environment() -> bool:
+    """
+    Detecta si el entorno actual es de desarrollo.
+    
+    Returns:
+        bool: True si estamos en entorno de desarrollo
+    """
+    # Verificar variables de entorno comunes para identificar desarrollo
+    env_vars = os.environ.get("CONFIG_ENVIRONMENT", "").lower()
+    return (
+        env_vars in ["development", "dev", "local", ""] or
+        os.environ.get("DEBUG", "").lower() in ["true", "1", "yes"]
+    )
+
+def should_use_mock_config() -> bool:
+    """
+    Determina si se deben usar configuraciones mock.
+    
+    Se usarán configuraciones mock si:
+    1. Estamos en entorno de desarrollo Y
+    2. No hay conexión a Supabase o no hay configuraciones
+    
+    Returns:
+        bool: True si se deben usar configuraciones mock
+    """
+    if not is_development_environment():
+        return False
+        
+    # Verificar si tenemos valores básicos de Supabase
+    supabase_url = os.environ.get("SUPABASE_URL", "")
+    supabase_key = os.environ.get("SUPABASE_KEY", "")
+    
+    # Si no tenemos credenciales de Supabase, usar mock
+    if not supabase_url or not supabase_key or supabase_url == "http://localhost:54321":
+        return True
+        
+    return False

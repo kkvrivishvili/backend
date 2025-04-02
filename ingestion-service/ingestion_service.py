@@ -23,9 +23,9 @@ from llama_index.core.schema import MetadataMode
 from common.models import (
     TenantInfo, DocumentIngestionRequest, DocumentMetadata, 
     IngestionResponse, HealthResponse, DeleteDocumentResponse, DeleteCollectionResponse,
-    CollectionCreationResponse, CollectionInfo
+    CollectionCreationResponse, CollectionInfo, CacheClearResponse
 )
-from common.auth import verify_tenant, check_tenant_quotas
+from common.auth import verify_tenant, check_tenant_quotas, get_auth_info
 from common.config import get_settings, invalidate_settings_cache
 from common.errors import setup_error_handling, handle_service_error_simple, ServiceError
 from common.supabase import get_supabase_client, get_tenant_vector_store
@@ -267,22 +267,19 @@ app.add_middleware(
 )
 
 # Función para generar embeddings a través del servicio de embeddings
-@with_tenant_context
-async def generate_embeddings(texts: List[str]) -> List[List[float]]:
+async def generate_embeddings(texts: List[str], tenant_id: str) -> List[List[float]]:
     """
     Genera embeddings para una lista de textos.
     
     Args:
         texts: Lista de textos
+        tenant_id: ID del tenant para el contexto de generación
         
     Returns:
         List[List[float]]: Lista de vectores embedding
     """
     if not texts:
         return []
-    
-    # El tenant_id ya está disponible en el contexto gracias al decorador
-    tenant_id = get_current_tenant_id()
     
     try:
         settings = get_settings()
@@ -294,7 +291,7 @@ async def generate_embeddings(texts: List[str]) -> List[List[float]]:
             "texts": texts
         }
         
-        # tenant_id se propaga automáticamente
+        # Pasar tenant_id explícitamente a la función de solicitud
         result = await prepare_service_request(
             f"{settings.embedding_service_url}/embed",
             payload,
@@ -409,7 +406,7 @@ async def index_documents_task(node_data_list: List[Dict[str, Any]], collection_
         
         # Generar embeddings para los textos
         texts = [node["text"] for node in node_data_list]
-        embeddings = await generate_embeddings(texts)
+        embeddings = await generate_embeddings(texts, tenant_id)
         
         # Insertar en Supabase con sus metadatos
         data_to_insert = []
@@ -469,7 +466,7 @@ async def create_collection(
     único (UUID) que se utiliza en operaciones posteriores.
     
     ## Flujo de procesamiento
-    1. Validación de permisos del tenant
+    1. Validación de permisos y cuotas del tenant
     2. Verificación de límites de colecciones según plan
     3. Generación de UUID para la colección
     4. Registro en base de datos
@@ -487,17 +484,26 @@ async def create_collection(
     
     Raises:
         ServiceError: Si ocurre un error durante la creación o hay duplicados
+        HTTPException: Para errores de validación o de autorización
     """
+    # Obtener tenant_id validado
+    tenant_id = tenant_info.tenant_id
+    
+    # Verificar cuotas del tenant
+    await check_tenant_quotas(tenant_info)
+    
     try:
-        tenant_id = tenant_info.tenant_id
-        
         # Generar UUID para la colección
         collection_id = str(uuid.uuid4())
         
         # Conectar a Supabase
         supabase = get_supabase_client()
         if not supabase:
-            raise ServiceError("Error conectando a Supabase", "DATABASE_ERROR")
+            raise ServiceError(
+                message="Error conectando a Supabase", 
+                error_code="DATABASE_ERROR",
+                status_code=500
+            )
         
         # Verificar si ya existe una colección con el mismo nombre
         result = supabase.table("ai.collections").select("id") \
@@ -506,7 +512,12 @@ async def create_collection(
             .execute()
         
         if len(result.data) > 0:
-            raise ServiceError(f"Ya existe una colección con el nombre '{name}'", "DUPLICATE_COLLECTION")
+            logger.warning(f"Intento de crear colección duplicada '{name}' para tenant {tenant_id}")
+            raise ServiceError(
+                message=f"Ya existe una colección con el nombre '{name}'",
+                error_code="DUPLICATE_COLLECTION",
+                status_code=400
+            )
         
         # Insertar en la tabla de colecciones
         created_at = datetime.now().isoformat()
@@ -521,9 +532,13 @@ async def create_collection(
         }).execute()
         
         if not result.data:
-            raise ServiceError("Error al crear la colección", "CREATION_FAILED")
+            raise ServiceError(
+                message="Error al crear la colección", 
+                error_code="CREATION_FAILED",
+                status_code=500
+            )
         
-        logger.info(f"Colección creada: {collection_id} - {name} para tenant {tenant_id}")
+        logger.info(f"Colección creada: {collection_id} - '{name}' para tenant {tenant_id}")
         
         # Invalidar caché de configuraciones para este tenant
         invalidate_settings_cache(tenant_id)
@@ -538,18 +553,15 @@ async def create_collection(
             updated_at=created_at
         )
         
-    except ServiceError as e:
-        return handle_service_error_simple(
-            e,
-            status_code=400,
-            error_code=e.error_code
-        )
+    except ServiceError:
+        # Re-lanzar ServiceError para que sea manejado por el decorador handle_service_error_simple
+        raise
     except Exception as e:
-        logger.error(f"Error creando colección: {str(e)}")
-        return handle_service_error_simple(
-            ServiceError(f"Error al crear la colección: {str(e)}", "INTERNAL_ERROR"),
-            status_code=500,
-            error_code="CREATION_FAILED"
+        logger.exception(f"Error inesperado creando colección '{name}' para tenant {tenant_id}: {str(e)}")
+        raise ServiceError(
+            message=f"Error al crear la colección: {str(e)}",
+            error_code="INTERNAL_ERROR",
+            status_code=500
         )
 
 @app.delete(
@@ -559,6 +571,7 @@ async def create_collection(
     summary="Eliminar colección",
     description="Elimina una colección completa y todos sus documentos"
 )
+@with_tenant_context
 async def delete_collection(
     collection_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
@@ -597,7 +610,11 @@ async def delete_collection(
         # Conectar a Supabase
         supabase = get_supabase_client()
         if not supabase:
-            raise ServiceError("Error conectando a Supabase", "DATABASE_ERROR")
+            raise ServiceError(
+                message="Error conectando a Supabase", 
+                error_code="DATABASE_ERROR",
+                status_code=500
+            )
         
         # Verificar existencia de la colección
         result = supabase.table("ai.collections").select("name") \
@@ -606,7 +623,11 @@ async def delete_collection(
             .execute()
         
         if not result.data:
-            raise ServiceError(f"Colección no encontrada: {collection_id}", "COLLECTION_NOT_FOUND")
+            raise ServiceError(
+                message=f"Colección no encontrada: {collection_id}", 
+                error_code="COLLECTION_NOT_FOUND",
+                status_code=404
+            )
         
         collection_name = result.data[0]["name"]
         
@@ -640,17 +661,17 @@ async def delete_collection(
         )
         
     except ServiceError as e:
-        return handle_service_error_simple(
-            e, 
-            status_code=404 if e.error_code == "COLLECTION_NOT_FOUND" else 400,
-            error_code=e.error_code
+        raise ServiceError(
+            message=e.message,
+            error_code=e.error_code,
+            status_code=e.status_code
         )
     except Exception as e:
-        logger.error(f"Error eliminando colección: {str(e)}")
-        return handle_service_error_simple(
-            ServiceError(f"Error al eliminar la colección: {str(e)}", "INTERNAL_ERROR"),
-            status_code=500,
-            error_code="DELETE_FAILED"
+        logger.error(f"Error al eliminar la colección: {str(e)}")
+        raise ServiceError(
+            message=f"Error al eliminar la colección: {str(e)}",
+            error_code="INTERNAL_ERROR",
+            status_code=500
         )
 
 @app.post(
@@ -660,6 +681,7 @@ async def delete_collection(
     summary="Ingerir documentos",
     description="Ingiere documentos en una colección específica"
 )
+@with_tenant_context
 async def ingest_documents_to_collection(
     collection_id: str,
     request: DocumentIngestionRequest,
@@ -684,6 +706,7 @@ async def ingest_documents_to_collection(
         collection_id: ID único de la colección (UUID) donde ingerir los documentos
         request: Solicitud con documentos a ingerir
             - documents: Lista de documentos con texto y metadatos
+            - document_metadatas: Lista opcional de metadatos para cada documento
         background_tasks: Tareas en segundo plano (inyectado por FastAPI)
         tenant_info: Información del tenant (inyectado mediante autenticación)
         
@@ -698,16 +721,15 @@ async def ingest_documents_to_collection(
     # Forzar el collection_id de la ruta en la solicitud
     request.collection_id = collection_id
     
-    # Los IDs de contexto ya están disponibles gracias al decorador
+    # Obtener tenant_id del tenant_info validado
     tenant_id = tenant_info.tenant_id
-    agent_id = get_current_agent_id()
-    conversation_id = get_current_conversation_id()
     
-    # Validar cuota y límites del tenant
-    await check_tenant_quotas(tenant_id)
+    # Validar cuota y límites del tenant - pasar objeto tenant_info completo
+    await check_tenant_quotas(tenant_info)
     
     # Verificar que hay documentos para procesar
     if not request.documents or len(request.documents) == 0:
+        logger.warning(f"Solicitud de ingestión sin documentos para tenant {tenant_id}")
         return IngestionResponse(
             success=False,
             message="No se proporcionaron documentos para procesar",
@@ -721,17 +743,21 @@ async def ingest_documents_to_collection(
     
     try:
         for i, document_text in enumerate(request.documents):
-            # Obtener metadatos para este documento
-            metadata = request.document_metadatas[i] if i < len(request.document_metadatas) else DocumentMetadata(
-                source="api",
-                document_type="text",
-                tenant_id=tenant_id
-            )
+            # Obtener metadatos para este documento - con mejor validación de límites
+            if request.document_metadatas and i < len(request.document_metadatas):
+                metadata = request.document_metadatas[i]
+            else:
+                # Metadata por defecto si no se proporciona
+                metadata = DocumentMetadata(
+                    source="api",
+                    document_type="text",
+                    tenant_id=tenant_id
+                )
             
-            # Asegurarse que tenant_id está establecido
+            # Asegurarse que tenant_id está establecido correctamente
             metadata.tenant_id = tenant_id
             
-            # Generar document_id si no está presente
+            # Generar document_id si no está presente o no es válido
             if not hasattr(metadata, 'document_id') or not metadata.document_id:
                 document_id = str(uuid.uuid4())
                 metadata.document_id = document_id
@@ -749,6 +775,9 @@ async def ingest_documents_to_collection(
             
             all_nodes.extend(nodes)
     
+        # Registrar la actividad en logs
+        logger.info(f"Ingestión para tenant {tenant_id}: {len(document_ids)} documentos, {len(all_nodes)} nodos en colección {collection_id}")
+        
         # Programar la indexación como tarea en segundo plano
         background_tasks.add_task(
             index_documents_task,
@@ -767,7 +796,7 @@ async def ingest_documents_to_collection(
         )
         
     except Exception as e:
-        logger.error(f"Error procesando documentos: {str(e)}", exc_info=True)
+        logger.error(f"Error procesando documentos para tenant {tenant_id}: {str(e)}", exc_info=True)
         raise ServiceError(
             message=f"Error procesando documentos: {str(e)}",
             status_code=500,
@@ -781,12 +810,16 @@ async def ingest_documents_to_collection(
     summary="Subir archivo",
     description="Sube e ingiere un archivo a una colección específica"
 )
+@handle_service_error_simple
+@with_tenant_context
 async def upload_file_to_collection(
     collection_id: str,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     document_type: str = Form(...),
     author: Optional[str] = Form(None),
+    agent_id: Optional[str] = Form(None, description="ID del agente (opcional, solo para tracking)"),
+    conversation_id: Optional[str] = Form(None, description="ID de la conversación (opcional, solo para tracking)"),
     tenant_info: TenantInfo = Depends(verify_tenant)
 ):
     """
@@ -809,6 +842,8 @@ async def upload_file_to_collection(
         file: Archivo a ingerir (multipart/form-data)
         document_type: Tipo de documento (ej: "legal", "manual", "reporte")
         author: Autor del documento (opcional)
+        agent_id: ID del agente (opcional, solo para tracking)
+        conversation_id: ID de la conversación (opcional, solo para tracking)
         tenant_info: Información del tenant (inyectada)
         
     Returns:
@@ -817,13 +852,11 @@ async def upload_file_to_collection(
     Raises:
         ServiceError: Si hay error en la extracción o procesamiento
     """
-    # Los IDs de contexto ya están disponibles gracias al decorador
+    # Obtener tenant_id validado
     tenant_id = tenant_info.tenant_id
-    agent_id = get_current_agent_id()
-    conversation_id = get_current_conversation_id()
     
     # Verificar cuotas del tenant
-    await check_tenant_quotas(tenant_id)
+    await check_tenant_quotas(tenant_info)
     
     # Leer contenido del archivo
     content = await file.read()
@@ -835,42 +868,59 @@ async def upload_file_to_collection(
     # Crear metadata
     metadata = DocumentMetadata(
         source=file.filename,
-        author=author,
-        created_at=datetime.now().isoformat(),
         document_type=document_type,
         tenant_id=tenant_id,
-        custom_metadata={
-            "filename": file.filename,
-            "content_type": file.content_type
-        }
-    )
-    metadata.document_id = doc_id
-    
-    # Procesar documento para obtener nodos
-    node_data = await process_document(
-        doc_text=file_text,
-        metadata=metadata,
-        collection_id=collection_id
+        document_id=doc_id,
+        author=author,
+        created_at=datetime.now().isoformat()
     )
     
-    # Programar indexación en segundo plano
-    background_tasks.add_task(
-        index_documents_task,
-        node_data,
-        collection_id
-    )
+    try:
+        # Verificar colección
+        collection = await get_collection(collection_id, tenant_id)
+        if not collection:
+            raise ServiceError(
+                message=f"Colección no encontrada: {collection_id}",
+                error_code="COLLECTION_NOT_FOUND",
+                status_code=404
+            )
+        
+        # Procesar documento
+        nodes = await process_document(
+            file_text, 
+            metadata,
+            collection_id
+        )
+        
+        # Indexar documento
+        background_tasks.add_task(
+            index_documents_task,
+            nodes,
+            collection_id
+        )
+        
+        logger.info(f"Archivo '{file.filename}' subido a colección {collection_id} para tenant {tenant_id} con {len(nodes)} nodos")
+        
+        # Invalidar caché de configuraciones para este tenant
+        invalidate_settings_cache(tenant_id)
+        
+        return IngestionResponse(
+            success=True,
+            message=f"Archivo {file.filename} procesado correctamente con {len(nodes)} nodos",
+            document_ids=[doc_id],
+            nodes_count=len(nodes)
+        )
     
-    logger.info(f"Archivo {file.filename} procesado con {len(node_data)} fragmentos")
-    
-    # Invalidar caché de configuraciones para este tenant
-    invalidate_settings_cache(tenant_id)
-    
-    return IngestionResponse(
-        success=True,
-        message=f"Archivo {file.filename} procesado exitosamente",
-        document_ids=[doc_id],
-        nodes_count=len(node_data)
-    )
+    except ServiceError as e:
+        # Re-lanzar errores de servicio
+        raise
+    except Exception as e:
+        logger.error(f"Error procesando archivo {file.filename}: {str(e)}", exc_info=True)
+        raise ServiceError(
+            message=f"Error procesando archivo: {str(e)}",
+            error_code="PROCESSING_ERROR",
+            status_code=500
+        )
 
 @app.delete(
     "/documents/{document_id}",
@@ -879,6 +929,8 @@ async def upload_file_to_collection(
     summary="Eliminar documento",
     description="Elimina un documento específico y todos sus fragmentos"
 )
+@handle_service_error_simple
+@with_tenant_context
 async def delete_document_endpoint(
     document_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
@@ -903,7 +955,7 @@ async def delete_document_endpoint(
     Raises:
         ServiceError: Si el documento no existe o hay error en la eliminación
     """
-    # Los IDs de contexto ya están disponibles gracias al decorador
+    # Obtener tenant_id validado
     tenant_id = tenant_info.tenant_id
     
     supabase = get_supabase_client()
@@ -1034,33 +1086,67 @@ async def health_check():
     "/admin/clear-config-cache",
     tags=["Admin"],
     summary="Limpiar caché de configuraciones",
-    description="Invalida el caché de configuraciones para un tenant específico o todos"
+    description="Invalida el caché de configuraciones para un tenant específico o todos",
+    response_model=CacheClearResponse
 )
 @handle_service_error_simple
-async def clear_config_cache(tenant_id: Optional[str] = None):
+async def clear_config_cache(
+    tenant_info: Optional[TenantInfo] = Depends(get_auth_info)
+):
     """
-    Invalida el caché de configuraciones para un tenant específico o todos.
+    Invalida el caché de configuraciones para el tenant identificado en la autenticación 
+    (o globalmente si no hay autenticación).
     
     Este endpoint permite forzar la recarga de configuraciones desde las fuentes
     originales (variables de entorno y/o Supabase), lo que es útil después de
     realizar cambios en la configuración que deban aplicarse inmediatamente.
     
     Args:
-        tenant_id: ID del tenant (opcional, si no se proporciona se invalidan todos)
+        tenant_info: Información del tenant obtenida de la autenticación (opcional).
         
     Returns:
-        Dict: Resultado de la operación
+        CacheClearResponse: Resultado de la operación
     """
-    from common.config import invalidate_settings_cache
+    # Determine tenant_id from authentication info
+    actual_tenant_id = tenant_info.tenant_id if tenant_info else None
+    keys_cleaned_count = 0
     
-    if tenant_id:
-        # Invalidar para un tenant específico
-        invalidate_settings_cache(tenant_id)
-        return {"success": True, "message": f"Caché de configuraciones invalidado para tenant {tenant_id}"}
-    else:
-        # Invalidar para todos los tenants
-        invalidate_settings_cache()
-        return {"success": True, "message": "Caché de configuraciones invalidado para todos los tenants"}
+    try:
+        # Invalidate cache using the centralized function
+        logger.info(f"Invalidando caché de configuraciones para tenant: {actual_tenant_id or 'GLOBAL'}")
+        result = invalidate_settings_cache(actual_tenant_id)
+        
+        # If the function returns a count, use it
+        if isinstance(result, int):
+            keys_cleaned_count = result
+    
+        message = f"Caché de configuraciones invalidado para tenant {actual_tenant_id}" \
+                  if actual_tenant_id else "Caché de configuraciones invalidado globalmente"
+              
+        # Define approximate pattern for response consistency
+        pattern_used = f"config:{actual_tenant_id}:*" if actual_tenant_id else "config:*"
+        scope_info = "all_within_tenant" if actual_tenant_id else "global"
+        
+        logger.info(message)
+        
+        return CacheClearResponse(
+            success=True, 
+            message=message,
+            keys_cleaned=keys_cleaned_count, 
+            pattern=pattern_used,
+            scope=scope_info,
+            tenant_id=actual_tenant_id or "all"
+        )
+    except Exception as e:
+        logger.exception(f"Error invalidando caché de configuraciones: {str(e)}")
+        return CacheClearResponse(
+            success=False, 
+            message=f"Error durante la invalidación de caché: {str(e)}",
+            keys_cleaned=0,
+            pattern="N/A",
+            scope="N/A",
+            tenant_id=actual_tenant_id or "all"
+        )
 
 if __name__ == "__main__":
     import uvicorn

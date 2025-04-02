@@ -5,15 +5,22 @@ Proporciona recuperación de información relevante y generación de respuestas.
 """
 
 import os
+import json
 import logging
-import time
-import httpx
-from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+import re
+import uuid
+import math
+import asyncio
+from typing import List, Dict, Any, Optional, Union, TypeVar, Tuple
 from uuid import UUID
+from datetime import datetime
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, Request, Query
+from fastapi import FastAPI, Request, Depends, HTTPException, Body, Query, Path, Response, BackgroundTasks
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+import redis
 
 # LlamaIndex imports - versión monolítica
 from llama_index.core.indices import VectorStoreIndex
@@ -33,7 +40,7 @@ from common.logging import init_logging
 from common.context import (
     TenantContext, AgentContext, FullContext,
     get_current_tenant_id, get_current_agent_id, get_current_conversation_id,
-    with_full_context,
+    with_full_context, with_tenant_context,
     
 )
 from common.models import (
@@ -41,13 +48,15 @@ from common.models import (
     DocumentsListResponse, HealthResponse, AgentTool, AgentConfig, AgentRequest, AgentResponse, ChatMessage, ChatRequest, ChatResponse,
     CollectionsListResponse, CollectionInfo, LlmModelInfo, LlmModelsListResponse,
     TenantStatsResponse, UsageByModel, TokensUsage, DailyUsage, CollectionDocCount,
-    CollectionToolResponse, CollectionCreationResponse, CollectionUpdateResponse, CollectionStatsResponse
+    CollectionToolResponse, CollectionCreationResponse, CollectionUpdateResponse, CollectionStatsResponse,
+    CacheClearResponse, ErrorResponse
 )
 from common.auth import (
     verify_tenant, check_tenant_quotas, validate_model_access, 
-    get_allowed_models_for_tier, get_tier_limits
+    get_allowed_models_for_tier, get_tier_limits, get_auth_info
 )
-from common.supabase import get_supabase_client, get_tenant_vector_store, get_tenant_documents, get_tenant_collections
+from common.supabase import get_supabase_client, get_tenant_vector_store, get_tenant_documents, get_tenant_collections, init_supabase, get_table_name
+from common.cache import get_redis_client
 from common.tracking import track_query, track_token_usage
 from common.rate_limiting import setup_rate_limiting
 from common.utils import prepare_service_request
@@ -592,7 +601,7 @@ async def list_documents(
     description="Realiza una consulta RAG sobre una colección específica"
 )
 @handle_service_error_simple
-@with_full_context
+@with_tenant_context
 async def query_collection(
     collection_id: str,
     request: QueryRequest,
@@ -642,7 +651,7 @@ async def query_collection(
     deprecated=True
 )
 @handle_service_error_simple
-@with_full_context
+@with_tenant_context
 async def query_endpoint(
     request: QueryRequest,
     tenant_info: TenantInfo = Depends(verify_tenant)
@@ -676,7 +685,7 @@ async def query_endpoint(
     description="Obtiene la lista de colecciones disponibles para el tenant"
 )
 @handle_service_error_simple
-@with_full_context
+@with_tenant_context
 async def get_collections(
     tenant_info: TenantInfo = Depends(verify_tenant)
 ):
@@ -705,7 +714,7 @@ async def get_collections(
     status_code=201
 )
 @handle_service_error_simple
-@with_full_context
+@with_tenant_context
 async def create_collection_endpoint(
     name: str,
     description: Optional[str] = None,
@@ -744,7 +753,7 @@ async def create_collection_endpoint(
     description="Modifica una colección existente"
 )
 @handle_service_error_simple
-@with_full_context
+@with_tenant_context
 async def update_collection_endpoint(
     collection_id: str,
     name: str,
@@ -783,7 +792,7 @@ async def update_collection_endpoint(
     description="Obtiene estadísticas detalladas de una colección específica"
 )
 @handle_service_error_simple
-@with_full_context
+@with_tenant_context
 async def get_collection_stats_endpoint(
     collection_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
@@ -812,7 +821,7 @@ async def get_collection_stats_endpoint(
     description="Obtiene configuración para usar la colección como herramienta de agente"
 )
 @handle_service_error_simple
-@with_full_context
+@with_tenant_context
 async def get_collection_tool_endpoint(
     collection_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
@@ -841,7 +850,7 @@ async def get_collection_tool_endpoint(
     description="Obtiene la lista de modelos LLM disponibles para el tenant"
 )
 @handle_service_error_simple
-@with_full_context
+@with_tenant_context
 async def get_models(
     tenant_info: TenantInfo = Depends(verify_tenant)
 ):
@@ -893,7 +902,7 @@ async def health_check():
     description="Obtiene estadísticas de uso para el tenant actual"
 )
 @handle_service_error_simple
-@with_full_context
+@with_tenant_context
 async def get_stats(
     tenant_info: TenantInfo = Depends(verify_tenant)
 ):
@@ -920,7 +929,7 @@ async def get_stats(
     description="Obtiene la lista de documentos disponibles para el tenant"
 )
 @handle_service_error_simple
-@with_full_context
+@with_tenant_context
 async def get_documents(
     collection_id: Optional[UUID] = None,
     limit: int = 50,
@@ -948,70 +957,136 @@ async def get_documents(
     "/admin/clear-config-cache",
     tags=["Admin"],
     summary="Limpiar caché de configuraciones",
-    description="Invalida el caché de configuraciones para un tenant específico o todos"
+    description="Invalida el caché de configuraciones para un tenant específico o todos",
+    response_model=CacheClearResponse
 )
 @handle_service_error_simple
+@with_tenant_context
 async def clear_config_cache(
-    tenant_id: Optional[str] = None,
-    scope: Optional[str] = None,
-    scope_id: Optional[str] = None,
-    environment: str = "development"
+    auth_info: Dict[str, Any] = Depends(get_auth_info)
 ):
     """
-    Invalida el caché de configuraciones para un tenant específico o todos,
-    con soporte para invalidación específica por ámbito.
-    
-    Este endpoint permite forzar la recarga de configuraciones desde las fuentes
-    originales (variables de entorno y/o Supabase), lo que es útil después de
-    realizar cambios en la configuración que deban aplicarse inmediatamente.
+    Limpia la caché de configuraciones para el tenant actual.
     
     Args:
-        tenant_id: ID del tenant (opcional, si no se proporciona se invalidan todos)
-        scope: Ámbito específico a invalidar ('tenant', 'service', 'agent', 'collection')
-        scope_id: ID específico del ámbito (ej: agent_id, service_name)
-        environment: Entorno de configuración (development, staging, production)
+        auth_info: Información de autenticación (inyectada)
         
     Returns:
-        Dict: Resultado de la operación
+        CacheClearResponse: Resultado de la operación
     """
-    from common.config import invalidate_settings_cache
-    from common.supabase import apply_tenant_configuration_changes
+    # Obtener tenant_id desde la información de autenticación
+    tenant_id = auth_info.get("tenant_id")
     
-    if tenant_id:
-        # Invalidar para un tenant específico con soporte para ámbito
-        if scope:
-            # Invalidar configuraciones para un ámbito específico
-            apply_tenant_configuration_changes(
-                tenant_id=tenant_id,
-                environment=environment,
-                scope=scope,
-                scope_id=scope_id
+    try:
+        redis_client = get_redis_client()
+        
+        if not redis_client:
+            raise ServiceError(
+                message="No hay conexión a Redis",
+                status_code=500,
+                error_code="REDIS_ERROR"
             )
-            scope_msg = f"ámbito {scope}" + (f" (ID: {scope_id})" if scope_id else "")
-            return {
-                "success": True, 
-                "message": f"Caché de configuraciones invalidado para tenant {tenant_id} en {scope_msg}"
-            }
-        else:
-            # Invalidar todas las configuraciones del tenant
-            invalidate_settings_cache(tenant_id)
-            # También limpiar la caché de Redis para este tenant
-            from common.cache import delete_pattern
-            delete_pattern(f"tenant_config:{tenant_id}:*")
-            return {
-                "success": True, 
-                "message": f"Caché de configuraciones invalidado para tenant {tenant_id}"
-            }
-    else:
-        # Invalidar para todos los tenants
-        invalidate_settings_cache()
-        # También limpiar toda la caché de configuraciones
-        from common.cache import delete_pattern
-        delete_pattern("tenant_config:*")
-        return {
-            "success": True, 
-            "message": "Caché de configuraciones invalidado para todos los tenants"
-        }
+            
+        # Construir patrón para limpiar todas las configuraciones del tenant
+        pattern = f"config:{tenant_id}:*"
+        
+        logger.info(f"Limpiando caché de configuraciones con patrón: {pattern}")
+        
+        # Eliminar claves que coincidan con el patrón
+        cleaned_keys = 0
+        for key in redis_client.scan_iter(match=pattern):
+            redis_client.delete(key)
+            cleaned_keys += 1
+            
+        # También limpiar caché de configuraciones efectivas si existen
+        effective_pattern = f"effective_config:{tenant_id}:*"
+        for key in redis_client.scan_iter(match=effective_pattern):
+            redis_client.delete(key)
+            cleaned_keys += 1
+            
+        # Forzar recarga de configuraciones en lifespan
+        if get_settings().load_config_from_supabase:
+            try:
+                # Recargar configuraciones de servicio
+                invalidate_settings_cache(tenant_id)
+                logger.info(f"Configuraciones recargadas para tenant {tenant_id}")
+            except Exception as e:
+                logger.error(f"Error recargando configuraciones: {str(e)}")
+        
+        return CacheClearResponse(
+            success=True, 
+            message=f"Caché de configuraciones limpiada correctamente",
+            keys_deleted=cleaned_keys
+        )
+        
+    except Exception as e:
+        logger.error(f"Error limpiando caché de configuraciones: {str(e)}")
+        raise ServiceError(
+            message=f"Error limpiando caché: {str(e)}",
+            status_code=500,
+            error_code="CACHE_ERROR"
+        )
+
+@app.delete("/collections/{collection_id}", response_model=DeleteCollectionResponse)
+@with_tenant_context
+async def delete_collection(
+    collection_id: UUID, 
+    tenant_info: TenantInfo = Depends(verify_tenant)
+) -> DeleteCollectionResponse:
+    """
+    Elimina una colección y sus documentos asociados.
+    
+    Args:
+        collection_id: ID de la colección
+        tenant_info: Información del tenant (inyectada)
+        
+    Returns:
+        DeleteCollectionResponse: Respuesta de la operación
+    """
+    try:
+        supabase = get_supabase_client()
+        
+        # 1. Verificar que la colección existe y pertenece al tenant
+        collection_result = await supabase.table(get_table_name("collections")).select("name").eq("collection_id", str(collection_id)).eq("tenant_id", tenant_info.tenant_id).execute()
+        
+        if not collection_result.data or len(collection_result.data) == 0:
+            raise ServiceError(
+                message=f"Colección {collection_id} no encontrada o no pertenece al tenant {tenant_info.tenant_id}",
+                error_code="collection_not_found",
+                status_code=404
+            )
+        
+        collection_name = collection_result.data[0].get("name", "")
+        
+        # 2. Contar documentos para reportar en la respuesta
+        chunks_result = await supabase.table(get_table_name("document_chunks")).select("count", count="exact").eq("tenant_id", tenant_info.tenant_id).filter("metadata->collection_id", "eq", str(collection_id)).execute()
+        chunks_count = chunks_result.count if hasattr(chunks_result, 'count') else 0
+        
+        # 3. Eliminar documentos de la colección
+        delete_chunks = await supabase.table(get_table_name("document_chunks")).delete().eq("tenant_id", tenant_info.tenant_id).filter("metadata->collection_id", "eq", str(collection_id)).execute()
+        
+        # 4. Eliminar la colección
+        delete_collection = await supabase.table(get_table_name("collections")).delete().eq("collection_id", str(collection_id)).eq("tenant_id", tenant_info.tenant_id).execute()
+        
+        logger.info(f"Colección {collection_id} eliminada con {chunks_count} documentos")
+        
+        return DeleteCollectionResponse(
+            collection_id=collection_id,
+            name=collection_name,
+            deleted=True,
+            documents_deleted=chunks_count
+        )
+        
+    except ServiceError as e:
+        logger.error(f"Error al eliminar colección: {e.message}")
+        raise e
+    except Exception as e:
+        logger.error(f"Error inesperado al eliminar colección: {str(e)}")
+        raise ServiceError(
+            message=f"Error al eliminar colección: {str(e)}",
+            error_code="delete_collection_error",
+            status_code=500
+        )
 
 async def get_collection_name(collection_id: str, tenant_id: str) -> Optional[str]:
     """
@@ -1027,7 +1102,7 @@ async def get_collection_name(collection_id: str, tenant_id: str) -> Optional[st
     supabase = get_supabase_client()
     
     try:
-        collection_result = await supabase.table("ai.collections").select("name").eq("collection_id", collection_id).execute()
+        collection_result = await supabase.table(get_table_name("collections")).select("name").eq("collection_id", collection_id).execute()
         
         if collection_result.data and len(collection_result.data) > 0:
             return collection_result.data[0].get("name")
@@ -1037,65 +1112,64 @@ async def get_collection_name(collection_id: str, tenant_id: str) -> Optional[st
         logger.error(f"Error obteniendo nombre de colección {collection_id}: {str(e)}")
         return None
 
-async def delete_collection(collection_id: str, tenant_info: TenantInfo) -> DeleteCollectionResponse:
+async def get_collection_config(tenant_id: str, collection_id: str) -> Dict[str, Any]:
     """
-    Elimina una colección y todos sus documentos asociados.
+    Obtiene las configuraciones efectivas para una colección específica.
+    
+    Esta función sigue la jerarquía de configuraciones, combinando:
+    - Configuraciones a nivel de tenant
+    - Configuraciones a nivel de servicio (query)
+    - Configuraciones específicas de la colección
     
     Args:
-        collection_id: ID de la colección a eliminar
-        tenant_info: Información del tenant
+        tenant_id: ID del tenant
+        collection_id: ID de la colección
         
     Returns:
-        DeleteCollectionResponse: Resultado de la operación
+        Dict[str, Any]: Configuraciones combinadas para la colección
     """
-    logger.info(f"Eliminando colección {collection_id} del tenant {tenant_info.tenant_id}")
-    tenant_id = tenant_info.tenant_id
-    
     try:
-        supabase = get_supabase_client()
-        
-        # 1. Verificar que la colección existe y pertenece al tenant
-        collection_result = await supabase.table("ai.collections").select("name").eq("collection_id", str(collection_id)).eq("tenant_id", tenant_id).execute()
-        
-        if not collection_result.data or len(collection_result.data) == 0:
-            raise ServiceError(
-                message=f"Colección {collection_id} no encontrada o no pertenece al tenant {tenant_id}",
-                error_code="collection_not_found",
-                status_code=404
-            )
-        
-        collection_name = collection_result.data[0].get("name", "")
-        
-        # 2. Contar documentos para reportar en la respuesta
-        chunks_result = await supabase.table("ai.document_chunks").select("count", count="exact").eq("tenant_id", tenant_id).filter("metadata->collection_id", "eq", str(collection_id)).execute()
-        chunks_count = chunks_result.count if hasattr(chunks_result, 'count') else 0
-        
-        # 3. Eliminar documentos de la colección
-        delete_chunks = await supabase.table("ai.document_chunks").delete().eq("tenant_id", tenant_id).filter("metadata->collection_id", "eq", str(collection_id)).execute()
-        
-        # 4. Eliminar la colección
-        delete_collection = await supabase.table("ai.collections").delete().eq("collection_id", str(collection_id)).eq("tenant_id", tenant_id).execute()
-        
-        # 5. Preparar respuesta
-        return DeleteCollectionResponse(
-            success=True,
-            message=f"Colección {collection_name} eliminada exitosamente",
+        # Obtener configuraciones siguiendo la jerarquía
+        collection_configs = get_effective_configurations(
+            tenant_id=tenant_id,
+            service_name="query",
             collection_id=collection_id,
-            name=collection_name,
-            deleted=True,
-            documents_deleted=chunks_count
+            environment=settings.environment
         )
         
-    except ServiceError:
-        # Re-lanzar errores de servicio
-        raise
+        if collection_configs:
+            # Convertir valores según sus tipos
+            result = {}
+            for key, value in collection_configs.items():
+                # Convertir según tipo
+                if key.endswith("_top_k") or key.startswith("max_"):
+                    # Valores numéricos enteros
+                    try:
+                        result[key] = int(value)
+                    except (ValueError, TypeError):
+                        result[key] = value
+                elif key.endswith("_threshold") or key.endswith("_temperature"):
+                    # Valores numéricos flotantes
+                    try:
+                        result[key] = float(value)
+                    except (ValueError, TypeError):
+                        result[key] = value
+                elif value.lower() in ('true', 'false', 'yes', 'no'):
+                    # Valores booleanos
+                    result[key] = value.lower() in ('true', 'yes')
+                else:
+                    # Mantener como string
+                    result[key] = value
+                    
+            logger.debug(f"Configuraciones para colección {collection_id}: {len(result)} parámetros")
+            return result
+        else:
+            logger.debug(f"No se encontraron configuraciones específicas para colección {collection_id}")
+            return {}
+            
     except Exception as e:
-        logger.error(f"Error al eliminar colección {collection_id}: {str(e)}")
-        raise ServiceError(
-            message=f"Error al eliminar colección: {str(e)}",
-            error_code="delete_collection_error",
-            status_code=500
-        )
+        logger.warning(f"Error obteniendo configuraciones para colección {collection_id}: {str(e)}")
+        return {}
 
 # Contexto de ciclo de vida para inicializar el servicio
 @asynccontextmanager
@@ -1106,8 +1180,11 @@ async def lifespan(app: FastAPI):
     try:
         logger.info(f"Inicializando servicio de consultas con URL Supabase: {settings.supabase_url}")
         
+        # Inicializar conexión a Supabase
+        init_supabase()
+        
         # Cargar configuraciones específicas del servicio de consultas
-        if settings.load_config_from_supabase:
+        if settings.load_config_from_supabase or is_development_environment():
             try:
                 # Cargar configuraciones a nivel servicio
                 service_settings = get_effective_configurations(
@@ -1117,8 +1194,14 @@ async def lifespan(app: FastAPI):
                 )
                 logger.info(f"Configuraciones cargadas para servicio de consultas: {len(service_settings)} parámetros")
                 
+                # Si hay configuraciones específicas, mostrar algunas en logs
+                if service_settings and logger.isEnabledFor(logging.DEBUG):
+                    for key in ["default_similarity_top_k", "default_response_mode", "similarity_threshold"]:
+                        if key in service_settings:
+                            logger.debug(f"Configuración específica: {key}={service_settings[key]}")
+                
                 # Si no hay configuraciones y está habilitado mock, usar configuraciones de desarrollo
-                if not service_settings and settings.use_mock_config:
+                if not service_settings and (settings.use_mock_config or should_use_mock_config()):
                     logger.warning("No se encontraron configuraciones en Supabase. Usando configuración mock.")
                     settings.use_mock_if_empty(service_name="query")
             except Exception as config_err:

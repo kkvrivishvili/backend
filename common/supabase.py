@@ -707,6 +707,44 @@ def debug_effective_configurations(
     return result
 
 
+def get_table_name(table_base_name: str) -> str:
+    """
+    Retorna el nombre completo de la tabla con el prefijo de esquema correcto.
+    
+    Esta función centraliza la obtención de nombres de tablas para 
+    mantener consistencia en todas las referencias a la base de datos.
+    
+    Args:
+        table_base_name: Nombre base de la tabla sin prefijo
+        
+    Returns:
+        str: Nombre completo de la tabla con prefijo adecuado
+    """
+    # Tablas que deben estar en el esquema public
+    public_tables = ["tenants", "users", "auth"]
+    
+    # Tablas que deben estar en el esquema ai
+    ai_tables = [
+        "tenant_configurations", "agent_configs", "conversations", 
+        "chat_history", "collections", "document_chunks", 
+        "tenant_stats", "embedding_metrics", "query_logs"
+    ]
+    
+    # Determinar prefijo adecuado
+    if table_base_name in public_tables or table_base_name.startswith("public."):
+        # Si ya tiene prefijo public, devolverlo tal cual
+        return table_base_name if table_base_name.startswith("public.") else f"public.{table_base_name}"
+    
+    # Para tablas del esquema ai
+    if table_base_name in ai_tables or table_base_name.startswith("ai."):
+        # Si ya tiene prefijo ai, devolverlo tal cual
+        return table_base_name if table_base_name.startswith("ai.") else f"ai.{table_base_name}"
+    
+    # Por defecto, asumir esquema ai para evitar errores
+    logger.warning(f"Tabla '{table_base_name}' no está en lista conocida. Usando esquema 'ai' por defecto.")
+    return f"ai.{table_base_name}"
+
+
 """
 Esquema para colecciones en Supabase
 

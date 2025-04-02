@@ -11,7 +11,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from .models import TenantInfo
 from .cache import get_redis_client
-from .config import get_tier_rate_limit
+from .config import get_tier_rate_limit, get_tenant_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -36,87 +36,92 @@ async def apply_rate_limit(tenant_id: str, tier: str, limit_key: str = "api") ->
         # Sin Redis, no se puede aplicar rate limiting
         return True
     
-    # Obtener límite según nivel de suscripción
-    rate_limit = get_tier_rate_limit(tier)
+    # Determinar el servicio para obtener configuraciones específicas
+    service_name = None
+    if limit_key in ["agent", "query", "embedding"]:
+        service_name = limit_key
     
-    # Clave para rate limiting
-    rate_key = f"ratelimit:{tenant_id}:{limit_key}:minute"
+    # Obtener límite según configuraciones específicas del tenant
+    rate_limit = get_tenant_rate_limit(tenant_id, tier, service_name)
     
-    # Verificar límite
-    current = redis_client.get(rate_key)
+    # Generar clave única para este tenant/servicio
+    limit_period = 60  # 1 minuto por defecto
+    redis_key = f"rate_limit:{tenant_id}:{limit_key}"
     
-    if current and int(current) > rate_limit:
-        logger.warning(f"Rate limit exceeded for tenant {tenant_id} ({tier} tier): {current}/{rate_limit}")
+    # Obtener contador actual
+    current = redis_client.get(redis_key)
+    current_count = int(current) if current else 0
+    
+    # Verificar si excede el límite
+    if current_count >= rate_limit:
+        logger.warning(f"Rate limit excedido para tenant {tenant_id}: {current_count}/{rate_limit}")
         raise HTTPException(
             status_code=429,
-            detail=f"Rate limit exceeded. The {tier} tier allows {rate_limit} requests per minute. Try again later."
+            detail={
+                "message": "Has excedido el límite de solicitudes por minuto",
+                "code": "RATE_LIMIT_EXCEEDED",
+                "current": current_count,
+                "limit": rate_limit,
+                "reset_in_seconds": redis_client.ttl(redis_key),
+                "service": service_name or "general"
+            }
         )
     
-    # Incrementar contador
+    # Actualizar contador en Redis
     pipe = redis_client.pipeline()
-    pipe.incr(rate_key)
-    pipe.expire(rate_key, 60)  # 1 minuto TTL
+    if current_count == 0:
+        # Si es la primera solicitud, establecer contador y TTL
+        pipe.set(redis_key, 1)
+        pipe.expire(redis_key, limit_period)
+    else:
+        # Si ya existe, incrementar
+        pipe.incr(redis_key)
     pipe.execute()
     
     return True
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Middleware para aplicar rate limiting a todas las peticiones."""
+    """
+    Middleware para aplicar rate limiting a todas las peticiones.
+    """
     
     async def dispatch(self, request: Request, call_next):
-        # Extraer tenant_id de la petición
-        tenant_id = None
-        tier = "free"  # Tier por defecto para fallback
+        tenant_info = request.scope.get("tenant_info")
         
-        # Intentar obtener tenant_id de query params
-        tenant_id_query = request.query_params.get("tenant_id")
-        if tenant_id_query:
-            tenant_id = tenant_id_query
+        # Omitir rate limiting si no hay información de tenant
+        if not tenant_info or not isinstance(tenant_info, TenantInfo):
+            return await call_next(request)
         
-        # Intentar obtener de path params
-        if not tenant_id:
-            path_parts = request.url.path.split("/")
-            for i, part in enumerate(path_parts):
-                if part == "tenant" and i + 1 < len(path_parts):
-                    tenant_id = path_parts[i + 1]
-                    break
+        # Omitir rate limiting para health checks
+        if request.url.path.endswith("/health"):
+            return await call_next(request)
         
-        # Intentar obtener de body para POST (más complejo)
-        if not tenant_id and request.method == "POST":
-            try:
-                body = await request.json()
-                tenant_id = body.get("tenant_id")
-            except:
-                pass
+        # Determinar clave del limitador según el endpoint
+        service_key = "api"
+        if "agent" in request.url.path:
+            service_key = "agent"
+        elif "query" in request.url.path:
+            service_key = "query"
+        elif "embedding" in request.url.path:
+            service_key = "embedding"
         
-        # Si tenemos tenant_id, aplicamos rate limiting
-        if tenant_id:
-            try:
-                redis_client = get_redis_client()
-                if redis_client:
-                    # Conseguir el tier desde Supabase sería más costoso,
-                    # así que usamos un enfoque de caché para el tier
-                    tier_key = f"tenant:tier:{tenant_id}"
-                    cached_tier = redis_client.get(tier_key)
-                    
-                    if cached_tier:
-                        tier = cached_tier.decode("utf-8")
-                    
-                    # Aplicar límite 
-                    await apply_rate_limit(tenant_id, tier)
-            except HTTPException as e:
-                # Propagar excepciones de rate limiting
-                return JSONResponse(
-                    status_code=e.status_code,
-                    content={"detail": e.detail}
-                )
-            except Exception as e:
-                # Loggear otros errores pero permitir la petición
-                logger.error(f"Error applying rate limit: {str(e)}")
-        
-        # Continuar con la petición
-        return await call_next(request)
+        try:
+            # Aplicar limitación de tasa usando servicio específico para el tenant
+            await apply_rate_limit(
+                tenant_id=tenant_info.tenant_id,
+                tier=tenant_info.subscription_tier,
+                limit_key=service_key
+            )
+            
+            return await call_next(request)
+        except HTTPException as e:
+            # Re-lanzar excepción desde apply_rate_limit
+            raise e
+        except Exception as e:
+            logger.error(f"Error en rate limiting: {str(e)}")
+            # Continuar con la solicitud en caso de error
+            return await call_next(request)
 
 
 # Función para registrar el middleware

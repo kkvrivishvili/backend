@@ -33,11 +33,11 @@ from common.models import (
     AgentTool, ChatMessage, ChatRequest, ChatResponse, RAGConfig,
     ConversationCreate, ConversationResponse, ConversationsListResponse, MessageListResponse,
     PublicChatRequest, PublicTenantInfo, AgentsListResponse, AgentSummary,
-    DeleteAgentResponse, DeleteConversationResponse  # Agregar el modelo DeleteConversationResponse
+    DeleteAgentResponse, DeleteConversationResponse,CacheClearResponse  # Agregar el modelo DeleteConversationResponse
 )
-from common.auth import verify_tenant, check_tenant_quotas, validate_model_access
-from common.supabase import get_supabase_client, init_supabase, apply_tenant_configuration_changes
-from common.config import Settings, get_settings, invalidate_settings_cache
+from common.auth import verify_tenant, check_tenant_quotas, validate_model_access, get_auth_info
+from common.supabase import get_supabase_client, init_supabase, apply_tenant_configuration_changes, get_table_name
+from common.config import Settings, get_settings, invalidate_settings_cache, get_effective_configurations, is_development_environment, should_use_mock_config
 from common.utils import track_usage, sanitize_content, prepare_service_request
 from common.errors import handle_service_error_simple, ServiceError, create_error_response
 from common.logging import init_logging
@@ -61,16 +61,16 @@ http_client = httpx.AsyncClient()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Gestiona el ciclo de vida de la aplicación, reemplazando los eventos on_startup y on_shutdown.
+    Gestiona el ciclo de vida de la aplicación, inicializando configuraciones y conexiones.
     """
-    # Código ejecutado durante el inicio
     try:
-        # Inicializar Supabase
-        logger.info(f"Inicializando servicio con URL: {settings.supabase_url}")
+        logger.info(f"Inicializando servicio de agentes con URL Supabase: {settings.supabase_url}")
+        
+        # Inicializar conexión a Supabase
         init_supabase()
         
         # Cargar configuraciones específicas del servicio de agentes
-        if settings.load_config_from_supabase:
+        if settings.load_config_from_supabase or is_development_environment():
             try:
                 # Cargar configuraciones a nivel servicio
                 service_settings = get_effective_configurations(
@@ -81,23 +81,21 @@ async def lifespan(app: FastAPI):
                 logger.info(f"Configuraciones cargadas para servicio de agentes: {len(service_settings)} parámetros")
                 
                 # Si no hay configuraciones y está habilitado mock, usar configuraciones de desarrollo
-                if not service_settings and settings.use_mock_config:
+                if not service_settings and (settings.use_mock_config or should_use_mock_config()):
                     logger.warning("No se encontraron configuraciones en Supabase. Usando configuración mock.")
                     settings.use_mock_if_empty(service_name="agent")
             except Exception as config_err:
                 logger.error(f"Error cargando configuraciones: {config_err}")
                 # Continuar con valores por defecto
         
-        logger.info("Servicio de agente inicializado correctamente")
+        logger.info("Servicio de agentes inicializado correctamente")
         yield
     except Exception as e:
-        logger.error(f"Error al inicializar el servicio de agente: {str(e)}")
-        # Aún permitimos que la aplicación se inicie, pero con funcionalidad limitada
+        logger.error(f"Error al inicializar el servicio de agentes: {str(e)}")
+        # Permitir que el servicio se inicie con funcionalidad limitada
         yield
     finally:
-        # Código ejecutado durante el cierre
-        await http_client.aclose()
-        logger.info("Servicio de agente detenido correctamente")
+        logger.info("Servicio de agentes detenido correctamente")
 
 # Inicializar la aplicación FastAPI
 app = FastAPI(
@@ -686,19 +684,18 @@ async def create_rag_tool(tool_config: AgentTool, tenant_id: str, agent_id: Opti
 
 
 # Función para crear las herramientas del agente
-@with_tenant_context
-async def create_agent_tools(agent_config: AgentConfig) -> List[Tool]:
+@with_agent_context
+async def create_agent_tools(agent_config: AgentConfig, tenant_id: str) -> List[Tool]:
     """
     Crea herramientas para el agente LangChain.
     
     Args:
         agent_config: Configuración del agente
+        tenant_id: ID del tenant
         
     Returns:
         Lista de herramientas de LangChain
     """
-    # El tenant_id ya está disponible en el contexto gracias al decorador
-    tenant_id = get_current_tenant_id()
     tools = []
     
     # Crear herramientas basadas en la configuración
@@ -715,70 +712,8 @@ async def create_agent_tools(agent_config: AgentConfig) -> List[Tool]:
             
         # Más tipos de herramientas pueden ser agregados aquí
     
+    logger.info(f"Creadas {len(tools)} herramientas para el agente {agent_config.agent_id}")
     return tools
-
-
-# Función para consultar el sistema RAG
-@with_full_context
-async def query_rag(
-    query: str, 
-    rag_config: RAGConfig
-) -> str:
-    """
-    Consulta el sistema RAG.
-    
-    Args:
-        query: Consulta del usuario
-        rag_config: Configuración RAG
-        
-    Returns:
-        Resultados de la consulta
-    """
-    # Los IDs de contexto ya están disponibles gracias al decorador @with_full_context
-    tenant_id = get_current_tenant_id()
-    agent_id = get_current_agent_id()
-    conversation_id = get_current_conversation_id()
-    
-    try:
-        settings = get_settings()
-        
-        # Preparar payload para el servicio de consultas
-        payload = {
-            "query": query,
-            "collection_name": rag_config.collection_name,
-            "similarity_top_k": rag_config.similarity_top_k,
-            "response_mode": rag_config.response_mode
-        }
-        
-        # Añadir IDs de contexto si están disponibles
-        if agent_id:
-            payload["agent_id"] = agent_id
-        if conversation_id:
-            payload["conversation_id"] = conversation_id
-        
-        # Realizar petición al servicio de consultas
-        response = await prepare_service_request(
-            f"{settings.query_service_url}/query", 
-            payload,
-            tenant_id
-        )
-        
-        if response.status_code != 200:
-            logger.error(f"Error del servicio de consulta: {response.text}")
-            return f"Error realizando la consulta: {response.status_code}"
-        
-        result = response.json()
-        return result.get("response", "No hay resultados disponibles para esta consulta")
-        
-    except Exception as e:
-        context_desc = f"tenant '{tenant_id}'"
-        if agent_id:
-            context_desc += f", agent '{agent_id}'"
-        if conversation_id:
-            context_desc += f", conversation '{conversation_id}'"
-            
-        logger.error(f"Error en consulta RAG para {context_desc}: {str(e)}", exc_info=True)
-        return f"Error realizando la consulta: {str(e)}"
 
 
 # Función para inicializar un agente LangChain
@@ -864,7 +799,7 @@ async def execute_agent(
         callback_handler = AgentCallbackHandler()
     
     # Crear herramientas para el agente
-    tools = await create_agent_tools(agent_config)
+    tools = await create_agent_tools(agent_config, tenant_info.tenant_id)
     
     # Inicializar agente con herramientas
     agent_executor = await initialize_agent_with_tools(
@@ -1088,8 +1023,7 @@ async def get_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tena
     Returns:
         AgentResponse: Datos del agente
     """
-    tenant_id = get_current_tenant_id()
-    agent_id = get_current_agent_id()
+    tenant_id = tenant_info.tenant_id
     
     supabase = get_supabase_client()
     
@@ -1200,8 +1134,7 @@ async def update_agent(
     Returns:
         AgentResponse: Datos del agente actualizado
     """
-    tenant_id = get_current_tenant_id()
-    agent_id = get_current_agent_id()
+    tenant_id = tenant_info.tenant_id
     
     supabase = get_supabase_client()
     
@@ -1292,13 +1225,13 @@ async def delete_agent(
         DeleteAgentResponse: Resultado de la operación de eliminación
     """
     # El tenant_id y agent_id ya están disponibles gracias al decorador
-    tenant_id = get_current_tenant_id()
+    tenant_id = tenant_info.tenant_id
     
     try:
         supabase = get_supabase_client()
         
         # Verificar que el agente exista y pertenezca al tenant
-        agent_result = supabase.table("ai.agent_configs").select("*").eq("id", agent_id).eq("tenant_id", tenant_id).execute()
+        agent_result = supabase.table("ai.agent_configs").select("*").eq("agent_id", agent_id).eq("tenant_id", tenant_id).execute()
         
         if not agent_result.data:
             raise ServiceError(
@@ -1317,7 +1250,7 @@ async def delete_agent(
             delete_conversations = supabase.table("ai.conversations").delete().eq("agent_id", agent_id).eq("tenant_id", tenant_id).execute()
         
         # Eliminar el agente
-        delete_result = supabase.table("ai.agent_configs").delete().eq("id", agent_id).eq("tenant_id", tenant_id).execute()
+        delete_result = supabase.table("ai.agent_configs").delete().eq("agent_id", agent_id).eq("tenant_id", tenant_id).execute()
         
         if not delete_result.data:
             raise ServiceError(
@@ -1391,7 +1324,7 @@ async def chat_with_agent(
     # Validar cuotas del tenant
     await check_tenant_quotas(tenant_info)
     
-    tenant_id = get_current_tenant_id()
+    tenant_id = tenant_info.tenant_id
     conversation_id = request.conversation_id
     is_new_conversation = False
     
@@ -1548,211 +1481,6 @@ async def chat_with_agent(
     )
     
     return response
-
-
-# Endpoint para chatear con un agente
-@app.post("/chat", response_model=ChatResponse, tags=["Chat"])
-@handle_service_error_simple(on_error_response={"success": False, "message": "Error procesando la consulta", "error": "CHAT_PROCESSING_ERROR"})
-@with_tenant_context
-async def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
-    """
-    Endpoint para chat con el agente.
-    
-    Este endpoint permite interactuar con un agente enviando un mensaje y recibiendo
-    una respuesta estructurada.
-    
-    Args:
-        chat_request: Solicitud de chat con el mensaje y configuración
-        request: Solicitud HTTP (inyectada automáticamente)
-        
-    Returns:
-        ChatResponse: Respuesta estructurada del agente
-    """
-    tenant_id = get_current_tenant_id()
-    # El tenant_id debe obtenerse del contexto aquí, no necesitamos pasarlo explícitamente
-    tenant_info = await get_tenant_info()
-    
-    if not tenant_info:
-        raise ServiceError(
-            message=f"Inquilino con ID {tenant_id} no encontrado",
-            status_code=401,
-            error_code="tenant_not_found"
-        )
-    
-    # Determinar el nivel de contexto apropiado
-    agent_id = chat_request.agent_config.get("agent_id") if chat_request.agent_config else None
-    conversation_id = chat_request.session_id  # session_id se usa como conversation_id
-    
-    # Obtener configuración del agente
-    agent_config = chat_request.agent_config
-    
-    if not agent_config:
-        raise ServiceError(
-            message="Configuración del agente no proporcionada",
-            status_code=400,
-            error_code="missing_agent_config"
-        )
-    
-    # Crear la configuración del agente
-    try:
-        if isinstance(agent_config, str):
-            agent_config = json.loads(agent_config)
-        
-        # Convertir a modelo pydantic
-        agent_config = AgentConfig(**agent_config)
-    except Exception as e:
-        logger.error(f"Error al analizar la configuración del agente: {e}")
-        raise ServiceError(
-            message=f"Formato de configuración de agente inválido: {str(e)}",
-            status_code=400, 
-            error_code="invalid_agent_config"
-        )
-    
-    # Validar acceso al modelo
-    validate_model_access(tenant_info.subscription_tier, agent_config.llm_model)
-    
-    # Si no hay ID de conversación, crear una nueva conversación
-    if not conversation_id:
-        conversation_id = str(uuid.uuid4())
-    
-    # Ejecutar el agente con o sin streaming según la solicitud
-    result = await execute_agent(
-        tenant_info=tenant_info,
-        agent_config=agent_config,
-        query=chat_request.message,
-        session_id=conversation_id,
-        streaming=False
-    )
-    
-    # Agregar tracking de uso
-    try:
-        await track_usage(
-            tenant_id=tenant_id,
-            operation="agent_query",
-            metadata={
-                "agent_id": agent_id,
-                "conversation_id": conversation_id,
-                "tokens": result.get("tokens", 0),
-                "llm_model": agent_config.llm_model
-            }
-        )
-    except Exception as e:
-        logger.warning(f"Error al registrar uso: {e}")
-    
-    # Devolver resultado
-    return ChatResponse(
-        conversation_id=conversation_id,
-        message=ChatMessage(
-            role="assistant",
-            content=result["answer"]
-        ),
-        thinking=result.get("thinking", None),
-        tools_used=result.get("tools_used", None),
-        processing_time=0,
-        sources=result.get("sources", None),
-        context=chat_request.context
-    )
-
-
-# Endpoint para streaming de chat con el agente
-@app.post("/chat/stream", tags=["Chat"])
-@handle_service_error_simple
-@with_tenant_context
-async def chat_stream(chat_request: ChatRequest, request: Request):
-    """
-    Endpoint para streaming de chat con el agente.
-    
-    Args:
-        chat_request: Solicitud de chat
-        request: Solicitud HTTP
-        
-    Returns:
-        Flujo de eventos SSE con la respuesta del agente
-    """
-    tenant_id = get_current_tenant_id()
-    # El tenant_id debe obtenerse del contexto aquí, no necesitamos pasarlo explícitamente
-    tenant_info = await get_tenant_info()
-    
-    if not tenant_info:
-        raise ServiceError(
-            message=f"Inquilino con ID {tenant_id} no encontrado",
-            status_code=401,
-            error_code="tenant_not_found"
-        )
-    
-    # Determinar el nivel de contexto apropiado
-    agent_id = chat_request.agent_config.get("agent_id") if chat_request.agent_config else None
-    conversation_id = chat_request.session_id  # session_id se usa como conversation_id
-    
-    # Obtener configuración del agente
-    agent_config = chat_request.agent_config
-    
-    if not agent_config:
-        raise ServiceError(
-            message="Configuración del agente no proporcionada",
-            status_code=400,
-            error_code="missing_agent_config"
-        )
-    
-    # Crear la configuración del agente
-    try:
-        if isinstance(agent_config, str):
-            agent_config = json.loads(agent_config)
-        
-        # Convertir a modelo pydantic
-        agent_config = AgentConfig(**agent_config)
-    except Exception as e:
-        logger.error(f"Error al analizar la configuración del agente: {e}")
-        raise ServiceError(
-            message=f"Formato de configuración de agente inválido: {str(e)}",
-            status_code=400, 
-            error_code="invalid_agent_config"
-        )
-    
-    # Validar acceso al modelo
-    validate_model_access(tenant_info.subscription_tier, agent_config.llm_model)
-    
-    # Si no hay ID de conversación, crear una nueva conversación
-    if not conversation_id:
-        conversation_id = str(uuid.uuid4())
-    
-    # Ejecutar el agente con o sin streaming según la solicitud
-    result = await execute_agent(
-        tenant_info=tenant_info,
-        agent_config=agent_config,
-        query=chat_request.message,
-        session_id=conversation_id,
-        streaming=False
-    )
-    
-    # Agregar tracking de uso
-    try:
-        await track_usage(
-            tenant_id=tenant_id,
-            operation="agent_query",
-            metadata={
-                "agent_id": agent_id,
-                "conversation_id": conversation_id,
-                "tokens": result.get("tokens", 0),
-                "llm_model": agent_config.llm_model
-            }
-        )
-    except Exception as e:
-        logger.warning(f"Error al registrar uso: {e}")
-    
-    # Devolver resultado
-    return ChatResponse(
-        conversation_id=conversation_id,
-        message=ChatMessage(
-            role="assistant",
-            content=result["answer"]
-        ),
-        thinking=result.get("thinking", None),
-        tools_used=result.get("tools_used", None),
-        processing_time=0,
-        sources=result.get("sources", None),
-        context=chat_request.context
-    )
 
 
 # Función para verificar un tenant público por su slug
@@ -1935,7 +1663,7 @@ async def public_chat_with_agent(
     callback_handler = AgentCallbackHandler()
     
     # Configurar las herramientas del agente
-    tools = await create_agent_tools(agent_config)
+    tools = await create_agent_tools(agent_config, tenant_info.tenant_id)
     
     # Inicializar el agente con las herramientas
     agent_executor = await initialize_agent_with_tools(
@@ -2003,7 +1731,7 @@ async def delete_conversation(
         DeleteConversationResponse: Resultado de la operación de eliminación
     """
     # El tenant_id y conversation_id ya están disponibles gracias al decorador
-    tenant_id = get_current_tenant_id()
+    tenant_id = tenant_info.tenant_id
     
     try:
         supabase = get_supabase_client()
@@ -2063,24 +1791,25 @@ async def delete_conversation(
 @with_full_context
 async def get_conversation_messages(
     conversation_id: str,
-    limit: int = 50,
-    offset: int = 0,
-    tenant_info: TenantInfo = Depends(verify_tenant)
+    limit: Optional[int] = Query(None, description="Número máximo de mensajes a devolver"), 
+    offset: int = Query(0, description="Desplazamiento para paginación")
 ) -> MessageListResponse:
     """
     Obtiene los mensajes de una conversación específica.
     
     Args:
         conversation_id: ID de la conversación
-        limit: Número máximo de mensajes a devolver (por defecto 50)
+        limit: Número máximo de mensajes a devolver (por defecto: de settings)
         offset: Desplazamiento para paginación (por defecto 0)
-        tenant_info: Información del tenant (inyectada mediante verify_tenant)
         
     Returns:
         MessageListResponse: Lista de mensajes de la conversación
     """
     # El tenant_id y conversation_id ya están disponibles gracias al decorador
-    tenant_id = get_current_tenant_id()
+    tenant_id = tenant_info.tenant_id
+    
+    # Usar el límite de la configuración si no se proporciona uno específico
+    effective_limit = limit if limit is not None else settings.agent_default_message_limit
     
     try:
         supabase = get_supabase_client()
@@ -2096,7 +1825,7 @@ async def get_conversation_messages(
             )
         
         # Obtener los mensajes de la conversación
-        messages_result = supabase.from_("ai.chat_history").select("*").eq("conversation_id", conversation_id).order("created_at", desc=False).range(offset, offset + limit - 1).execute()
+        messages_result = supabase.from_("ai.chat_history").select("*").eq("conversation_id", conversation_id).order("created_at", desc=False).range(offset, offset + effective_limit - 1).execute()
         
         # Convertir a formato ChatMessage
         messages = []
@@ -2152,7 +1881,7 @@ async def list_conversations(
         ConversationsListResponse: Lista de conversaciones
     """
     # El tenant_id ya está disponible gracias al decorador
-    tenant_id = get_current_tenant_id()
+    tenant_id = tenant_info.tenant_id
     
     try:
         supabase = get_supabase_client()
@@ -2220,100 +1949,102 @@ async def list_conversations(
             error_code="LIST_FAILED"
         )
 
-@with_tenant_context
-async def create_agent_tools(agent_config: AgentConfig) -> List[Tool]:
-    """
-    Crea herramientas para el agente LangChain.
-    
-    Args:
-        agent_config: Configuración del agente
-        
-    Returns:
-        Lista de herramientas de LangChain
-    """
-    tools = []
-    tenant_id = get_current_tenant_id()
-    
-    # Procesar cada herramienta en la configuración
-    for tool_config in agent_config.tools:
-        if not tool_config.is_active:
-            continue
-            
-        if tool_config.type == "rag":
-            # Crear herramienta RAG para búsqueda de documentos
-            rag_tool = await create_rag_tool(
-                tool_config=tool_config,
-                tenant_id=tenant_id,
-                agent_id=agent_config.agent_id if hasattr(agent_config, 'agent_id') else None
-            )
-            tools.append(rag_tool)
-    
-    return tools
-
 @app.post(
     "/admin/clear-config-cache",
     tags=["Admin"],
-    summary="Limpiar caché de configuraciones",
-    description="Invalida el caché de configuraciones para un tenant específico o todos"
+    summary="Limpiar Caché de Configuración",
+    description="Invalida el caché de configuraciones para forzar la recarga (global o específico del tenant).",
+    response_model=CacheClearResponse # Use standardized response model
 )
 @handle_service_error_simple
 async def clear_config_cache(
-    tenant_id: Optional[str] = None,
-    scope: Optional[str] = None,
-    scope_id: Optional[str] = None,
-    environment: str = "development"
+    scope: Optional[str] = Query(None, description="Ámbito específico a invalidar ('tenant', 'service', 'agent', 'collection')"),
+    scope_id: Optional[str] = Query(None, description="ID específico del ámbito (ej: agent_id, service_name)"),
+    environment: str = Query(settings.environment, description="Entorno de configuración"),
+    tenant_info: Optional[TenantInfo] = Depends(get_auth_info) # Get tenant from auth
 ):
     """
-    Invalida el caché de configuraciones para un tenant específico o todos,
+    Invalida el caché de configuraciones para el tenant autenticado (o globalmente),
     con soporte para invalidación específica por ámbito.
-    
-    Este endpoint permite forzar la recarga de configuraciones desde las fuentes
-    originales (variables de entorno y/o Supabase), lo que es útil después de
-    realizar cambios en la configuración que deban aplicarse inmediatamente.
-    
+
     Args:
-        tenant_id: ID del tenant (opcional, si no se proporciona se invalidan todos)
         scope: Ámbito específico a invalidar ('tenant', 'service', 'agent', 'collection')
         scope_id: ID específico del ámbito (ej: agent_id, service_name)
         environment: Entorno de configuración (development, staging, production)
-        
+        tenant_info: Información del tenant obtenida de la autenticación (opcional).
+
     Returns:
-        Dict: Resultado de la operación
+        CacheClearResponse: Resultado de la operación
     """
-    from common.supabase import apply_tenant_configuration_changes
-    
-    if tenant_id:
-        # Invalidar para un tenant específico con soporte para ámbito
-        if scope:
-            # Invalidar configuraciones para un ámbito específico
-            apply_tenant_configuration_changes(
-                tenant_id=tenant_id,
-                environment=environment,
-                scope=scope,
-                scope_id=scope_id
-            )
-            scope_msg = f"ámbito {scope}" + (f" (ID: {scope_id})" if scope_id else "")
-            return {
-                "success": True, 
-                "message": f"Caché de configuraciones invalidado para tenant {tenant_id} en {scope_msg}"
-            }
+    actual_tenant_id = tenant_info.tenant_id if tenant_info else None
+    keys_cleaned_count = -1 # Default to unknown count
+    message = ""
+    pattern_used = "N/A"
+    scope_info = scope or ("all_within_tenant" if actual_tenant_id else "global")
+
+    try:
+        if actual_tenant_id:
+            # Invalidation for a specific authenticated tenant
+            if scope:
+                # Invalidate specific scope using apply_tenant_configuration_changes
+                logger.info(f"Aplicando cambios de configuración para tenant {actual_tenant_id}, scope: {scope}, scope_id: {scope_id}")
+                # Assuming apply_tenant_configuration_changes handles cache invalidation for the scope
+                apply_tenant_configuration_changes(
+                    tenant_id=actual_tenant_id,
+                    environment=environment,
+                    scope=scope,
+                    scope_id=scope_id
+                )
+                scope_msg = f"ámbito {scope}" + (f" (ID: {scope_id})" if scope_id else "")
+                message = f"Caché de configuraciones invalidado para tenant {actual_tenant_id} en {scope_msg}"
+                # We don't know the exact key count from apply_tenant_configuration_changes
+                pattern_used = f"config:{actual_tenant_id}:{scope}:{scope_id or '*'}:*" # Approximate pattern
+            else:
+                # Invalidate all settings for the tenant
+                logger.info(f"Invalidando caché de configuración para tenant {actual_tenant_id}")
+                cleaned_keys_invalidate = invalidate_settings_cache(actual_tenant_id) or 0
+                # Also clear the tenant_config Redis cache explicitly if needed
+                pattern_used = f"tenant_config:{actual_tenant_id}:*"
+                cleaned_keys_delete = delete_pattern(pattern_used)
+                keys_cleaned_count = max(cleaned_keys_invalidate, cleaned_keys_delete) # Use the max count as an estimate
+                message = f"Caché de configuraciones invalidado para tenant {actual_tenant_id}"
         else:
-            # Invalidar todas las configuraciones del tenant
-            invalidate_settings_cache(tenant_id)
-            # También limpiar la caché de Redis para este tenant
-            from common.cache import delete_pattern
-            delete_pattern(f"tenant_config:{tenant_id}:*")
-            return {
-                "success": True, 
-                "message": f"Caché de configuraciones invalidado para tenant {tenant_id}"
+            # Global invalidation (no specific tenant authenticated)
+            if scope:
+                 # Avoid global scope invalidation via this method? Or implement if necessary.
+                 # Currently, global invalidation only happens without scope.
+                 raise HTTPException(status_code=400, detail="Invalidación global por ámbito no soportada actualmente sin autenticación de tenant.")
+            else:
+                logger.info("Invalidando caché de configuración globalmente")
+                cleaned_keys_invalidate = invalidate_settings_cache() or 0 # Invalidate for all tenants
+                # Also clear the entire tenant_config Redis cache
+                pattern_used = "tenant_config:*"
+                cleaned_keys_delete = delete_pattern(pattern_used)
+                keys_cleaned_count = max(cleaned_keys_invalidate, cleaned_keys_delete)
+                message = "Caché de configuraciones invalidado globalmente"
+
+        return CacheClearResponse(
+            success=True,
+            message=message,
+            keys_deleted=keys_cleaned_count if keys_cleaned_count is not None else -1,
+            metadata={
+                "pattern": pattern_used,
+                "scope": scope_info,
+                "tenant_id": actual_tenant_id or "all"
             }
-    else:
-        # Invalidar para todos los tenants
-        invalidate_settings_cache()
-        # También limpiar toda la caché de configuraciones
-        from common.cache import delete_pattern
-        delete_pattern("tenant_config:*")
-        return {
-            "success": True, 
-            "message": "Caché de configuraciones invalidado para todos los tenants"
-        }
+        )
+
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.exception(f"Error inesperado limpiando caché de configuraciones en AgentService: {str(e)}")
+        return CacheClearResponse(
+            success=False,
+            message=f"Error limpiando caché: {str(e)}",
+            keys_deleted=0,
+            metadata={
+                "pattern": pattern_used if 'pattern_used' in locals() else "N/A",
+                "scope": scope_info,
+                "tenant_id": actual_tenant_id or "all"
+            }
+        )
