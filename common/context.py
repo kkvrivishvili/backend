@@ -24,12 +24,47 @@ current_conversation_id = contextvars.ContextVar("current_conversation_id", defa
 
 def get_current_tenant_id() -> str:
     """
-    Obtiene el ID del tenant del contexto de ejecución actual.
+    Obtiene el ID del tenant del contexto de ejecución actual con validación adicional de seguridad.
     
     Returns:
-        str: ID del tenant o "default" si no está definido
+        str: ID del tenant validado o "default" si no está definido
+        
+    Raises:
+        ServiceError: Si el tenant no está autorizado o hay un error en la validación
     """
-    return current_tenant_id.get()
+    from .config import get_settings
+    
+    tenant_id = current_tenant_id.get()
+    
+    # Validación adicional de seguridad cuando existe un tenant_id no default
+    settings = get_settings()
+    if (tenant_id and 
+        tenant_id != "default" and 
+        getattr(settings, "validate_tenant_access", False)):
+        
+        try:
+            # Añadir verificación extra contra Supabase
+            from .supabase import is_tenant_active
+            if not is_tenant_active(tenant_id):
+                from .errors import ServiceError
+                logger.warning(f"Intento de acceso a tenant inactivo o no autorizado: {tenant_id}")
+                raise ServiceError(
+                    message="Tenant inactivo o no autorizado",
+                    status_code=403,
+                    error_code="TENANT_ACCESS_DENIED"
+                )
+        except Exception as e:
+            from .errors import ServiceError
+            if not isinstance(e, ServiceError):
+                logger.error(f"Error en validación de tenant {tenant_id}: {str(e)}")
+                raise ServiceError(
+                    message="Error en validación de tenant", 
+                    status_code=500,
+                    error_code="TENANT_VALIDATION_ERROR"
+                )
+            raise
+    
+    return tenant_id
 
 def get_required_tenant_id() -> str:
     """

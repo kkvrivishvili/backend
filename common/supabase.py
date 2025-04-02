@@ -446,6 +446,46 @@ def apply_tenant_configuration_changes(tenant_id: str, environment: str = "devel
         return False
 
 
+def is_tenant_active(tenant_id: str) -> bool:
+    """
+    Verifica si un tenant está activo en Supabase.
+    
+    Args:
+        tenant_id: ID del tenant a verificar
+        
+    Returns:
+        bool: True si el tenant existe y está activo, False en caso contrario
+    """
+    from .cache import get_cached_value, cache_value
+    
+    # Usar caché para evitar consultas frecuentes
+    cache_key = f"tenant_active:{tenant_id}"
+    cached_result = get_cached_value(cache_key)
+    
+    if cached_result is not None:
+        return cached_result
+    
+    try:
+        client = get_supabase_client()
+        result = client.table("public.tenants").select("is_active").eq("tenant_id", tenant_id).execute()
+        
+        # Verificar que el tenant exista y esté activo
+        is_active = False
+        if result.data and len(result.data) > 0:
+            is_active = result.data[0].get("is_active", False)
+        
+        # Cachear el resultado por un tiempo limitado (5 minutos)
+        cache_value(cache_key, is_active, ttl=300)
+        
+        if not is_active:
+            logger.warning(f"Tenant {tenant_id} no está activo o no existe")
+            
+        return is_active
+    except Exception as e:
+        logger.error(f"Error verificando estado del tenant {tenant_id}: {str(e)}")
+        return False
+
+
 """
 Esquema para colecciones en Supabase
 

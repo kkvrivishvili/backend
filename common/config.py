@@ -114,6 +114,9 @@ class Settings(BaseSettings):
     # Flag obsoleta eliminada: skip_supabase
     mock_openai: bool = Field(False, env="MOCK_OPENAI")
     
+    # Configuración de seguridad
+    validate_tenant_access: bool = Field(False, env="VALIDATE_TENANT_ACCESS")
+    
     # Service-specific settings
     service_name: str = Field("llama-service", env="SERVICE_NAME")
     service_version: str = Field("1.0.0", env="SERVICE_VERSION")

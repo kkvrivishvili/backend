@@ -23,6 +23,24 @@ logger = logging.getLogger(__name__)
 T = TypeVar('T')
 Func = Callable[..., Awaitable[T]]
 
+# Códigos de error estandarizados para la plataforma
+ERROR_CODES = {
+    # Códigos generales
+    "NOT_FOUND": "Recurso no encontrado",
+    "PERMISSION_DENIED": "Sin permisos para la operación",
+    "VALIDATION_ERROR": "Error en datos de entrada",
+    "QUOTA_EXCEEDED": "Límite de cuota alcanzado",
+    "RATE_LIMITED": "Límite de tasa alcanzado",
+    "SERVICE_UNAVAILABLE": "Servicio no disponible",
+    "INTERNAL_ERROR": "Error interno del servidor",
+    
+    # Códigos específicos para tenants
+    "TENANT_ACCESS_DENIED": "Acceso denegado al tenant",
+    "TENANT_VALIDATION_ERROR": "Error en la validación del tenant",
+    "TENANT_ISOLATION_BREACH": "Violación de aislamiento de tenant",
+    
+    # Más códigos específicos pueden agregarse aquí
+}
 
 class ServiceError(Exception):
     """
