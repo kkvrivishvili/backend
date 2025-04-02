@@ -8,7 +8,7 @@ OLLAMA_URL="${OLLAMA_API_URL:-http://ollama:11434}"
 WAIT_TIMEOUT="${OLLAMA_WAIT_TIMEOUT:-600}"  # Aumentado a 10 minutos
 PULL_MODELS="${OLLAMA_PULL_MODELS:-true}"
 EMBEDDING_MODEL="${DEFAULT_OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}"
-LLM_MODEL="${DEFAULT_OLLAMA_LLM_MODEL:-llama2}"
+LLM_MODEL="${DEFAULT_OLLAMA_LLM_MODEL:-llama3.2:1b}"
 
 # Función para registrar mensajes con fecha y hora
 log_message() {

@@ -9,9 +9,8 @@ import logging
 import time
 from typing import Dict, Any, Optional, List, Union
 from functools import lru_cache
-from pydantic import BaseSettings, Field
+from pydantic import Field, validator
 from pydantic_settings import BaseSettings
-from pydantic import validator
 
 logger = logging.getLogger(__name__)
 

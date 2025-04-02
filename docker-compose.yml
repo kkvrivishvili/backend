@@ -54,6 +54,8 @@ services:
       # Variables de configuración general
       - LOG_LEVEL=INFO
       - USE_OLLAMA=true
+      - DEFAULT_OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+      - DEFAULT_OLLAMA_LLM_MODEL=llama3.2:1b
     depends_on:
       - redis
       - ollama
@@ -86,6 +88,8 @@ services:
       # Variables de configuración general
       - LOG_LEVEL=INFO
       - USE_OLLAMA=true
+      - DEFAULT_OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+      - DEFAULT_OLLAMA_LLM_MODEL=llama3.2:1b
     depends_on:
       - embedding-service
       - ollama
@@ -118,7 +122,8 @@ services:
       # Variables de configuración general
       - LOG_LEVEL=INFO
       - USE_OLLAMA=true
-      - DEFAULT_OLLAMA_MODEL=llama3
+      - DEFAULT_OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+      - DEFAULT_OLLAMA_LLM_MODEL=llama3.2:1b
     depends_on:
       - embedding-service
       - ollama
@@ -152,7 +157,8 @@ services:
       # Variables de configuración general
       - LOG_LEVEL=INFO
       - USE_OLLAMA=true
-      - DEFAULT_OLLAMA_MODEL=llama3
+      - DEFAULT_OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+      - DEFAULT_OLLAMA_LLM_MODEL=llama3.2:1b
     depends_on:
       - embedding-service
       - query-service
