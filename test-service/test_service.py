@@ -31,6 +31,12 @@ from common.logging import init_logging
 from common.auth import verify_tenant, TenantInfo
 from common.models import ServiceStatusResponse, HealthResponse
 
+# Importar runner de tests centralizado
+import os.path
+# Usar importación relativa, no como paquete
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from run_tests import run_pytest, generate_report
+
 # Inicializar logger
 logger = logging.getLogger(__name__)
 init_logging()
@@ -256,7 +262,8 @@ async def health_check():
     return HealthResponse(
         success=True,
         status=status,
-        components=services_status
+        components=services_status,
+        version="1.0.0"  # Añadimos la versión para cumplir con el modelo requerido
     )
 
 @app.post("/tests/run/{service_name}", response_model=TestsExecutionResponse)

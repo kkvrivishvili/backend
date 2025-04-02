@@ -2,17 +2,12 @@ version: '3.8'
 
 services:
   redis:
-    image: redis:7-alpine
+    image: redis:alpine
     ports:
       - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
     volumes:
       - redis-data:/data
+    restart: always
 
   ollama:
     image: ollama/ollama:latest
@@ -26,21 +21,27 @@ services:
       timeout: 10s
       retries: 5
       start_period: 40s
+    restart: always
 
   embedding-service:
     build:
       context: .
       dockerfile: docker/services/Dockerfile.embedding
+    restart: always
     ports:
       - "8001:8001"
     volumes:
       - ./common:/app/common
       - ./embedding-service:/app/embedding-service
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     environment:
       # Variables de credenciales
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - SUPABASE_URL=${SUPABASE_URL:-https://example.supabase.co}
       - SUPABASE_KEY=${SUPABASE_KEY:-dummy-key-for-testing}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY:-dummy-service-key-for-testing}
       
       # Variables de identificación del servicio
       - SERVICE_NAME=embedding-service
@@ -67,16 +68,21 @@ services:
     build:
       context: .
       dockerfile: docker/services/Dockerfile.ingestion
+    restart: always
     ports:
       - "8004:8004"
     volumes:
       - ./common:/app/common
       - ./ingestion-service:/app/ingestion-service
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     environment:
       # Variables de credenciales
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - SUPABASE_URL=${SUPABASE_URL:-https://example.supabase.co}
       - SUPABASE_KEY=${SUPABASE_KEY:-dummy-key-for-testing}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY:-dummy-service-key-for-testing}
       
       # Variables de identificación del servicio
       - SERVICE_NAME=ingestion-service
@@ -104,16 +110,21 @@ services:
     build:
       context: .
       dockerfile: docker/services/Dockerfile.query
+    restart: always
     ports:
       - "8002:8002"
     volumes:
       - ./common:/app/common
       - ./query-service:/app/query-service
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     environment:
       # Variables de credenciales
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - SUPABASE_URL=${SUPABASE_URL:-https://example.supabase.co}
       - SUPABASE_KEY=${SUPABASE_KEY:-dummy-key-for-testing}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY:-dummy-service-key-for-testing}
       
       # Variables de identificación del servicio
       - SERVICE_NAME=query-service
@@ -141,16 +152,21 @@ services:
     build:
       context: .
       dockerfile: docker/services/Dockerfile.agent
+    restart: always
     ports:
       - "8003:8003"
     volumes:
       - ./common:/app/common
       - ./agent-service:/app/agent-service
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     environment:
       # Variables de credenciales
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - SUPABASE_URL=${SUPABASE_URL:-https://example.supabase.co}
       - SUPABASE_KEY=${SUPABASE_KEY:-dummy-key-for-testing}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY:-dummy-service-key-for-testing}
       
       # Variables de identificación del servicio
       - SERVICE_NAME=agent-service
@@ -180,6 +196,7 @@ services:
     build:
       context: .
       dockerfile: test-service/Dockerfile
+    restart: always
     ports:
       - "8005:8005"
     volumes:
@@ -189,11 +206,15 @@ services:
       - ./query-service/tests:/app/query-service/tests
       - ./ingestion-service/tests:/app/ingestion-service/tests
       - ./agent-service/tests:/app/agent-service/tests
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     environment:
       # Variables de credenciales
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - SUPABASE_URL=${SUPABASE_URL:-https://example.supabase.co}
       - SUPABASE_KEY=${SUPABASE_KEY:-dummy-key-for-testing}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY:-dummy-service-key-for-testing}
       
       # Variables de identificación del servicio
       - SERVICE_NAME=test-service

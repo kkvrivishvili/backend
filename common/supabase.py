@@ -13,11 +13,15 @@ from .context import get_current_tenant_id, TenantContext
 
 logger = logging.getLogger(__name__)
 
-
 @lru_cache
-def get_supabase_client() -> Client:
+def get_supabase_client(use_service_role: bool = True) -> Client:
     """
     Obtiene un cliente Supabase con caché para reutilización.
+    
+    Args:
+        use_service_role: Si es True, usa la clave de servicio (service role) 
+                          cuando está disponible, que permite bypass de políticas RLS.
+                          Para acceso público debe ser False.
     
     Returns:
         Client: Cliente Supabase
@@ -26,9 +30,15 @@ def get_supabase_client() -> Client:
     from .config import get_settings
     settings = get_settings()
     
+    # Usar clave de service role si está disponible y se solicita
+    api_key = settings.supabase_key
+    if use_service_role and hasattr(settings, 'supabase_service_key') and settings.supabase_service_key:
+        api_key = settings.supabase_service_key
+        logger.debug("Usando clave de servicio (service role) para Supabase")
+    
     supabase = create_client(
         settings.supabase_url,
-        settings.supabase_key
+        api_key
     )
     return supabase
 
@@ -298,14 +308,17 @@ def safe_convert_config_value(value: str, config_type: str) -> Any:
         Valor convertido al tipo apropiado
     """
     try:
-        if not value:
-            return None
-            
         if config_type == 'integer':
+            if value is None:
+                return 0
             return int(value)
         elif config_type == 'float':
+            if value is None:
+                return 0.0
             return float(value)
         elif config_type == 'boolean':
+            if value is None:
+                return False
             if isinstance(value, str):
                 return value.lower() in ('true', '1', 'yes', 'on')
             return bool(value)
@@ -317,8 +330,16 @@ def safe_convert_config_value(value: str, config_type: str) -> Any:
         return str(value)
     except Exception as e:
         logger.error(f"Error convirtiendo valor '{value}' a tipo {config_type}: {e}")
-        # Devolver el valor original en caso de error
-        return value
+        # En caso de error de conversión, devolver valores predeterminados seguros según el tipo
+        if config_type == 'integer':
+            return 0
+        elif config_type == 'float':
+            return 0.0
+        elif config_type == 'boolean':
+            return False
+        elif config_type == 'json':
+            return {}
+        return ""
 
 
 def get_effective_configurations(
@@ -727,13 +748,14 @@ def get_table_name(table_base_name: str) -> str:
         str: Nombre completo de la tabla con prefijo adecuado
     """
     # Tablas que deben estar en el esquema public
-    public_tables = ["tenants", "users", "auth"]
+    public_tables = ["tenants", "users", "auth", "public_sessions"]
     
     # Tablas que deben estar en el esquema ai
     ai_tables = [
-        "tenant_configurations", "agent_configs", "conversations", 
-        "chat_history", "collections", "document_chunks", 
-        "tenant_stats", "embedding_metrics", "query_logs"
+        "tenant_configurations", "tenant_subscriptions", "tenant_stats",
+        "agent_configs", "conversations", "chat_history", "chat_feedback",
+        "collections", "document_chunks", "agent_collections", 
+        "embedding_metrics", "query_logs"
     ]
     
     # Determinar prefijo adecuado

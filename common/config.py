@@ -55,8 +55,15 @@ class Settings(BaseSettings):
     """
     # =========== Configuración general ===========
     service_name: str = Field("llama-service", description="Nombre del servicio actual")
+    service_version: str = Field("1.0.0", env="SERVICE_VERSION", description="Versión del servicio")
     environment: str = Field("development", description="Entorno actual (development, staging, production)")
     debug_mode: bool = Field(False, description="Modo de depuración")
+    
+    # =========== URLs de servicios ===========
+    embedding_service_url: str = Field("http://embedding-service:8001", env="EMBEDDING_SERVICE_URL", description="URL del servicio de embeddings")
+    query_service_url: str = Field("http://query-service:8002", env="QUERY_SERVICE_URL", description="URL del servicio de consultas")
+    agent_service_url: str = Field("http://agent-service:8003", env="AGENT_SERVICE_URL", description="URL del servicio de agentes")
+    ingestion_service_url: str = Field("http://ingestion-service:8000", env="INGESTION_SERVICE_URL", description="URL del servicio de ingesta")
     
     # =========== Tenant por defecto ===========
     default_tenant_id: str = Field("default", description="ID del tenant por defecto")
@@ -72,6 +79,7 @@ class Settings(BaseSettings):
     # =========== Supabase ===========
     supabase_url: str = Field(..., env="SUPABASE_URL", description="URL de Supabase")
     supabase_key: str = Field(..., env="SUPABASE_KEY", description="Clave de Supabase")
+    supabase_service_key: Optional[str] = Field(None, env="SUPABASE_SERVICE_KEY", description="Clave de servicio de Supabase (service role)")
     supabase_jwt_secret: str = Field("super-secret-jwt-token-with-at-least-32-characters-long", description="JWT Secret para verificación de tokens")
     
     # =========== Rate Limiting ===========

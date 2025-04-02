@@ -53,6 +53,17 @@ class HealthResponse(BaseResponse):
     version: str
 
 
+class ServiceStatusResponse(BaseResponse):
+    """Respuesta estándar para endpoints de status del servicio."""
+    service_name: str
+    version: str
+    environment: str
+    uptime: float
+    uptime_formatted: str
+    status: str = "online"
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+
 class EmbeddingRequest(BaseModel):
     """Solicitud para generar embeddings."""
     tenant_id: str

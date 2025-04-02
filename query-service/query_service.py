@@ -14,8 +14,9 @@ import asyncio
 import httpx
 from typing import List, Dict, Any, Optional, Union, TypeVar, Tuple
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
+import time
 
 from fastapi import FastAPI, Request, Depends, HTTPException, Body, Query, Path, Response, BackgroundTasks
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -50,7 +51,7 @@ from common.models import (
     CollectionsListResponse, CollectionInfo, LlmModelInfo, LlmModelsListResponse,
     TenantStatsResponse, UsageByModel, TokensUsage, DailyUsage, CollectionDocCount,
     CollectionToolResponse, CollectionCreationResponse, CollectionUpdateResponse, CollectionStatsResponse,
-    CacheClearResponse, ErrorResponse, DeleteCollectionResponse
+    CacheClearResponse, ErrorResponse, DeleteCollectionResponse, ServiceStatusResponse
 )
 from common.auth import (
     verify_tenant, check_tenant_quotas, validate_model_access, 
@@ -301,6 +302,81 @@ http_client = httpx.AsyncClient(timeout=30.0)
 # Debug handler para LlamaIndex
 llama_debug = LlamaDebugHandler(print_trace_on_end=False)
 callback_manager = CallbackManager([llama_debug])
+
+# Variable global para registrar el inicio del servicio
+service_start_time = time.time()
+
+# Funciones para verificar la salud del servicio
+async def check_redis_connection() -> bool:
+    """
+    Verifica la disponibilidad de la conexión con Redis.
+    
+    Returns:
+        bool: True si la conexión está disponible, False en caso contrario
+    """
+    try:
+        redis_client = get_redis_client()
+        return await redis_client.ping()
+    except Exception as e:
+        logging.error(f"Error al verificar conexión con Redis: {str(e)}")
+        return False
+
+async def check_supabase_connection() -> bool:
+    """
+    Verifica la disponibilidad de la conexión con Supabase.
+    
+    Returns:
+        bool: True si la conexión está disponible, False en caso contrario
+    """
+    try:
+        supabase = get_supabase_client()
+        # Intentar una operación sencilla para verificar la conexión
+        result = await supabase.rpc('check_health').execute()
+        return len(result.data) > 0 and "status" in result.data[0]
+    except Exception as e:
+        logging.error(f"Error al verificar conexión con Supabase: {str(e)}")
+        return False
+
+async def get_service_status() -> ServiceStatusResponse:
+    """
+    Obtiene el estado actual del servicio y sus dependencias.
+    
+    Returns:
+        ServiceStatusResponse: Estado detallado del servicio
+    """
+    settings = get_settings()
+    
+    # Calcular tiempo de actividad
+    uptime_seconds = time.time() - service_start_time
+    uptime_formatted = str(timedelta(seconds=int(uptime_seconds)))
+    
+    # Verificar el estado de las dependencias
+    redis_available = await check_redis_connection()
+    supabase_available = await check_supabase_connection()
+    
+    # Determinar el estado general del servicio
+    status = "healthy"
+    if not redis_available or not supabase_available:
+        status = "degraded"
+    
+    # Construir la respuesta
+    return ServiceStatusResponse(
+        success=True,
+        service_name="query-service",
+        version=settings.service_version if hasattr(settings, 'service_version') else "1.0.0",
+        environment=os.getenv("ENVIRONMENT", "development"),
+        uptime=uptime_seconds,
+        uptime_formatted=uptime_formatted,
+        status=status,
+        components={
+            "redis": "available" if redis_available else "unavailable",
+            "supabase": "available" if supabase_available else "unavailable"
+        },
+        dependencies={
+            "redis": redis_available,
+            "supabase": supabase_available
+        }
+    )
 
 # Función para obtener el sintetizador de respuesta adecuado
 def get_response_synthesizer(response_mode="compact", llm=None, callback_manager=None, **kwargs):
