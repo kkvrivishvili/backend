@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 import redis
-from fastapi import FastAPI, HTTPException, Depends, status, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, status, Request, BackgroundTasks, Path, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -35,8 +35,8 @@ from common.models import (
     DeleteAgentResponse, DeleteConversationResponse,CacheClearResponse  # Agregar el modelo DeleteConversationResponse
 )
 from common.auth import verify_tenant, check_tenant_quotas, validate_model_access, get_auth_info
-from common.supabase import get_supabase_client, init_supabase, apply_tenant_configuration_changes, get_table_name
-from common.config import Settings, get_settings, invalidate_settings_cache, get_effective_configurations, is_development_environment, should_use_mock_config
+from common.supabase import get_supabase_client, init_supabase, apply_tenant_configuration_changes, get_table_name, get_effective_configurations
+from common.config import Settings, get_settings, invalidate_settings_cache, is_development_environment, should_use_mock_config
 from common.utils import track_usage, sanitize_content, prepare_service_request
 from common.errors import handle_service_error_simple, ServiceError, create_error_response
 from common.rpc_helpers import create_conversation, add_chat_history
@@ -2005,7 +2005,7 @@ async def clear_config_cache(
             if scope:
                  # Avoid global scope invalidation via this method? Or implement if necessary.
                  # Currently, global invalidation only happens without scope.
-                 raise HTTPException(status_code=400, detail="Invalidación global por ámbito no soportada actualmente sin autenticación de tenant.")
+                raise HTTPException(status_code=400, detail="Invalidación global por ámbito no soportada actualmente sin autenticación de tenant.")
             else:
                 logger.info("Invalidando caché de configuración globalmente")
                 cleaned_keys_invalidate = invalidate_settings_cache() or 0 # Invalidate for all tenants

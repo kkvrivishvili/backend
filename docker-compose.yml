@@ -33,6 +33,9 @@ services:
       dockerfile: docker/services/Dockerfile.embedding
     ports:
       - "8001:8001"
+    volumes:
+      - ./common:/app/common
+      - ./embedding-service:/app/embedding-service
     environment:
       # Variables de credenciales
       - OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -66,6 +69,9 @@ services:
       dockerfile: docker/services/Dockerfile.ingestion
     ports:
       - "8004:8004"
+    volumes:
+      - ./common:/app/common
+      - ./ingestion-service:/app/ingestion-service
     environment:
       # Variables de credenciales
       - OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -100,6 +106,9 @@ services:
       dockerfile: docker/services/Dockerfile.query
     ports:
       - "8002:8002"
+    volumes:
+      - ./common:/app/common
+      - ./query-service:/app/query-service
     environment:
       # Variables de credenciales
       - OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -134,6 +143,9 @@ services:
       dockerfile: docker/services/Dockerfile.agent
     ports:
       - "8003:8003"
+    volumes:
+      - ./common:/app/common
+      - ./agent-service:/app/agent-service
     environment:
       # Variables de credenciales
       - OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -162,6 +174,53 @@ services:
     depends_on:
       - embedding-service
       - query-service
+      - ollama
+
+  test-service:
+    build:
+      context: .
+      dockerfile: test-service/Dockerfile
+    ports:
+      - "8005:8005"
+    volumes:
+      - ./common:/app/common
+      - ./test-service:/app/test-service
+      - ./embedding-service/tests:/app/embedding-service/tests
+      - ./query-service/tests:/app/query-service/tests
+      - ./ingestion-service/tests:/app/ingestion-service/tests
+      - ./agent-service/tests:/app/agent-service/tests
+    environment:
+      # Variables de credenciales
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SUPABASE_URL=${SUPABASE_URL:-https://example.supabase.co}
+      - SUPABASE_KEY=${SUPABASE_KEY:-dummy-key-for-testing}
+      
+      # Variables de identificación del servicio
+      - SERVICE_NAME=test-service
+      
+      # Variables de conexión con servicios
+      - REDIS_URL=redis://redis:6379/0
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8001
+      - QUERY_SERVICE_URL=http://query-service:8002
+      - INGESTION_SERVICE_URL=http://ingestion-service:8004
+      - AGENT_SERVICE_URL=http://agent-service:8003
+      - OLLAMA_API_URL=http://ollama:11434
+      
+      # Variables de configuración multi-tenant
+      - TENANT_ID=default
+      - CONFIG_ENVIRONMENT=development
+      - LOAD_CONFIG_FROM_SUPABASE=false
+      
+      # Variables de configuración general
+      - LOG_LEVEL=INFO
+      - PYTEST_RUNNING=true
+      - TEST_MODE=integration
+    depends_on:
+      - embedding-service
+      - query-service
+      - ingestion-service
+      - agent-service
+      - redis
       - ollama
 
 volumes:

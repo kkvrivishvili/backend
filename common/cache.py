@@ -421,6 +421,34 @@ def cache_get_memory_usage(pattern: Optional[str] = None) -> Dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
+def get_cached_value(key: str) -> Optional[Any]:
+    """
+    Alias de cache_get para compatibilidad con código existente.
+    
+    Args:
+        key: Clave de caché
+        
+    Returns:
+        Optional[Any]: Valor almacenado o None si no existe
+    """
+    return cache_get(key)
+
+
+def cache_value(key: str, value: Any, ttl: int = None) -> bool:
+    """
+    Alias de cache_set para compatibilidad con código existente.
+    
+    Args:
+        key: Clave de caché
+        value: Valor a almacenar
+        ttl: Tiempo de vida en segundos
+        
+    Returns:
+        bool: True si se almacenó correctamente
+    """
+    return cache_set(key, value, ttl)
+
+
 async def delete_pattern(pattern: str) -> int:
     """
     Elimina todas las claves de caché que coincidan con un patrón específico.

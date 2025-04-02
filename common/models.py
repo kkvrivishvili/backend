@@ -90,6 +90,18 @@ class BatchEmbeddingRequest(BaseModel):
     conversation_id: Optional[str] = None
 
 
+class BatchEmbeddingResponse(BaseResponse):
+    """Respuesta con embeddings generados para un lote de textos con metadatos."""
+    embeddings: List[List[float]]
+    items: List[TextItem]
+    model: str
+    dimensions: int
+    processing_time: float
+    cached_count: int = 0
+    total_tokens: Optional[int] = None
+    collection_id: Optional[UUID] = None
+
+
 class DocumentMetadata(BaseModel):
     """Metadatos para documentos."""
     source: str
@@ -98,6 +110,15 @@ class DocumentMetadata(BaseModel):
     document_type: str
     tenant_id: str
     custom_metadata: Optional[Dict[str, Any]] = None
+
+
+class DeleteCollectionResponse(BaseResponse):
+    """Respuesta a la eliminación de una colección."""
+    collection_id: UUID
+    name: Optional[str] = None
+    deleted: bool = True
+    documents_deleted: int = 0
+    chunks_deleted: int = 0
 
 
 class DocumentIngestionRequest(BaseModel):
@@ -574,20 +595,7 @@ class DeleteDocumentResponse(BaseResponse):
     document_id: str
     deleted: bool
     collection_id: Optional[UUID] = None
-    name: Optional[str] = None  # Solo para UI
-
-
-class DeleteCollectionResponse(BaseResponse):
-    """
-    Respuesta para operación de eliminación de colección.
-    
-    Confirma si la colección fue eliminada satisfactoriamente y proporciona
-    información sobre los documentos afectados.
-    """
-    collection_id: UUID
-    name: Optional[str] = None  # Solo para UI
-    deleted: bool
-    documents_deleted: int = 0
+    name: Optional[str] = None
 
 
 class ModelListResponse(BaseResponse):

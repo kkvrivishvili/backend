@@ -11,6 +11,7 @@ import re
 import uuid
 import math
 import asyncio
+import httpx
 from typing import List, Dict, Any, Optional, Union, TypeVar, Tuple
 from uuid import UUID
 from datetime import datetime
@@ -49,7 +50,7 @@ from common.models import (
     CollectionsListResponse, CollectionInfo, LlmModelInfo, LlmModelsListResponse,
     TenantStatsResponse, UsageByModel, TokensUsage, DailyUsage, CollectionDocCount,
     CollectionToolResponse, CollectionCreationResponse, CollectionUpdateResponse, CollectionStatsResponse,
-    CacheClearResponse, ErrorResponse
+    CacheClearResponse, ErrorResponse, DeleteCollectionResponse
 )
 from common.auth import (
     verify_tenant, check_tenant_quotas, validate_model_access, 

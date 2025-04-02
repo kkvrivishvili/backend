@@ -35,7 +35,7 @@ from common.context import (
 # Importar nuestra biblioteca común
 from common.models import (
     TenantInfo, EmbeddingRequest, EmbeddingResponse, 
-    BatchEmbeddingRequest, TextItem, HealthResponse, ModelListResponse,
+    BatchEmbeddingRequest, BatchEmbeddingResponse, TextItem, HealthResponse, ModelListResponse,
     CacheStatsResponse, CacheClearResponse
 )
 from common.auth import verify_tenant, check_tenant_quotas, validate_model_access, get_auth_info
