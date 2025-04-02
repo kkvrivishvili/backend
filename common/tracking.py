@@ -51,7 +51,7 @@ async def track_token_usage(tenant_id: str, tokens: int, model: str = None) -> b
         ).execute()
         
         # Actualizar timestamp de última actividad
-        supabase.table("tenant_stats").update(
+        supabase.table("ai.tenant_stats").update(
             {"last_activity": "now()"}
         ).eq("tenant_id", tenant_id).execute()
         
@@ -101,7 +101,7 @@ async def track_embedding_usage(
         
         # Registrar métricas de embedding específicas (opcional)
         date_bucket = time.strftime("%Y-%m-%d")
-        supabase.table("embedding_metrics").insert({
+        supabase.table("ai.embedding_metrics").insert({
             "tenant_id": tenant_id,
             "date_bucket": date_bucket,
             "model": model,
@@ -176,7 +176,7 @@ async def track_query(
         await track_token_usage(tenant_id, total_tokens, model)
         
         # Registrar la consulta para analytics
-        supabase.table("query_logs").insert(metadata).execute()
+        supabase.table("ai.query_logs").insert(metadata).execute()
         
         return True
     except Exception as e:

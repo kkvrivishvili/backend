@@ -831,7 +831,7 @@ async def get_service_status() -> HealthResponse:
     try:
         from common.supabase import get_supabase_client
         supabase = get_supabase_client()
-        supabase.table("tenants").select("tenant_id").limit(1).execute()
+        supabase.table("ai.tenants").select("tenant_id").limit(1).execute()
     except Exception as e:
         logger.warning(f"Supabase no disponible: {str(e)}")
         supabase_status = "unavailable"

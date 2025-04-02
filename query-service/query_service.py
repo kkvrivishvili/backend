@@ -446,7 +446,7 @@ async def create_query_engine(
     collection_name = None
     try:
         supabase = get_supabase_client()
-        collection_result = await supabase.table("collections").select("name").eq("collection_id", collection_id).execute()
+        collection_result = await supabase.table("ai.collections").select("name").eq("collection_id", collection_id).execute()
         if collection_result.data and len(collection_result.data) > 0:
             collection_name = collection_result.data[0].get("name")
     except Exception as e:
@@ -523,7 +523,7 @@ async def list_documents(
     if collection_id:
         try:
             supabase = get_supabase_client()
-            collection_result = supabase.table("collections").select("name").eq("collection_id", str(collection_id)).execute()
+            collection_result = await supabase.table("ai.collections").select("name").eq("collection_id", str(collection_id)).execute()
             if collection_result.data and len(collection_result.data) > 0:
                 collection_name = collection_result.data[0].get("name")
         except Exception as e:
@@ -932,6 +932,90 @@ async def clear_config_cache(tenant_id: Optional[str] = None):
         # Invalidar para todos los tenants
         invalidate_settings_cache()
         return {"success": True, "message": "Caché de configuraciones invalidado para todos los tenants"}
+
+async def get_collection_name(collection_id: str, tenant_id: str) -> Optional[str]:
+    """
+    Obtiene el nombre de una colección a partir de su ID.
+    
+    Args:
+        collection_id: ID de la colección
+        tenant_id: ID del tenant
+        
+    Returns:
+        Nombre de la colección o None si no se encuentra
+    """
+    supabase = get_supabase_client()
+    
+    try:
+        collection_result = await supabase.table("ai.collections").select("name").eq("collection_id", collection_id).execute()
+        
+        if collection_result.data and len(collection_result.data) > 0:
+            return collection_result.data[0].get("name")
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error obteniendo nombre de colección {collection_id}: {str(e)}")
+        return None
+
+async def delete_collection(collection_id: str, tenant_info: TenantInfo) -> DeleteCollectionResponse:
+    """
+    Elimina una colección y todos sus documentos asociados.
+    
+    Args:
+        collection_id: ID de la colección a eliminar
+        tenant_info: Información del tenant
+        
+    Returns:
+        DeleteCollectionResponse: Resultado de la operación
+    """
+    logger.info(f"Eliminando colección {collection_id} del tenant {tenant_info.tenant_id}")
+    tenant_id = tenant_info.tenant_id
+    
+    try:
+        supabase = get_supabase_client()
+        
+        # 1. Verificar que la colección existe y pertenece al tenant
+        collection_result = await supabase.table("ai.collections").select("name").eq("collection_id", str(collection_id)).eq("tenant_id", tenant_id).execute()
+        
+        if not collection_result.data or len(collection_result.data) == 0:
+            raise ServiceError(
+                message=f"Colección {collection_id} no encontrada o no pertenece al tenant {tenant_id}",
+                error_code="collection_not_found",
+                status_code=404
+            )
+        
+        collection_name = collection_result.data[0].get("name", "")
+        
+        # 2. Contar documentos para reportar en la respuesta
+        chunks_result = await supabase.table("ai.document_chunks").select("count", count="exact").eq("tenant_id", tenant_id).filter("metadata->collection_id", "eq", str(collection_id)).execute()
+        chunks_count = chunks_result.count if hasattr(chunks_result, 'count') else 0
+        
+        # 3. Eliminar documentos de la colección
+        delete_chunks = await supabase.table("ai.document_chunks").delete().eq("tenant_id", tenant_id).filter("metadata->collection_id", "eq", str(collection_id)).execute()
+        
+        # 4. Eliminar la colección
+        delete_collection = await supabase.table("ai.collections").delete().eq("collection_id", str(collection_id)).eq("tenant_id", tenant_id).execute()
+        
+        # 5. Preparar respuesta
+        return DeleteCollectionResponse(
+            success=True,
+            message=f"Colección {collection_name} eliminada exitosamente",
+            collection_id=collection_id,
+            name=collection_name,
+            deleted=True,
+            documents_deleted=chunks_count
+        )
+        
+    except ServiceError:
+        # Re-lanzar errores de servicio
+        raise
+    except Exception as e:
+        logger.error(f"Error al eliminar colección {collection_id}: {str(e)}")
+        raise ServiceError(
+            message=f"Error al eliminar colección: {str(e)}",
+            error_code="delete_collection_error",
+            status_code=500
+        )
 
 if __name__ == "__main__":
     import uvicorn

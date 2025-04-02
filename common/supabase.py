@@ -76,7 +76,7 @@ def get_tenant_vector_store(tenant_id: Optional[str] = None, collection_id: Opti
     # Crear vector store
     vector_store = SupabaseVectorStore(
         client=supabase,
-        table_name="document_chunks",
+        table_name="ai.document_chunks",
         content_field="content",
         embedding_field="embedding",
         metadata_field="metadata",
@@ -111,7 +111,7 @@ def get_tenant_documents(
     supabase = get_supabase_client()
     
     # Query base
-    query = supabase.table("document_chunks").select("metadata")
+    query = supabase.table("ai.document_chunks").select("metadata")
     
     # Añadir filtros
     query = query.eq("tenant_id", tenant_id)
@@ -175,7 +175,7 @@ def get_tenant_collections(tenant_id: str) -> List[Dict[str, Any]]:
     supabase = get_supabase_client()
     
     # Query para obtener colecciones desde la tabla collections
-    collections_query = supabase.table("collections").select("collection_id", "name", "description", "created_at", "updated_at")
+    collections_query = supabase.table("ai.collections").select("collection_id", "name", "description", "created_at", "updated_at")
     collections_query = collections_query.eq("tenant_id", tenant_id)
     collections_result = collections_query.execute()
     
@@ -188,7 +188,7 @@ def get_tenant_collections(tenant_id: str) -> List[Dict[str, Any]]:
         collection_id = collection.get("collection_id")
         
         # Contar documentos en esta colección usando collection_id
-        count_query = supabase.table("document_chunks").select("metadata->document_id", "count")
+        count_query = supabase.table("ai.document_chunks").select("metadata->document_id", "count")
         count_query = count_query.eq("tenant_id", tenant_id)
         count_query = count_query.filter("metadata->collection_id", "eq", str(collection_id))
             
