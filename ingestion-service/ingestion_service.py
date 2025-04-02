@@ -26,9 +26,10 @@ from common.models import (
     CollectionCreationResponse, CollectionInfo, CacheClearResponse
 )
 from common.auth import verify_tenant, check_tenant_quotas, get_auth_info
-from common.config import get_settings, invalidate_settings_cache
 from common.errors import setup_error_handling, handle_service_error_simple, ServiceError
-from common.supabase import get_supabase_client, get_tenant_vector_store
+from common.config import get_settings, invalidate_settings_cache
+from common.supabase import get_supabase_client, get_tenant_vector_store, get_table_name
+from common.rpc_helpers import increment_document_count, decrement_document_count
 from common.rate_limiting import setup_rate_limiting
 from common.logging import init_logging
 from common.utils import prepare_service_request
@@ -328,7 +329,7 @@ async def process_document(
     collection_name = "unknown"
     try:
         supabase = get_supabase_client()
-        result = await supabase.table("collections").select("name").eq("collection_id", collection_id).execute()
+        result = await supabase.table(get_table_name("collections")).select("name").eq("collection_id", collection_id).execute()
         if result.data and len(result.data) > 0:
             collection_name = result.data[0].get("name", "unknown")
     except Exception as e:
@@ -420,7 +421,7 @@ async def index_documents_task(node_data_list: List[Dict[str, Any]], collection_
         
         # Insertar en la tabla de document_chunks
         supabase = get_supabase_client()
-        result = await supabase.table("document_chunks").insert(data_to_insert).execute()
+        result = await supabase.table(get_table_name("document_chunks")).insert(data_to_insert).execute()
         
         if result.error:
             logger.error(f"Error insertando chunks: {result.error}")
@@ -434,10 +435,10 @@ async def index_documents_task(node_data_list: List[Dict[str, Any]], collection_
         
         # Incrementar contador de documentos
         if doc_ids:
-            await supabase.rpc(
-                "increment_document_count",
-                {"p_tenant_id": tenant_id, "p_count": len(doc_ids)}
-            ).execute()
+            await increment_document_count(
+                tenant_id=tenant_id,
+                count=len(doc_ids)
+            )
             
         logger.info(f"Indexación completada para {len(node_data_list)} nodos en colección {collection_id}")
         
@@ -506,7 +507,7 @@ async def create_collection(
             )
         
         # Verificar si ya existe una colección con el mismo nombre
-        result = supabase.table("ai.collections").select("id") \
+        result = supabase.table(get_table_name("collections")).select("id") \
             .eq("tenant_id", tenant_id) \
             .eq("name", name) \
             .execute()
@@ -521,7 +522,7 @@ async def create_collection(
         
         # Insertar en la tabla de colecciones
         created_at = datetime.now().isoformat()
-        result = supabase.table("ai.collections").insert({
+        result = supabase.table(get_table_name("collections")).insert({
             "collection_id": collection_id,
             "name": name,
             "description": description,
@@ -617,7 +618,7 @@ async def delete_collection(
             )
         
         # Verificar existencia de la colección
-        result = supabase.table("ai.collections").select("name") \
+        result = supabase.table(get_table_name("collections")).select("name") \
             .eq("tenant_id", tenant_id) \
             .eq("collection_id", collection_id) \
             .execute()
@@ -632,8 +633,7 @@ async def delete_collection(
         collection_name = result.data[0]["name"]
         
         # Eliminar chunks de la colección
-        delete_result = supabase.table("ai.document_chunks") \
-            .delete() \
+        delete_result = supabase.table(get_table_name("document_chunks")).delete() \
             .eq("tenant_id", tenant_id) \
             .eq("collection_id", collection_id) \
             .execute()
@@ -641,8 +641,7 @@ async def delete_collection(
         chunks_deleted = len(delete_result.data) if delete_result.data else 0
         
         # Eliminar la colección
-        supabase.table("ai.collections") \
-            .delete() \
+        supabase.table(get_table_name("collections")).delete() \
             .eq("tenant_id", tenant_id) \
             .eq("collection_id", collection_id) \
             .execute()
@@ -962,7 +961,7 @@ async def delete_document_endpoint(
     
     try:
         # Primero verificar si existe el documento
-        verify_result = await supabase.table("document_chunks").select("metadata") \
+        verify_result = await supabase.table(get_table_name("document_chunks")).select("metadata") \
             .eq("tenant_id", tenant_id) \
             .eq("metadata->>document_id", document_id) \
             .limit(1) \
@@ -984,7 +983,7 @@ async def delete_document_endpoint(
             collection_name = metadata.get("collection", "default")
     
         # Eliminar chunks de documento
-        delete_result = await supabase.table("document_chunks").delete() \
+        delete_result = await supabase.table(get_table_name("document_chunks")).delete() \
             .eq("tenant_id", tenant_id) \
             .eq("metadata->>document_id", document_id) \
             .execute()
@@ -998,10 +997,10 @@ async def delete_document_endpoint(
             )
         
         # Decrementar contador de documentos
-        await supabase.rpc(
-            "decrement_document_count",
-            {"p_tenant_id": tenant_id, "p_count": 1}
-        ).execute()
+        await decrement_document_count(
+            tenant_id=tenant_id,
+            count=1
+        )
         
         deleted_count = len(delete_result.data) if delete_result.data else 0
         logger.info(f"Documento {document_id} eliminado con {deleted_count} chunks")
@@ -1053,7 +1052,7 @@ async def health_check():
     supabase_status = "available"
     try:
         supabase = get_supabase_client()
-        supabase.table("tenants").select("tenant_id").limit(1).execute()
+        supabase.table(get_table_name("tenants")).select("tenant_id").limit(1).execute()
     except Exception as e:
         logger.warning(f"Supabase no disponible: {str(e)}")
         supabase_status = "unavailable"

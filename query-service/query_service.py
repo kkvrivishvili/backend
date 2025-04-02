@@ -575,7 +575,7 @@ async def list_documents(
     if collection_id:
         try:
             supabase = get_supabase_client()
-            collection_result = await supabase.table("ai.collections").select("name").eq("collection_id", str(collection_id)).execute()
+            collection_result = await supabase.table(get_table_name("collections")).select("name").eq("collection_id", str(collection_id)).execute()
             if collection_result.data and len(collection_result.data) > 0:
                 collection_name = collection_result.data[0].get("name")
         except Exception as e:

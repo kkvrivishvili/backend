@@ -8,7 +8,7 @@ from fastapi import HTTPException, Depends
 import logging
 
 from .models import TenantInfo
-from .supabase import get_supabase_client
+from .supabase import get_supabase_client, get_table_name
 from .config import get_tier_limits
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ async def verify_tenant(tenant_id: str) -> TenantInfo:
     supabase = get_supabase_client()
     
     # Verificar que el tenant existe
-    tenant_data = supabase.table("public.tenants").select("*").eq("tenant_id", tenant_id).execute()
+    tenant_data = supabase.table(get_table_name("tenants")).select("*").eq("tenant_id", tenant_id).execute()
     
     if not tenant_data.data:
         logger.warning(f"Tenant no encontrado: {tenant_id}")
@@ -41,7 +41,7 @@ async def verify_tenant(tenant_id: str) -> TenantInfo:
         )
     
     # Verificar que tiene una suscripción activa
-    subscription_data = supabase.table("ai.tenant_subscriptions").select("*") \
+    subscription_data = supabase.table(get_table_name("tenant_subscriptions")).select("*") \
         .eq("tenant_id", tenant_id) \
         .eq("is_active", True) \
         .execute()
@@ -74,7 +74,7 @@ async def check_tenant_quotas(tenant_info: TenantInfo) -> bool:
     supabase = get_supabase_client()
     
     # Obtener estadísticas de uso actual
-    usage_data = supabase.table("ai.tenant_stats").select("*") \
+    usage_data = supabase.table(get_table_name("tenant_stats")).select("*") \
         .eq("tenant_id", tenant_info.tenant_id) \
         .execute()
     

@@ -1,4 +1,3 @@
-# Importaciones estándar
 import json
 import logging
 import os
@@ -40,6 +39,7 @@ from common.supabase import get_supabase_client, init_supabase, apply_tenant_con
 from common.config import Settings, get_settings, invalidate_settings_cache, get_effective_configurations, is_development_environment, should_use_mock_config
 from common.utils import track_usage, sanitize_content, prepare_service_request
 from common.errors import handle_service_error_simple, ServiceError, create_error_response
+from common.rpc_helpers import create_conversation, add_chat_history
 from common.logging import init_logging
 from common.ollama import get_llm_model, is_using_ollama
 from common.swagger import configure_swagger_ui, add_example_to_endpoint
@@ -904,7 +904,7 @@ async def get_service_status() -> HealthResponse:
     supabase_status = "available"
     try:
         supabase = get_supabase_client()
-        supabase.table("public.tenants").select("tenant_id").limit(1).execute()
+        supabase.table(get_table_name("tenants")).select("tenant_id").limit(1).execute()
     except Exception as e:
         logger.warning(f"Supabase no disponible: {str(e)}")
         supabase_status = "unavailable"
@@ -975,7 +975,7 @@ async def create_agent(request: AgentRequest, tenant_info: TenantInfo = Depends(
     
     # Guardar en Supabase
     supabase = get_supabase_client()
-    result = await supabase.from_("ai.agent_configs").insert(agent_data).single().execute()
+    result = await supabase.from_(get_table_name("agent_configs")).insert(agent_data).single().execute()
     
     if result.error:
         logger.error(f"Error creando agente para tenant '{tenant_id}': {result.error}")
@@ -1028,7 +1028,7 @@ async def get_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tena
     supabase = get_supabase_client()
     
     # Obtener el agente del tenant
-    result = await supabase.from_("ai.agent_configs") \
+    result = await supabase.from_(get_table_name("agent_configs")) \
         .select("*") \
         .eq("tenant_id", tenant_id) \
         .eq("agent_id", agent_id) \
@@ -1083,7 +1083,7 @@ async def list_agents(tenant_info: TenantInfo = Depends(verify_tenant)) -> Agent
     
     try:
         supabase = get_supabase_client()
-        result = supabase.table("ai.agent_configs").select("*").eq("tenant_id", tenant_id).order("created_at", desc=True).execute()
+        result = supabase.table(get_table_name("agent_configs")).select("*").eq("tenant_id", tenant_id).order("created_at", desc=True).execute()
         
         agents_list = []
         for agent_data in result.data:
@@ -1139,7 +1139,7 @@ async def update_agent(
     supabase = get_supabase_client()
     
     # Verificar que el agente exista y pertenezca al tenant
-    agent_check = await supabase.from_("ai.agent_configs") \
+    agent_check = await supabase.from_(get_table_name("agent_configs")) \
         .select("*") \
         .eq("tenant_id", tenant_id) \
         .eq("agent_id", agent_id) \
@@ -1174,7 +1174,7 @@ async def update_agent(
     }
     
     # Actualizar el agente en la base de datos
-    result = await supabase.from_("ai.agent_configs") \
+    result = await supabase.from_(get_table_name("agent_configs")) \
         .update(update_data) \
         .eq("tenant_id", tenant_id) \
         .eq("agent_id", agent_id) \
@@ -1231,7 +1231,7 @@ async def delete_agent(
         supabase = get_supabase_client()
         
         # Verificar que el agente exista y pertenezca al tenant
-        agent_result = supabase.table("ai.agent_configs").select("*").eq("agent_id", agent_id).eq("tenant_id", tenant_id).execute()
+        agent_result = supabase.table(get_table_name("agent_configs")).select("*").eq("agent_id", agent_id).eq("tenant_id", tenant_id).execute()
         
         if not agent_result.data:
             raise ServiceError(
@@ -1242,15 +1242,15 @@ async def delete_agent(
         
         # Eliminar conversaciones asociadas al agente
         # Primero contamos cuántas conversaciones hay
-        count_result = supabase.table("ai.conversations").select("count", count="exact").eq("agent_id", agent_id).eq("tenant_id", tenant_id).execute()
+        count_result = supabase.table(get_table_name("conversations")).select("count", count="exact").eq("agent_id", agent_id).eq("tenant_id", tenant_id).execute()
         conversations_count = count_result.count if hasattr(count_result, "count") else 0
         
         # Eliminar las conversaciones
         if conversations_count > 0:
-            delete_conversations = supabase.table("ai.conversations").delete().eq("agent_id", agent_id).eq("tenant_id", tenant_id).execute()
+            delete_conversations = supabase.table(get_table_name("conversations")).delete().eq("agent_id", agent_id).eq("tenant_id", tenant_id).execute()
         
         # Eliminar el agente
-        delete_result = supabase.table("ai.agent_configs").delete().eq("agent_id", agent_id).eq("tenant_id", tenant_id).execute()
+        delete_result = supabase.table(get_table_name("agent_configs")).delete().eq("agent_id", agent_id).eq("tenant_id", tenant_id).execute()
         
         if not delete_result.data:
             raise ServiceError(
@@ -1330,7 +1330,7 @@ async def chat_with_agent(
     
     # Verificar que el agente existe y pertenece al tenant
     supabase = get_supabase_client()
-    agent_data = await supabase.from_("ai.agent_configs") \
+    agent_data = await supabase.from_(get_table_name("agent_configs")) \
         .select("*") \
         .eq("agent_id", agent_id) \
         .eq("tenant_id", tenant_id) \
@@ -1378,27 +1378,23 @@ async def chat_with_agent(
         is_new_conversation = True
             
         # Crear conversación en Supabase
-        conversation_result = await supabase.rpc(
-            "create_conversation",
-            {
-                "p_tenant_id": tenant_id,
-                "p_agent_id": agent_id,
-                "p_title": f"Conversación con {agent_config.name}",
-                "p_context": json.dumps(request.context) if request.context else "{}",
-                "p_client_reference_id": request.client_reference_id,
-                "p_metadata": "{}"
-            }
-        ).execute()
-        
-        if not conversation_result.data:
+        conversation_result = await create_conversation(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            title=f"Conversación con {agent_config.name}",
+            context=request.context,
+            client_reference_id=request.client_reference_id
+        )
+            
+        if not conversation_result:
             logger.error(f"Error creando conversación para tenant {tenant_id}, agent {agent_id}")
             raise ServiceError(
                 message="Error creating conversation",
                 status_code=500,
                 error_code="conversation_creation_failed"
             )
-        
-        conversation_id = conversation_result.data
+            
+        conversation_id = conversation_result
         logger.info(f"Creada nueva conversación {conversation_id} para tenant {tenant_id}, agent {agent_id}")
             
         # Ejecutar el agente
@@ -1411,7 +1407,7 @@ async def chat_with_agent(
         )
     else:
         # Verificar que la conversación existe y pertenece al tenant y agente
-        conv_check = await supabase.from_("ai.conversations").select("*").eq("conversation_id", conversation_id).eq("tenant_id", tenant_id).eq("agent_id", agent_id).single().execute()
+        conv_check = await supabase.from_(get_table_name("conversations")).select("*").eq("conversation_id", conversation_id).eq("tenant_id", tenant_id).eq("agent_id", agent_id).single().execute()
         
         if not conv_check.data:
             logger.warning(f"Intento de acceso a conversación no autorizada: {conversation_id}")
@@ -1434,23 +1430,19 @@ async def chat_with_agent(
     processing_time = time.time() - start_time
     
     # Guardar el mensaje en el historial
-    message_result = await supabase.rpc(
-        "add_chat_message",
-        {
-            "p_conversation_id": conversation_id,
-            "p_tenant_id": tenant_id,
-            "p_agent_id": agent_id,
-            "p_user_message": request.message,
-            "p_assistant_message": agent_response["answer"],
-            "p_thinking": agent_response.get("thinking", ""),
-            "p_tools_used": json.dumps(agent_response.get("tools_used", [])),
-            "p_processing_time": processing_time,
-            "p_metadata": "{}"
-        }
-    ).execute()
+    message_result = await add_chat_history(
+        conversation_id=conversation_id,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        user_message=request.message,
+        assistant_message=agent_response["answer"],
+        thinking=agent_response.get("thinking", ""),
+        tools_used=agent_response.get("tools_used", []),
+        processing_time=processing_time
+    )
     
-    if message_result.error:
-        logger.warning(f"Error guardando mensajes para conversación {conversation_id}: {message_result.error}")
+    if not message_result:
+        logger.warning(f"Error guardando mensajes para conversación {conversation_id}")
     
     # Registrar uso para analíticas y facturación
     background_tasks.add_task(
@@ -1499,7 +1491,7 @@ async def verify_public_tenant(tenant_slug: str) -> PublicTenantInfo:
     """
     try:
         supabase = get_supabase_client()
-        tenant_data = await supabase.table("public.tenants").select("tenant_id, name, public_profile, token_quota, tokens_used").eq("slug", tenant_slug).single().execute()
+        tenant_data = await supabase.table(get_table_name("tenants")).select("tenant_id, name, public_profile, token_quota, tokens_used").eq("slug", tenant_slug).single().execute()
         
         if not tenant_data.data:
             raise ServiceError(
@@ -1636,7 +1628,7 @@ async def public_chat_with_agent(
     
     # Verificar existencia del agente
     supabase = get_supabase_client()
-    agent_data = await supabase.from_("ai.agent_configs").select("*").eq("id", agent_id).eq("tenant_id", tenant_info.tenant_id).execute()
+    agent_data = await supabase.from_(get_table_name("agent_configs")).select("*").eq("id", agent_id).eq("tenant_id", tenant_info.tenant_id).execute()
     
     if agent_data.error:
         logger.error(f"Error fetching agent data: {agent_data.error}")
@@ -1737,7 +1729,7 @@ async def delete_conversation(
         supabase = get_supabase_client()
         
         # Verificar que la conversación exista y pertenezca al tenant
-        conversation_result = supabase.from_("ai.conversations").select("*").eq("id", conversation_id).eq("tenant_id", tenant_id).execute()
+        conversation_result = supabase.from_(get_table_name("conversations")).select("*").eq("id", conversation_id).eq("tenant_id", tenant_id).execute()
         
         if not conversation_result.data or len(conversation_result.data) == 0:
             raise ServiceError(
@@ -1749,15 +1741,15 @@ async def delete_conversation(
         conversation_data = conversation_result.data[0]
         
         # Contar mensajes asociados para reportar en respuesta
-        messages_count_result = supabase.from_("ai.chat_history").select("count", count="exact").eq("conversation_id", conversation_id).execute()
+        messages_count_result = supabase.from_(get_table_name("chat_history")).select("count", count="exact").eq("conversation_id", conversation_id).execute()
         messages_count = messages_count_result.count if hasattr(messages_count_result, "count") else 0
         
         # Eliminar mensajes asociados a la conversación
         if messages_count > 0:
-            delete_messages = supabase.from_("ai.chat_history").delete().eq("conversation_id", conversation_id).execute()
+            delete_messages = supabase.from_(get_table_name("chat_history")).delete().eq("conversation_id", conversation_id).execute()
         
         # Eliminar la conversación
-        delete_result = supabase.from_("ai.conversations").delete().eq("id", conversation_id).eq("tenant_id", tenant_id).execute()
+        delete_result = supabase.from_(get_table_name("conversations")).delete().eq("id", conversation_id).eq("tenant_id", tenant_id).execute()
         
         if not delete_result.data:
             raise ServiceError(
@@ -1815,7 +1807,7 @@ async def get_conversation_messages(
         supabase = get_supabase_client()
         
         # Verificar que la conversación exista y pertenezca al tenant
-        conversation_result = supabase.from_("ai.conversations").select("*").eq("id", conversation_id).eq("tenant_id", tenant_id).execute()
+        conversation_result = supabase.from_(get_table_name("conversations")).select("*").eq("id", conversation_id).eq("tenant_id", tenant_id).execute()
         
         if not conversation_result.data or len(conversation_result.data) == 0:
             raise ServiceError(
@@ -1825,7 +1817,7 @@ async def get_conversation_messages(
             )
         
         # Obtener los mensajes de la conversación
-        messages_result = supabase.from_("ai.chat_history").select("*").eq("conversation_id", conversation_id).order("created_at", desc=False).range(offset, offset + effective_limit - 1).execute()
+        messages_result = supabase.from_(get_table_name("chat_history")).select("*").eq("conversation_id", conversation_id).order("created_at", desc=False).range(offset, offset + effective_limit - 1).execute()
         
         # Convertir a formato ChatMessage
         messages = []
@@ -1840,7 +1832,7 @@ async def get_conversation_messages(
             messages.append(message)
         
         # Obtener el conteo total de mensajes
-        count_result = supabase.from_("ai.chat_history").select("count", count="exact").eq("conversation_id", conversation_id).execute()
+        count_result = supabase.from_(get_table_name("chat_history")).select("count", count="exact").eq("conversation_id", conversation_id).execute()
         total_count = count_result.count if hasattr(count_result, "count") else len(messages)
         
         return MessageListResponse(
@@ -1887,14 +1879,14 @@ async def list_conversations(
         supabase = get_supabase_client()
         
         # Preparar la consulta base
-        query = supabase.from_("ai.conversations").select("*").eq("tenant_id", tenant_id)
+        query = supabase.from_(get_table_name("conversations")).select("*").eq("tenant_id", tenant_id)
         
         # Aplicar filtro por agente si se proporciona
         if agent_id:
             query = query.eq("agent_id", agent_id)
             
             # Verificar que el agente exista y pertenezca al tenant
-            agent_result = supabase.from_("ai.agent_configs").select("id").eq("id", agent_id).eq("tenant_id", tenant_id).execute()
+            agent_result = supabase.from_(get_table_name("agent_configs")).select("id").eq("id", agent_id).eq("tenant_id", tenant_id).execute()
             if not agent_result.data:
                 raise ServiceError(
                     message=f"Agent {agent_id} not found or not accessible",
@@ -1911,7 +1903,7 @@ async def list_conversations(
             # Obtener el último mensaje (opcional si lo guardamos en la tabla de conversaciones)
             last_message = None
             try:
-                message_result = supabase.from_("ai.chat_history").select("*").eq("conversation_id", conversation_data["id"]).order("created_at", desc=True).limit(1).execute()
+                message_result = supabase.from_(get_table_name("chat_history")).select("*").eq("conversation_id", conversation_data["id"]).order("created_at", desc=True).limit(1).execute()
                 if message_result.data:
                     last_message = message_result.data[0].get("content", "")
                     if len(last_message) > 100:

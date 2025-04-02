@@ -7,8 +7,9 @@ import logging
 import time
 from typing import Dict, Any, List, Optional
 
-from .supabase import get_supabase_client
+from .supabase import get_supabase_client, get_table_name
 from .config import get_settings
+from .rpc_helpers import increment_token_usage as rpc_increment_token_usage
 
 logger = logging.getLogger(__name__)
 
@@ -41,17 +42,18 @@ async def track_token_usage(tenant_id: str, tokens: int, model: str = None) -> b
         cost_factor = settings.model_cost_factors.get(model, 1.0) if model else 1.0
         adjusted_tokens = int(tokens * cost_factor)
         
-        # Llamar a la función de incremento de tokens
-        result = supabase.rpc(
-            "increment_token_usage",
-            {
-                "p_tenant_id": tenant_id,
-                "p_tokens": adjusted_tokens
-            }
-        ).execute()
+        # Usar la función helper centralizada para incrementar los tokens
+        success = await rpc_increment_token_usage(
+            tenant_id=tenant_id,
+            tokens=adjusted_tokens
+        )
+        
+        if not success:
+            logger.warning(f"No se pudo incrementar el contador de tokens para tenant {tenant_id}")
+            return False
         
         # Actualizar timestamp de última actividad
-        supabase.table("ai.tenant_stats").update(
+        supabase.table(get_table_name("tenant_stats")).update(
             {"last_activity": "now()"}
         ).eq("tenant_id", tenant_id).execute()
         
@@ -101,7 +103,7 @@ async def track_embedding_usage(
         
         # Registrar métricas de embedding específicas (opcional)
         date_bucket = time.strftime("%Y-%m-%d")
-        supabase.table("ai.embedding_metrics").insert({
+        supabase.table(get_table_name("embedding_metrics")).insert({
             "tenant_id": tenant_id,
             "date_bucket": date_bucket,
             "model": model,
@@ -176,7 +178,7 @@ async def track_query(
         await track_token_usage(tenant_id, total_tokens, model)
         
         # Registrar la consulta para analytics
-        supabase.table("ai.query_logs").insert(metadata).execute()
+        supabase.table(get_table_name("query_logs")).insert(metadata).execute()
         
         return True
     except Exception as e:
