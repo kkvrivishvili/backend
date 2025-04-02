@@ -265,6 +265,16 @@ def handle_service_error_simple(on_error_response: Optional[Dict[str, Any]] = No
                     status_code=500,
                     error_code="internal_error"
                 )
+        
+        # Preservar explícitamente los atributos que FastAPI usa para la documentación Swagger
+        if hasattr(func, "__annotations__"):
+            wrapper.__annotations__ = func.__annotations__
+        
+        # Preservar otros atributos que puede usar FastAPI
+        for attr in ["response_model", "responses", "status_code", "tags", "summary", "description"]:
+            if hasattr(func, attr):
+                setattr(wrapper, attr, getattr(func, attr))
+        
         return wrapper
     
     # Permitir usar el decorador con o sin paréntesis

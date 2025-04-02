@@ -269,10 +269,11 @@ def add_example_to_endpoint(
     method: str,
     request_example: Optional[Dict[str, Any]] = None,
     response_example: Optional[Dict[str, Any]] = None,
-    status_code: str = "200"
+    status_code: str = "200",
+    request_schema_description: Optional[str] = None
 ) -> None:
     """
-    Añade ejemplos a un endpoint específico.
+    Añade ejemplos y mejora la documentación de un endpoint específico.
     
     Args:
         app: Instancia de FastAPI
@@ -281,6 +282,7 @@ def add_example_to_endpoint(
         request_example: Ejemplo de solicitud
         response_example: Ejemplo de respuesta
         status_code: Código de estado para la respuesta
+        request_schema_description: Descripción detallada del esquema de solicitud
     """
     # Primero garantizamos que se genere el esquema OpenAPI
     if hasattr(app, "openapi") and callable(app.openapi):
@@ -301,21 +303,56 @@ def add_example_to_endpoint(
         print(f"Método {method} no encontrado para el path {path}")
         return
         
+    # Referencia al endpoint
+    endpoint = app.openapi_schema["paths"][path][method.lower()]
+    
     # Añadir ejemplo de solicitud si se proporciona
-    if request_example and "requestBody" in app.openapi_schema["paths"][path][method.lower()]:
-        content = app.openapi_schema["paths"][path][method.lower()]["requestBody"]["content"]
+    if request_example and "requestBody" in endpoint:
+        # Mejorar la descripción del requestBody si se proporciona
+        if request_schema_description:
+            endpoint["requestBody"]["description"] = request_schema_description
+        else:
+            endpoint["requestBody"]["description"] = "Parámetros requeridos para esta operación"
+            
+        # Garantizar que requestBody tenga una estructura adecuada
+        if "content" not in endpoint["requestBody"]:
+            endpoint["requestBody"]["content"] = {"application/json": {}}
+            
+        content = endpoint["requestBody"]["content"]
         if "application/json" in content:
+            # Añadir el ejemplo
             content["application/json"]["example"] = request_example
             
+            # Asegurar que se muestre el schema name en la UI si existe
+            if "schema" in content["application/json"] and "$ref" in content["application/json"]["schema"]:
+                schema_ref = content["application/json"]["schema"]["$ref"]
+                schema_name = schema_ref.split('/')[-1]
+                # Añadir comentario descriptivo
+                content["application/json"]["schema"]["description"] = f"Modelo: {schema_name}. Ver ejemplo y esquema detallado más abajo."
+    
     # Añadir ejemplo de respuesta si se proporciona
     if response_example:
-        if "responses" not in app.openapi_schema["paths"][path][method.lower()]:
-            app.openapi_schema["paths"][path][method.lower()]["responses"] = {}
+        if "responses" not in endpoint:
+            endpoint["responses"] = {}
             
-        if status_code not in app.openapi_schema["paths"][path][method.lower()]["responses"]:
-            app.openapi_schema["paths"][path][method.lower()]["responses"][status_code] = {
+        if status_code not in endpoint["responses"]:
+            endpoint["responses"][status_code] = {
                 "description": "Respuesta exitosa",
                 "content": {"application/json": {}}
             }
+        
+        # Garantizar que la respuesta tenga una buena descripción
+        endpoint["responses"][status_code]["description"] = "Operación exitosa"
             
-        app.openapi_schema["paths"][path][method.lower()]["responses"][status_code]["content"]["application/json"]["example"] = response_example
+        # Añadir el ejemplo
+        if "content" not in endpoint["responses"][status_code]:
+            endpoint["responses"][status_code]["content"] = {"application/json": {}}
+            
+        endpoint["responses"][status_code]["content"]["application/json"]["example"] = response_example
+        
+        # Asegurar que se muestre el schema name en la UI si existe
+        if "schema" in endpoint["responses"][status_code]["content"]["application/json"] and "$ref" in endpoint["responses"][status_code]["content"]["application/json"]["schema"]:
+            schema_ref = endpoint["responses"][status_code]["content"]["application/json"]["schema"]["$ref"]
+            schema_name = schema_ref.split('/')[-1]
+            # Añadir comentario descriptivo
+            endpoint["responses"][status_code]["content"]["application/json"]["schema"]["description"] = f"Modelo: {schema_name}. Ver esquema detallado más abajo."

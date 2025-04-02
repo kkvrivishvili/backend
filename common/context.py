@@ -7,6 +7,7 @@ import asyncio
 import contextvars
 import logging
 from typing import Optional, Dict, Any, Tuple, NamedTuple, Callable, Awaitable, TypeVar
+from functools import wraps
 
 logger = logging.getLogger(__name__)
 
@@ -339,12 +340,22 @@ def with_tenant_context(func: AsyncFunc) -> AsyncFunc:
     Returns:
         Función asíncrona decorada que mantiene el contexto del tenant
     """
+    @wraps(func)
     async def wrapper(*args, **kwargs):
         # Capturar el contexto actual
         tenant_id = get_current_tenant_id()
         
         # Ejecutar con el mismo contexto
         return await run_with_tenant(tenant_id, func(*args, **kwargs))
+    
+    # Preservar explícitamente los atributos que FastAPI usa para la documentación Swagger
+    if hasattr(func, "__annotations__"):
+        wrapper.__annotations__ = func.__annotations__
+    
+    # Preservar otros atributos que puede usar FastAPI
+    for attr in ["response_model", "responses", "status_code", "tags", "summary", "description"]:
+        if hasattr(func, attr):
+            setattr(wrapper, attr, getattr(func, attr))
     
     return wrapper
 
@@ -368,6 +379,7 @@ def with_agent_context(func: AsyncFunc) -> AsyncFunc:
     Returns:
         Función asíncrona decorada que mantiene el contexto del tenant y agente
     """
+    @wraps(func)
     async def wrapper(*args, **kwargs):
         # Capturar el contexto actual
         tenant_id = get_current_tenant_id()
@@ -376,8 +388,16 @@ def with_agent_context(func: AsyncFunc) -> AsyncFunc:
         # Ejecutar con el mismo contexto
         return await run_with_agent_context(tenant_id, agent_id, func(*args, **kwargs))
     
+    # Preservar explícitamente los atributos que FastAPI usa para la documentación Swagger
+    if hasattr(func, "__annotations__"):
+        wrapper.__annotations__ = func.__annotations__
+    
+    # Preservar otros atributos que puede usar FastAPI
+    for attr in ["response_model", "responses", "status_code", "tags", "summary", "description"]:
+        if hasattr(func, attr):
+            setattr(wrapper, attr, getattr(func, attr))
+    
     return wrapper
-
 
 def with_full_context(func: AsyncFunc) -> AsyncFunc:
     """
@@ -400,6 +420,7 @@ def with_full_context(func: AsyncFunc) -> AsyncFunc:
     Returns:
         Función asíncrona decorada que mantiene el contexto completo
     """
+    @wraps(func)
     async def wrapper(*args, **kwargs):
         # Capturar el contexto actual
         tenant_id = get_current_tenant_id()
@@ -412,8 +433,16 @@ def with_full_context(func: AsyncFunc) -> AsyncFunc:
             func(*args, **kwargs)
         )
     
+    # Preservar explícitamente los atributos que FastAPI usa para la documentación Swagger
+    if hasattr(func, "__annotations__"):
+        wrapper.__annotations__ = func.__annotations__
+    
+    # Preservar otros atributos que puede usar FastAPI
+    for attr in ["response_model", "responses", "status_code", "tags", "summary", "description"]:
+        if hasattr(func, attr):
+            setattr(wrapper, attr, getattr(func, attr))
+    
     return wrapper
-
 
 class AgentContext:
     """
@@ -450,7 +479,6 @@ class AgentContext:
             reset_agent_context(self.tokens.agent_token)
         if self.tokens.tenant_token:
             reset_tenant_context(self.tokens.tenant_token)
-
 
 def get_appropriate_context_manager(tenant_id: str, agent_id: Optional[str] = None, conversation_id: Optional[str] = None):
     """
