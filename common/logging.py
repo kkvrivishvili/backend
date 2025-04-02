@@ -26,7 +26,8 @@ def init_logging(log_level: Optional[str] = None) -> None:
     level = getattr(logging, level_str.upper(), logging.INFO)
     
     # Configurar formato según el entorno
-    is_development = settings.testing_mode
+    # Usar debug_mode o verificar si el entorno es development
+    is_development = settings.debug_mode or settings.environment.lower() == "development"
     
     if is_development:
         format_str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

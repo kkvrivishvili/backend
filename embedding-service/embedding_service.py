@@ -14,8 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 
-from common.supabase import get_supabase_client, init_supabase, get_table_name 
-from common.config import get_settings, get_effective_configurations, is_development_environment, should_use_mock_config
+from common.supabase import get_supabase_client, init_supabase, get_table_name, get_effective_configurations 
+from common.config import get_settings, is_development_environment, should_use_mock_config
 
 # LlamaIndex imports - versión monolítica (actualizada para 0.12.26)
 from llama_index.embeddings.openai import OpenAIEmbedding

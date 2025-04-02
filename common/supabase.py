@@ -9,7 +9,6 @@ import json
 from typing import Dict, Any, List, Optional
 from supabase import create_client, Client
 
-from .config import get_settings
 from .context import get_current_tenant_id, TenantContext
 
 logger = logging.getLogger(__name__)
@@ -23,8 +22,15 @@ def get_supabase_client() -> Client:
     Returns:
         Client: Cliente Supabase
     """
+    # Importar get_settings aquí para evitar importación circular
+    from .config import get_settings
     settings = get_settings()
-    return create_client(settings.supabase_url, settings.supabase_key)
+    
+    supabase = create_client(
+        settings.supabase_url,
+        settings.supabase_key
+    )
+    return supabase
 
 
 def init_supabase():

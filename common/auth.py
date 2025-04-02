@@ -4,7 +4,7 @@ Funciones para verificación de tenant y permisos.
 """
 
 from typing import Dict, Any, Optional
-from fastapi import HTTPException, Depends
+from fastapi import HTTPException, Depends, Request
 import logging
 
 from .models import TenantInfo
@@ -126,7 +126,7 @@ def get_allowed_models_for_tier(tier: str, model_type: str = "llm") -> list:
         return tier_limits.get("allowed_embedding_models", ["text-embedding-3-small"])
 
 
-def validate_model_access(tenant_info: TenantInfo, model_id: str, model_type: str = "llm") -> str:
+async def validate_model_access(tenant_info: TenantInfo, model_id: str, model_type: str = "llm") -> str:
     """
     Valida que un tenant pueda acceder a un modelo y devuelve el modelo autorizado.
     Si el modelo solicitado no está permitido, devuelve el mejor modelo disponible para su tier.
@@ -139,11 +139,49 @@ def validate_model_access(tenant_info: TenantInfo, model_id: str, model_type: st
     Returns:
         str: ID del modelo autorizado
     """
-    allowed_models = get_allowed_models_for_tier(tenant_info.subscription_tier, model_type)
+    tier = tenant_info.subscription_tier
+    allowed_models = get_allowed_models_for_tier(tier, model_type)
     
-    if not model_id or model_id not in allowed_models:
-        # Si no especificó un modelo o el especificado no está permitido,
-        # usamos el primero permitido (deberían estar ordenados por capacidad)
-        return allowed_models[0]
+    # Si el modelo solicitado está permitido, lo devolvemos
+    if model_id in allowed_models:
+        return model_id
+        
+    # Si no, devolvemos el mejor modelo disponible para su tier
+    logger.warning(f"Modelo {model_id} no permitido para tenant {tenant_info.tenant_id} en tier {tier}. " + 
+                   f"Usando modelo por defecto del tier.")
     
-    return model_id
+    # Devolver el primer modelo de la lista (asumiendo que están ordenados por calidad)
+    return allowed_models[0] if allowed_models else model_id
+
+
+async def get_auth_info(request: Request) -> Dict[str, Any]:
+    """
+    Obtiene información de autenticación desde los headers o parámetros de la request.
+    
+    Args:
+        request: Objeto FastAPI Request
+        
+    Returns:
+        Dict[str, Any]: Diccionario con información de autenticación
+    """
+    auth_info = {}
+    
+    # Intentar obtener tenant_id de los headers o query params
+    tenant_id = request.headers.get("x-tenant-id")
+    if not tenant_id:
+        tenant_id = request.query_params.get("tenant_id")
+    
+    if tenant_id:
+        auth_info["tenant_id"] = tenant_id
+    
+    # Obtener API Key de los headers si existe
+    api_key = request.headers.get("x-api-key")
+    if api_key:
+        auth_info["api_key"] = api_key
+    
+    # Obtener token de autenticación
+    auth_header = request.headers.get("authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        auth_info["token"] = auth_header.replace("Bearer ", "")
+    
+    return auth_info

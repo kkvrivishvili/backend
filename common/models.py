@@ -27,6 +27,25 @@ class BaseResponse(BaseModel):
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 
+class ErrorResponse(BaseResponse):
+    """Modelo para respuestas de error estandarizadas."""
+    success: bool = False
+    status_code: int = 500
+    
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "success": False,
+                    "error": "No se pudo procesar la solicitud",
+                    "message": "Ocurrió un error al procesar la solicitud",
+                    "status_code": 500
+                }
+            ]
+        }
+    }
+
+
 class HealthResponse(BaseResponse):
     """Respuesta estándar para endpoints de health check."""
     status: str

@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 # Importar el esquema de configuraciones
 from .config_schema import get_service_configurations, get_mock_configurations
-from .supabase import get_tenant_configurations, get_effective_configurations
 
 # Variables globales para control de caché
 _force_settings_reload = False
@@ -130,6 +129,7 @@ class Settings(BaseSettings):
             
         # Obtener configuraciones del tenant
         tenant_id = tenant_id or self.default_tenant_id
+        from .supabase import get_tenant_configurations
         configs = get_tenant_configurations(tenant_id=tenant_id, environment=self.environment)
         
         # Si no hay configuraciones, usar mock
@@ -164,6 +164,7 @@ class Settings(BaseSettings):
         env_file = ".env"
         env_prefix = ""
         case_sensitive = False
+        extra = "allow"  # Permitir campos adicionales no declarados en el modelo
 
 
 @lru_cache(maxsize=100)  # Limitar tamaño del caché
@@ -330,6 +331,7 @@ def get_tenant_rate_limit(tenant_id: str, tier: str, service_name: Optional[str]
         tenant_configs = {}
         if service_name:
             # Si hay servicio especificado, cargar con ese ámbito
+            from .supabase import get_effective_configurations
             tenant_configs = get_effective_configurations(
                 tenant_id=tenant_id,
                 service_name=service_name,
@@ -337,7 +339,8 @@ def get_tenant_rate_limit(tenant_id: str, tier: str, service_name: Optional[str]
             )
         else:
             # Cargar configuraciones generales de tenant
-            tenant_configs = get_effective_configurations(
+            from .supabase import get_tenant_configurations
+            tenant_configs = get_tenant_configurations(
                 tenant_id=tenant_id,
                 environment=get_settings().environment
             )
