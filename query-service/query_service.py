@@ -908,9 +908,15 @@ async def get_documents(
     description="Invalida el caché de configuraciones para un tenant específico o todos"
 )
 @handle_service_error_simple
-async def clear_config_cache(tenant_id: Optional[str] = None):
+async def clear_config_cache(
+    tenant_id: Optional[str] = None,
+    scope: Optional[str] = None,
+    scope_id: Optional[str] = None,
+    environment: str = "development"
+):
     """
-    Invalida el caché de configuraciones para un tenant específico o todos.
+    Invalida el caché de configuraciones para un tenant específico o todos,
+    con soporte para invalidación específica por ámbito.
     
     Este endpoint permite forzar la recarga de configuraciones desde las fuentes
     originales (variables de entorno y/o Supabase), lo que es útil después de
@@ -918,20 +924,51 @@ async def clear_config_cache(tenant_id: Optional[str] = None):
     
     Args:
         tenant_id: ID del tenant (opcional, si no se proporciona se invalidan todos)
+        scope: Ámbito específico a invalidar ('tenant', 'service', 'agent', 'collection')
+        scope_id: ID específico del ámbito (ej: agent_id, service_name)
+        environment: Entorno de configuración (development, staging, production)
         
     Returns:
         Dict: Resultado de la operación
     """
     from common.config import invalidate_settings_cache
+    from common.supabase import apply_tenant_configuration_changes
     
     if tenant_id:
-        # Invalidar para un tenant específico
-        invalidate_settings_cache(tenant_id)
-        return {"success": True, "message": f"Caché de configuraciones invalidado para tenant {tenant_id}"}
+        # Invalidar para un tenant específico con soporte para ámbito
+        if scope:
+            # Invalidar configuraciones para un ámbito específico
+            apply_tenant_configuration_changes(
+                tenant_id=tenant_id,
+                environment=environment,
+                scope=scope,
+                scope_id=scope_id
+            )
+            scope_msg = f"ámbito {scope}" + (f" (ID: {scope_id})" if scope_id else "")
+            return {
+                "success": True, 
+                "message": f"Caché de configuraciones invalidado para tenant {tenant_id} en {scope_msg}"
+            }
+        else:
+            # Invalidar todas las configuraciones del tenant
+            invalidate_settings_cache(tenant_id)
+            # También limpiar la caché de Redis para este tenant
+            from common.cache import delete_pattern
+            delete_pattern(f"tenant_config:{tenant_id}:*")
+            return {
+                "success": True, 
+                "message": f"Caché de configuraciones invalidado para tenant {tenant_id}"
+            }
     else:
         # Invalidar para todos los tenants
         invalidate_settings_cache()
-        return {"success": True, "message": "Caché de configuraciones invalidado para todos los tenants"}
+        # También limpiar toda la caché de configuraciones
+        from common.cache import delete_pattern
+        delete_pattern("tenant_config:*")
+        return {
+            "success": True, 
+            "message": "Caché de configuraciones invalidado para todos los tenants"
+        }
 
 async def get_collection_name(collection_id: str, tenant_id: str) -> Optional[str]:
     """

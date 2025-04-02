@@ -419,3 +419,30 @@ def cache_get_memory_usage(pattern: Optional[str] = None) -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"Error getting memory usage: {str(e)}")
         return {"status": "error", "message": str(e)}
+
+
+async def delete_pattern(pattern: str) -> int:
+    """
+    Elimina todas las claves de caché que coincidan con un patrón específico.
+    
+    Args:
+        pattern: Patrón de clave a eliminar (ej: "tenant_config:tenant123:*")
+        
+    Returns:
+        int: Número de claves eliminadas
+    """
+    try:
+        redis = await get_redis_client()
+        # Encontrar todas las claves que coinciden con el patrón
+        keys = await redis.keys(pattern)
+        
+        if not keys:
+            return 0
+            
+        # Eliminar todas las claves encontradas
+        count = await redis.delete(*keys)
+        logger.debug(f"Eliminadas {count} claves de caché con patrón '{pattern}'")
+        return count
+    except Exception as e:
+        logger.error(f"Error eliminando claves de caché con patrón '{pattern}': {e}")
+        return 0

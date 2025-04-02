@@ -5,6 +5,7 @@ Cliente Supabase centralizado con funciones de utilidad.
 
 from functools import lru_cache
 import logging
+import json
 from typing import Dict, Any, List, Optional
 from supabase import create_client, Client
 
@@ -210,81 +211,179 @@ def get_tenant_collections(tenant_id: str) -> List[Dict[str, Any]]:
     return collection_stats
 
 
-def get_tenant_configurations(tenant_id: Optional[str] = None, environment: str = "development") -> Dict[str, Any]:
+def get_tenant_configurations(
+    tenant_id: Optional[str] = None, 
+    scope: str = 'tenant',
+    scope_id: Optional[str] = None,
+    environment: str = "development"
+) -> Dict[str, Any]:
     """
-    Obtiene todas las configuraciones para un tenant específico en un entorno determinado.
+    Obtiene configuraciones para un tenant específico con soporte para ámbitos.
     
     Args:
         tenant_id: ID del tenant (opcional, usa el contexto actual si no se especifica)
+        scope: Ámbito ('tenant', 'service', 'agent', 'collection')
+        scope_id: ID específico del ámbito (ej: agent_id, service_name)
         environment: Entorno (development, staging, production)
         
     Returns:
-        Dict[str, Any]: Diccionario con las configuraciones (clave: valor)
+        Dict[str, Any]: Diccionario con las configuraciones convertidas al tipo apropiado
     """
-    # Si no se proporciona tenant_id, usar el del contexto actual
-    if tenant_id is None:
+    if not tenant_id:
         tenant_id = get_current_tenant_id()
     
-    try:
-        client = get_supabase_client()
-        query = client.table("tenant_configurations").select(
-            "config_key", "config_value"
-        ).eq("tenant_id", tenant_id).eq("environment", environment).eq("is_active", True)
+    # Generar clave de caché específica para este ámbito
+    cache_key = f"tenant_config:{tenant_id}:{environment}:{scope}"
+    if scope_id:
+        cache_key = f"{cache_key}:{scope_id}"
         
+    try:
+        # Intentar obtener de la caché primero
+        from .cache import get_cached_value, cache_value
+        cached_configs = get_cached_value(cache_key)
+        if cached_configs is not None:
+            return cached_configs
+        
+        # Si no está en caché, consultar a la base de datos
+        client = get_supabase_client()
+        query = client.table("ai.tenant_configurations").select(
+            "config_key", "config_value", "config_type", "is_sensitive"
+        ).eq("tenant_id", tenant_id).eq("environment", environment)
+        
+        # Filtrar por ámbito
+        if scope:
+            query = query.eq("scope", scope)
+            if scope_id:
+                query = query.eq("scope_id", scope_id)
+                
         result = query.execute()
         
-        if not result.data:
-            logger.warning(f"No se encontraron configuraciones para tenant {tenant_id} en entorno {environment}")
-            return {}
+        configurations = {}
+        for config in result.data:
+            # No incluir configuraciones sensibles para solicitudes no de tenant
+            if scope != 'tenant' and config.get('is_sensitive', False):
+                continue
+                
+            # Convertir valor al tipo adecuado
+            config_type = config.get('config_type', 'string')
+            typed_value = safe_convert_config_value(config['config_value'], config_type)
+            
+            # Almacenar en el diccionario de resultados
+            configurations[config['config_key']] = typed_value
         
-        # Convertir a diccionario clave-valor
-        config_dict = {item["config_key"]: item["config_value"] for item in result.data}
-        logger.debug(f"Obtenidas {len(config_dict)} configuraciones para tenant {tenant_id}")
-        return config_dict
+        # Guardar en caché
+        cache_value(cache_key, configurations, ttl=300)  # 5 minutos
         
+        return configurations
     except Exception as e:
-        logger.error(f"Error al obtener configuraciones del tenant {tenant_id}: {str(e)}")
+        logger.error(f"Error obteniendo configuraciones para tenant {tenant_id}: {e}")
         return {}
 
 
-def get_tenant_configuration(tenant_id: str, config_key: str, environment: str = "development") -> Optional[str]:
+def safe_convert_config_value(value: str, config_type: str) -> Any:
     """
-    Obtiene una configuración específica para un tenant y entorno.
+    Convierte un valor de configuración al tipo especificado de manera segura.
+    
+    Args:
+        value: Valor como string
+        config_type: Tipo de configuración ('string', 'integer', 'float', 'boolean', 'json')
+        
+    Returns:
+        Valor convertido al tipo apropiado
+    """
+    try:
+        if not value:
+            return None
+            
+        if config_type == 'integer':
+            return int(value)
+        elif config_type == 'float':
+            return float(value)
+        elif config_type == 'boolean':
+            if isinstance(value, str):
+                return value.lower() in ('true', '1', 'yes', 'on')
+            return bool(value)
+        elif config_type == 'json':
+            if isinstance(value, str):
+                return json.loads(value)
+            return value
+        # Por defecto, devolver como string
+        return str(value)
+    except Exception as e:
+        logger.error(f"Error convirtiendo valor '{value}' a tipo {config_type}: {e}")
+        # Devolver el valor original en caso de error
+        return value
+
+
+def get_effective_configurations(
+    tenant_id: str,
+    service_name: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    collection_id: Optional[str] = None,
+    environment: str = "development"
+) -> Dict[str, Any]:
+    """
+    Obtiene configuraciones efectivas siguiendo una jerarquía de herencia:
+    Tenant → Servicio → Agente → Colección
     
     Args:
         tenant_id: ID del tenant
-        config_key: Clave de configuración
-        environment: Entorno (development, staging, production)
+        service_name: Nombre del servicio
+        agent_id: ID del agente
+        collection_id: ID de la colección
+        environment: Entorno
         
     Returns:
-        Optional[str]: Valor de configuración o None si no existe
+        Configuraciones combinadas con la adecuada prioridad
     """
-    try:
-        supabase = get_supabase_client()
-        response = supabase.rpc(
-            "get_tenant_configuration",
-            {
-                "p_tenant_id": tenant_id,
-                "p_config_key": config_key,
-                "p_environment": environment
-            }
-        ).execute()
+    # Configuraciones a nivel de tenant (base)
+    configs = get_tenant_configurations(
+        tenant_id=tenant_id, 
+        scope='tenant',
+        environment=environment
+    )
+    
+    # Sobrescribir con configuraciones de servicio si aplica
+    if service_name:
+        service_configs = get_tenant_configurations(
+            tenant_id=tenant_id,
+            scope='service',
+            scope_id=service_name,
+            environment=environment
+        )
+        configs.update(service_configs)
+    
+    # Sobrescribir con configuraciones de agente si aplica
+    if agent_id:
+        agent_configs = get_tenant_configurations(
+            tenant_id=tenant_id,
+            scope='agent',
+            scope_id=agent_id,
+            environment=environment
+        )
+        configs.update(agent_configs)
         
-        if hasattr(response, 'error') and response.error is not None:
-            logger.error(f"Error al obtener configuración {config_key} para tenant {tenant_id}: {response.error}")
-            return None
-            
-        return response.data
+    # Sobrescribir con configuraciones de colección si aplica
+    if collection_id:
+        collection_configs = get_tenant_configurations(
+            tenant_id=tenant_id,
+            scope='collection',
+            scope_id=collection_id,
+            environment=environment
+        )
+        configs.update(collection_configs)
         
-    except Exception as e:
-        logger.error(f"Error al obtener configuración {config_key} para tenant {tenant_id}: {str(e)}")
-        return None
+    return configs
 
 
 def set_tenant_configuration(
     tenant_id: str, 
     config_key: str, 
-    config_value: str,
+    config_value: Any,
+    config_type: Optional[str] = None,
+    is_sensitive: bool = False,
+    scope: str = 'tenant',
+    scope_id: Optional[str] = None,
     description: Optional[str] = None,
     environment: str = "development"
 ) -> bool:
@@ -294,7 +393,11 @@ def set_tenant_configuration(
     Args:
         tenant_id: ID del tenant
         config_key: Clave de configuración
-        config_value: Valor de configuración
+        config_value: Valor de configuración (se convertirá a string)
+        config_type: Tipo de configuración (string, integer, float, boolean, json)
+        is_sensitive: Indica si la configuración contiene datos sensibles
+        scope: Ámbito de la configuración (tenant, service, agent, collection)
+        scope_id: ID específico del ámbito (ej: agent_id)
         description: Descripción opcional
         environment: Entorno (development, staging, production)
         
@@ -302,26 +405,51 @@ def set_tenant_configuration(
         bool: True si se actualizó correctamente
     """
     try:
-        supabase = get_supabase_client()
-        response = supabase.rpc(
-            "set_tenant_configuration",
-            {
-                "p_tenant_id": tenant_id,
-                "p_config_key": config_key,
-                "p_config_value": config_value,
-                "p_description": description,
-                "p_environment": environment
-            }
-        ).execute()
+        # Determinar el tipo automáticamente si no se proporciona
+        if config_type is None:
+            if isinstance(config_value, bool):
+                config_type = 'boolean'
+            elif isinstance(config_value, int):
+                config_type = 'integer'
+            elif isinstance(config_value, float):
+                config_type = 'float'
+            elif isinstance(config_value, (dict, list)):
+                config_type = 'json'
+                config_value = json.dumps(config_value)
+            else:
+                config_type = 'string'
+                
+        # Convertir el valor a string para almacenamiento
+        if config_type == 'json' and not isinstance(config_value, str):
+            str_value = json.dumps(config_value)
+        else:
+            str_value = str(config_value)
         
-        if hasattr(response, 'error') and response.error is not None:
-            logger.error(f"Error al configurar {config_key} para tenant {tenant_id}: {response.error}")
-            return False
+        # Insertar/actualizar en la base de datos
+        client = get_supabase_client()
+        
+        data = {
+            "tenant_id": tenant_id,
+            "config_key": config_key,
+            "config_value": str_value,
+            "config_type": config_type,
+            "is_sensitive": is_sensitive,
+            "scope": scope,
+            "scope_id": scope_id,
+            "environment": environment
+        }
+        
+        if description:
+            data["description"] = description
             
-        return True
+        client.table("ai.tenant_configurations").upsert(data).execute()
         
+        # Invalidar caché
+        apply_tenant_configuration_changes(tenant_id, environment, scope, scope_id)
+        
+        return True
     except Exception as e:
-        logger.error(f"Error al configurar {config_key} para tenant {tenant_id}: {str(e)}")
+        logger.error(f"Error configurando {config_key}={config_value} para tenant {tenant_id}: {e}")
         return False
 
 
@@ -340,7 +468,7 @@ def override_settings_from_supabase(settings: Any, tenant_id: str, environment: 
     """
     try:
         # Obtener todas las configuraciones para el tenant
-        configs = get_tenant_configurations(tenant_id, environment)
+        configs = get_tenant_configurations(tenant_id, environment=environment)
         if not configs:
             logger.warning(f"No se encontraron configuraciones para tenant {tenant_id} en entorno {environment}")
             return settings
@@ -422,7 +550,12 @@ def override_settings_from_supabase(settings: Any, tenant_id: str, environment: 
         return settings
 
 
-def apply_tenant_configuration_changes(tenant_id: str, environment: str = "development") -> bool:
+def apply_tenant_configuration_changes(
+    tenant_id: str, 
+    environment: str = "development",
+    scope: str = "tenant",
+    scope_id: Optional[str] = None
+) -> bool:
     """
     Aplica cambios de configuración para un tenant específico, incluyendo
     la invalidación de caché y configuraciones.
@@ -430,19 +563,32 @@ def apply_tenant_configuration_changes(tenant_id: str, environment: str = "devel
     Args:
         tenant_id: ID del tenant
         environment: Entorno (development, staging, production)
+        scope: Ámbito de la configuración ('tenant', 'service', 'agent', 'collection')
+        scope_id: ID específico del ámbito
         
     Returns:
         bool: True si se aplicaron correctamente
     """
     try:
-        # Invalidar caché de Redis
-        from .cache import invalidate_tenant_cache
-        invalidate_tenant_cache(tenant_id)
+        # Invalidar caché de configuraciones
+        from .config import invalidate_settings_cache
+        invalidate_settings_cache(tenant_id)
         
-        logger.info(f"Cambios de configuración aplicados para tenant {tenant_id}")
+        # Crear patrón de caché para limpiar
+        cache_pattern = f"tenant_config:{tenant_id}:{environment}"
+        if scope != "tenant":
+            cache_pattern = f"{cache_pattern}:{scope}"
+            if scope_id:
+                cache_pattern = f"{cache_pattern}:{scope_id}"
+        
+        # Limpiar todas las entradas de caché relacionadas
+        from .cache import delete_pattern
+        delete_pattern(f"{cache_pattern}*")
+        
+        logger.info(f"Configuraciones aplicadas para tenant {tenant_id} en ámbito {scope}")
         return True
     except Exception as e:
-        logger.error(f"Error al aplicar cambios de configuración para tenant {tenant_id}: {str(e)}")
+        logger.error(f"Error aplicando cambios de configuración para tenant {tenant_id}: {e}")
         return False
 
 
@@ -484,6 +630,81 @@ def is_tenant_active(tenant_id: str) -> bool:
     except Exception as e:
         logger.error(f"Error verificando estado del tenant {tenant_id}: {str(e)}")
         return False
+
+
+def debug_effective_configurations(
+    tenant_id: str,
+    service_name: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    collection_id: Optional[str] = None,
+    environment: str = "development"
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Retorna una vista jerárquica de todas las configuraciones aplicadas
+    en cada nivel, útil para depuración y auditoría.
+    
+    Args:
+        tenant_id: ID del tenant
+        service_name: Nombre del servicio
+        agent_id: ID del agente
+        collection_id: ID de la colección
+        environment: Entorno
+        
+    Returns:
+        Dict con configuraciones en cada nivel y configuración efectiva final
+    """
+    result = {
+        "tenant_level": {},
+        "service_level": {},
+        "agent_level": {},
+        "collection_level": {},
+        "effective": {}
+    }
+    
+    # Obtener configuraciones de cada nivel
+    result["tenant_level"] = get_tenant_configurations(
+        tenant_id=tenant_id, 
+        scope='tenant',
+        environment=environment
+    )
+    
+    # Nivel de servicio
+    if service_name:
+        result["service_level"] = get_tenant_configurations(
+            tenant_id=tenant_id,
+            scope='service',
+            scope_id=service_name,
+            environment=environment
+        )
+    
+    # Nivel de agente
+    if agent_id:
+        result["agent_level"] = get_tenant_configurations(
+            tenant_id=tenant_id,
+            scope='agent',
+            scope_id=agent_id,
+            environment=environment
+        )
+        
+    # Nivel de colección
+    if collection_id:
+        result["collection_level"] = get_tenant_configurations(
+            tenant_id=tenant_id,
+            scope='collection',
+            scope_id=collection_id,
+            environment=environment
+        )
+    
+    # Configuración efectiva (combinada)
+    result["effective"] = get_effective_configurations(
+        tenant_id=tenant_id,
+        service_name=service_name,
+        agent_id=agent_id,
+        collection_id=collection_id,
+        environment=environment
+    )
+    
+    return result
 
 
 """

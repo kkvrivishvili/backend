@@ -7,12 +7,17 @@ import os
 import json
 import logging
 import time
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 from functools import lru_cache
+from pydantic import BaseSettings, Field
 from pydantic_settings import BaseSettings
-from pydantic import Field, validator
+from pydantic import validator
 
 logger = logging.getLogger(__name__)
+
+# Importar el esquema de configuraciones
+from .config_schema import get_service_configurations, get_mock_configurations
+from .supabase import get_tenant_configurations, get_effective_configurations
 
 # Variables globales para control de caché
 _force_settings_reload = False
@@ -45,145 +50,98 @@ def invalidate_settings_cache(tenant_id: Optional[str] = None):
 
 
 class Settings(BaseSettings):
-    """Configuración centralizada para la plataforma."""
+    """
+    Configuración centralizada para todos los servicios.
     
-    # Identificación del tenant (para sistemas multi-tenant)
-    tenant_id: str = Field("default", env="TENANT_ID")
+    Utiliza valores de entorno y configuraciones de tenant desde Supabase.
+    """
+    # =========== Configuración general ===========
+    service_name: str = Field("llama-service", description="Nombre del servicio actual")
+    environment: str = Field("development", description="Entorno actual (development, staging, production)")
+    debug_mode: bool = Field(False, description="Modo de depuración")
     
-    # Supabase
-    supabase_url: str = Field(..., env="SUPABASE_URL")
-    supabase_key: str = Field(..., env="SUPABASE_KEY")
+    # =========== Tenant por defecto ===========
+    default_tenant_id: str = Field("default", description="ID del tenant por defecto")
+    validate_tenant_access: bool = Field(False, description="Validar que el tenant esté activo")
     
-    # OpenAI
-    openai_api_key: str = Field(..., env="OPENAI_API_KEY")
+    # =========== Logging ===========
+    log_level: str = Field("INFO", description="Nivel de logging")
     
-    # Redis
-    redis_url: str = Field("redis://localhost:6379", env="REDIS_URL")
+    # =========== Caching y Redis ===========
+    redis_url: str = Field("redis://localhost:6379", description="URL de Redis")
+    cache_ttl: int = Field(86400, description="Tiempo de vida de caché en segundos")
     
-    # Servicios URLs
-    embedding_service_url: str = Field("http://embedding-service:8001", env="EMBEDDING_SERVICE_URL")
-    ingestion_service_url: str = Field("http://ingestion-service:8004", env="INGESTION_SERVICE_URL")
-    query_service_url: str = Field("http://query-service:8002", env="QUERY_SERVICE_URL")
-    agent_service_url: str = Field("http://agent-service:8003", env="AGENT_SERVICE_URL")
+    # =========== Supabase ===========
+    supabase_url: str = Field(..., env="SUPABASE_URL", description="URL de Supabase")
+    supabase_key: str = Field(..., env="SUPABASE_KEY", description="Clave de Supabase")
+    supabase_jwt_secret: str = Field("super-secret-jwt-token-with-at-least-32-characters-long", description="JWT Secret para verificación de tokens")
     
-    # Configuración de Modelo
-    use_ollama: bool = Field(False, env="USE_OLLAMA")
-    ollama_api_url: str = Field("http://ollama:11434", env="OLLAMA_API_URL")
+    # =========== Rate Limiting ===========
+    rate_limit_enabled: bool = Field(True, description="Habilitar límite de tasa")
+    rate_limit_free_tier: int = Field(600, description="Número de solicitudes permitidas en el periodo para el plan gratuito")
+    rate_limit_pro_tier: int = Field(1200, description="Número de solicitudes permitidas en el periodo para el plan pro")
+    rate_limit_business_tier: int = Field(3000, description="Número de solicitudes permitidas en el periodo para el plan empresarial")
+    rate_limit_period: int = Field(60, description="Periodo en segundos para el límite de tasa")
     
-    # Configuración de inicio de Ollama
-    ollama_wait_timeout: int = Field(300, env="OLLAMA_WAIT_TIMEOUT")  # segundos para esperar que Ollama esté listo
-    ollama_pull_models: bool = Field(True, env="OLLAMA_PULL_MODELS")  # si debe descargar los modelos al iniciar
+    # =========== OpenAI / Ollama ===========
+    openai_api_key: str = Field(..., env="OPENAI_API_KEY", description="Clave API de OpenAI")
+    use_ollama: bool = Field(False, description="Usar Ollama en lugar de OpenAI")
+    ollama_base_url: str = Field("http://ollama:11434", description="URL base de Ollama")
     
-    # Embedding Service
-    default_embedding_model: str = Field("text-embedding-3-small", env="DEFAULT_EMBEDDING_MODEL")
-    default_embedding_dimension: int = Field(1536, env="DEFAULT_EMBEDDING_DIMENSION")
-    embedding_batch_size: int = Field(100, env="EMBEDDING_BATCH_SIZE")
+    # =========== Configuración de LLM ===========
+    default_llm_model: str = Field("gpt-3.5-turbo", description="Modelo LLM por defecto")
+    agent_default_temperature: float = Field(0.7, description="Temperatura para LLM")
+    max_tokens_per_response: int = Field(2048, description="Máximo de tokens por respuesta")
+    system_prompt_template: str = Field("Eres un asistente AI llamado {agent_name}. {agent_instructions}", description="Plantilla para prompt de sistema")
     
-    # Modelos de Embedding específicos para Ollama/OpenAI
-    default_ollama_embedding_model: str = Field("nomic-embed-text", env="DEFAULT_OLLAMA_EMBEDDING_MODEL")
-    default_openai_embedding_model: str = Field("text-embedding-3-small", env="DEFAULT_OPENAI_EMBEDDING_MODEL")
+    # =========== Configuración de Embeddings ===========
+    default_embedding_model: str = Field("text-embedding-3-small", description="Modelo de embeddings por defecto")
+    embedding_cache_enabled: bool = Field(True, description="Habilitar caché de embeddings")
+    embedding_batch_size: int = Field(100, description="Tamaño de lote para embeddings")
     
-    # LLM
-    default_llm_model: str = Field("gpt-3.5-turbo", env="DEFAULT_LLM_MODEL")
-    default_ollama_llm_model: str = Field("llama3", env="DEFAULT_OLLAMA_LLM_MODEL")
-    default_openai_llm_model: str = Field("gpt-3.5-turbo", env="DEFAULT_OPENAI_LLM_MODEL")
+    # =========== Configuración de Consultas ===========
+    default_similarity_top_k: int = Field(4, description="Número de resultados similares a recuperar por defecto")
+    default_response_mode: str = Field("compact", description="Modo de respuesta por defecto")
+    similarity_threshold: float = Field(0.7, description="Umbral de similitud mínima")
     
-    # Parámetros del modelo
-    llm_temperature: float = Field(0.7, env="LLM_TEMPERATURE")
-    llm_max_tokens: int = Field(2048, env="LLM_MAX_TOKENS")
-    llm_top_p: float = Field(1.0, env="LLM_TOP_P")
-    llm_frequency_penalty: float = Field(0.0, env="LLM_FREQUENCY_PENALTY")
-    llm_presence_penalty: float = Field(0.0, env="LLM_PRESENCE_PENALTY")
+    # =========== Flags de carga de configuración ===========
+    load_config_from_supabase: bool = Field(False, description="Cargar configuración desde Supabase")
+    use_mock_config: bool = Field(False, description="Usar configuración mock si no hay datos en Supabase")
     
-    # Parámetros para procesamiento RAG
-    similarity_cutoff: float = Field(0.7, env="SIMILARITY_CUTOFF")
-    similarity_top_k: int = Field(4, env="SIMILARITY_TOP_K")
-    
-    # Parámetros para chunking de documentos
-    default_chunk_size: int = Field(512, env="DEFAULT_CHUNK_SIZE")
-    default_chunk_overlap: int = Field(50, env="DEFAULT_CHUNK_OVERLAP")
-    
-    # Configuración de puertos de servicios
-    embedding_service_port: int = Field(8001, env="EMBEDDING_SERVICE_PORT")
-    ingestion_service_port: int = Field(8004, env="INGESTION_SERVICE_PORT")
-    query_service_port: int = Field(8002, env="QUERY_SERVICE_PORT")
-    agent_service_port: int = Field(8003, env="AGENT_SERVICE_PORT")
-    
-    # Modos de ejecución
-    testing_mode: bool = Field(False, env="TESTING_MODE")
-    # Flag obsoleta eliminada: skip_supabase
-    mock_openai: bool = Field(False, env="MOCK_OPENAI")
-    
-    # Configuración de seguridad
-    validate_tenant_access: bool = Field(False, env="VALIDATE_TENANT_ACCESS")
-    
-    # Service-specific settings
-    service_name: str = Field("llama-service", env="SERVICE_NAME")
-    service_version: str = Field("1.0.0", env="SERVICE_VERSION")
-    
-    # Rate Limiting
-    rate_limit_free_tier: int = Field(600, env="RATE_LIMIT_FREE_TIER")  # peticiones por minuto
-    rate_limit_pro_tier: int = Field(1200, env="RATE_LIMIT_PRO_TIER")
-    rate_limit_business_tier: int = Field(3000, env="RATE_LIMIT_BUSINESS_TIER")
-    
-    # Cache TTL (segundos)
-    cache_ttl: int = Field(86400, env="CACHE_TTL")  # 24 horas por defecto
-    embedding_cache_ttl: int = Field(604800, env="EMBEDDING_CACHE_TTL")  # 7 días
-    query_cache_ttl: int = Field(3600, env="QUERY_CACHE_TTL")  # 1 hora
-    
-    # Logging
-    log_level: str = Field("INFO", env="LOG_LEVEL")
-    
-    # Factores de costo para modelos (usado en tracking.py)
-    model_cost_factors: Dict[str, float] = Field(
-        {
-            "gpt-3.5-turbo": 1.0,
-            "gpt-4-turbo": 5.0,
-            "gpt-4-turbo-vision": 10.0,
-            "claude-3-5-sonnet": 8.0,
-            "llama3": 0.8,
-            "llama3:70b": 2.0
-        },
-        env="MODEL_COST_FACTORS"
-    )
-    
-    # Configuraciones de HTTP y conexión
-    http_timeout: int = Field(30, env="HTTP_TIMEOUT")  # Timeout en segundos
-    max_retries: int = Field(3, env="MAX_RETRIES")  # Número máximo de reintentos
-    retry_backoff: float = Field(1.5, env="RETRY_BACKOFF")  # Factor de backoff
-    
-    # Configuraciones de tracking
-    enable_usage_tracking: bool = Field(True, env="ENABLE_USAGE_TRACKING")
-    enable_performance_tracking: bool = Field(True, env="ENABLE_PERFORMANCE_TRACKING")
-    
-    # Configuraciones de Entorno
-    config_environment: str = Field("development", env="CONFIG_ENVIRONMENT")  # development, staging, production
-    
-    # Indica si se deben cargar configuraciones desde Supabase
-    load_config_from_supabase: bool = Field(False, env="LOAD_CONFIG_FROM_SUPABASE")
-    
-    model_config = {"env_file": ".env", "case_sensitive": False}
-    
-    @validator('model_cost_factors', pre=True)
-    def parse_model_cost_factors(cls, v):
+    # =========== Métodos de ayuda ===========
+    def get_service_configuration(self, service_name: Optional[str] = None) -> Dict[str, Any]:
         """
-        Parsea model_cost_factors si viene como string JSON desde variable de entorno.
+        Obtiene el esquema de configuración para un servicio específico.
         """
-        if isinstance(v, str):
-            try:
-                return json.loads(v)
-            except json.JSONDecodeError:
-                # Si hay error de parseo, devolver el diccionario por defecto
-                return {
-                    "gpt-3.5-turbo": 1.0,
-                    "gpt-4-turbo": 5.0,
-                    "gpt-4-turbo-vision": 10.0,
-                    "claude-3-5-sonnet": 8.0,
-                    "llama3": 0.8,
-                    "llama3:70b": 2.0
-                }
-        return v
+        return get_service_configurations(service_name or self.service_name)
+    
+    def get_mock_configuration(self, service_name: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Obtiene configuraciones mock para un servicio específico.
+        """
+        return get_mock_configurations(service_name or self.service_name)
+    
+    def use_mock_if_empty(self, service_name: Optional[str] = None, tenant_id: Optional[str] = None):
+        """
+        Establece configuraciones mock si no hay datos en Supabase.
+        """
+        if not self.use_mock_config:
+            return
+            
+        # Obtener configuraciones del tenant
+        tenant_id = tenant_id or self.default_tenant_id
+        configs = get_tenant_configurations(tenant_id=tenant_id, environment=self.environment)
         
+        # Si no hay configuraciones, usar mock
+        if not configs:
+            logger.warning(f"No hay configuraciones para tenant {tenant_id}. Usando configuración mock.")
+            mock_configs = self.get_mock_configuration(service_name or self.service_name)
+            
+            # Establecer las configuraciones mock en esta instancia
+            for key, value in mock_configs.items():
+                if hasattr(self, key):
+                    setattr(self, key, value)
+    
     @validator('default_llm_model')
     def get_effective_llm_model(cls, v, values):
         """
@@ -201,6 +159,11 @@ class Settings(BaseSettings):
         if values.get('use_ollama', False):
             return values.get('default_ollama_embedding_model', "nomic-embed-text")
         return values.get('default_openai_embedding_model', v)
+    
+    class Config:
+        env_file = ".env"
+        env_prefix = ""
+        case_sensitive = False
 
 
 @lru_cache(maxsize=100)  # Limitar tamaño del caché
@@ -269,7 +232,7 @@ def get_settings() -> Settings:
             settings = override_settings_from_supabase(
                 settings, 
                 tenant_id_to_use,
-                settings.config_environment
+                settings.environment
             )
             logger.info(f"Configuración para tenant {tenant_id_to_use} cargada desde Supabase")
         except Exception as e:
@@ -279,6 +242,50 @@ def get_settings() -> Settings:
     _settings_last_refresh[tenant_id] = current_time
     
     return settings
+
+
+def override_settings_from_supabase(settings: Any, tenant_id: str, environment: str = "development") -> Any:
+    """
+    Sobrescribe las configuraciones del objeto Settings con valores de Supabase.
+    Esta función es utilizada por get_settings() en config.py cuando load_config_from_supabase=True.
+    
+    Utiliza el sistema jerárquico de configuraciones:
+    - Configuraciones base a nivel de tenant
+    - Sobrescribe con configuraciones específicas del servicio si existen
+    
+    Args:
+        settings: Objeto Settings de configuración
+        tenant_id: ID del tenant
+        environment: Entorno (development, staging, production)
+        
+    Returns:
+        Any: Objeto Settings con los valores actualizados
+    """
+    try:
+        # Obtener las configuraciones efectivas usando la jerarquía
+        from .supabase import get_effective_configurations
+        
+        configs = get_effective_configurations(
+            tenant_id=tenant_id,
+            service_name=getattr(settings, "service_name", None),
+            environment=environment
+        )
+        
+        if not configs:
+            logger.warning(f"No se encontraron configuraciones para tenant {tenant_id} en entorno {environment}")
+            return settings
+        
+        # Convertir y aplicar configuraciones
+        for key, value in configs.items():
+            if hasattr(settings, key):
+                # El valor ya está correctamente convertido por get_effective_configurations
+                setattr(settings, key, value)
+                logger.debug(f"Configuración {key} actualizada para tenant {tenant_id}")
+        
+        return settings
+    except Exception as e:
+        logger.error(f"Error aplicando configuraciones desde Supabase: {e}")
+        return settings
 
 
 def get_tier_rate_limit(tier: str) -> int:
@@ -414,4 +421,4 @@ def get_service_port(service_name: str) -> int:
         "query": settings.query_service_port,
         "agent": settings.agent_service_port
     }
-    return ports.get(service_name, 8000)  # Puerto por defecto si no se encuentra
+    return ports.get(service_name, 8004)  # Puerto por defecto si no se encuentra
