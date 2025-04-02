@@ -68,6 +68,26 @@ async def lifespan(app: FastAPI):
         # Inicializar Supabase
         logger.info(f"Inicializando servicio con URL: {settings.supabase_url}")
         init_supabase()
+        
+        # Cargar configuraciones específicas del servicio de agentes
+        if settings.load_config_from_supabase:
+            try:
+                # Cargar configuraciones a nivel servicio
+                service_settings = get_effective_configurations(
+                    tenant_id=settings.default_tenant_id,
+                    service_name="agent",
+                    environment=settings.environment
+                )
+                logger.info(f"Configuraciones cargadas para servicio de agentes: {len(service_settings)} parámetros")
+                
+                # Si no hay configuraciones y está habilitado mock, usar configuraciones de desarrollo
+                if not service_settings and settings.use_mock_config:
+                    logger.warning("No se encontraron configuraciones en Supabase. Usando configuración mock.")
+                    settings.use_mock_if_empty(service_name="agent")
+            except Exception as config_err:
+                logger.error(f"Error cargando configuraciones: {config_err}")
+                # Continuar con valores por defecto
+        
         logger.info("Servicio de agente inicializado correctamente")
         yield
     except Exception as e:

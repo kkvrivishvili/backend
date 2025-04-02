@@ -55,6 +55,44 @@ settings = get_settings()
 # Redis client
 redis_client = get_redis_client()
 
+# Contexto de ciclo de vida para inicializar el servicio
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Gestiona el ciclo de vida de la aplicación, inicializando configuraciones y conexiones.
+    """
+    try:
+        logger.info(f"Inicializando servicio de embeddings con URL Supabase: {settings.supabase_url}")
+        
+        # Cargar configuraciones específicas del servicio de embeddings
+        if settings.load_config_from_supabase:
+            try:
+                # Cargar configuraciones a nivel servicio
+                service_settings = get_effective_configurations(
+                    tenant_id=settings.default_tenant_id,
+                    service_name="embedding",
+                    environment=settings.environment
+                )
+                logger.info(f"Configuraciones cargadas para servicio de embeddings: {len(service_settings)} parámetros")
+                
+                # Si no hay configuraciones y está habilitado mock, usar configuraciones de desarrollo
+                if not service_settings and settings.use_mock_config:
+                    logger.warning("No se encontraron configuraciones en Supabase. Usando configuración mock.")
+                    settings.use_mock_if_empty(service_name="embedding")
+            except Exception as config_err:
+                logger.error(f"Error cargando configuraciones: {config_err}")
+                # Continuar con valores por defecto
+        
+        logger.info("Servicio de embeddings inicializado correctamente")
+        yield
+    except Exception as e:
+        logger.error(f"Error al inicializar el servicio de embeddings: {str(e)}")
+        # Permitir que el servicio se inicie con funcionalidad limitada
+        yield
+    finally:
+        # Limpiar recursos al cerrar
+        logger.info("Servicio de embeddings detenido correctamente")
+
 # FastAPI app
 app = FastAPI(
     title="Linktree AI - Embeddings Service",
@@ -81,7 +119,8 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
-    openapi_url="/openapi.json"
+    openapi_url="/openapi.json",
+    lifespan_context=lifespan
 )
 
 # Configurar Swagger UI con opciones estandarizadas
@@ -732,8 +771,8 @@ async def list_available_models(
     # Modelos básicos disponibles para todos
     available_models = get_available_models_for_tier("free")
     
-    # Modelos premium
-    premium_models = {
+    # Modelos adicionales para niveles premium
+    pro_models = {
         "text-embedding-3-large": {
             "dimensions": 3072,
             "description": "OpenAI's most capable embedding model with higher dimensions for better performance",
@@ -741,27 +780,33 @@ async def list_available_models(
         }
     }
     
-    # Add Ollama models if using local models
-    ollama_models = {}
-    if settings.use_ollama:
-        ollama_models = {
-            "nomic-embed-text": {
-                "dimensions": 768,
-                "description": "Nomic AI embedding model, locally hosted on Ollama",
-                "max_tokens": 8192
-            }
+    # Modelos exclusivos para nivel enterprise
+    enterprise_models = {
+        "text-embedding-3-turbo": {
+            "dimensions": 3072,
+            "description": "Embeddings de mayor rendimiento, optimizados para RAG y búsquedas semánticas",
+            "max_tokens": 16000
+        },
+        "custom-domain-embedding": {
+            "dimensions": 4096,
+            "description": "Embeddings personalizados para dominios específicos con entrenamiento adicional",
+            "max_tokens": 32000
         }
+    }
     
-    available_models.update(ollama_models)
+    # Devolver modelos según el nivel de suscripción
+    result = available_models.copy()
     
-    # Add premium models only for higher tier tenants
-    if subscription_tier in ["pro", "enterprise"]:
-        available_models.update(premium_models)
-    
+    if subscription_tier in ["pro", "business"]:
+        result.update(pro_models)
+        
+    if subscription_tier in ["enterprise", "business"]:
+        result.update(enterprise_models)
+        
     return ModelListResponse(
         success=True,
         message="Modelos de embedding disponibles obtenidos correctamente",
-        models=available_models,
+        models=result,
         default_model=settings.default_embedding_model,
         subscription_tier=subscription_tier,
         tenant_id=tenant_id

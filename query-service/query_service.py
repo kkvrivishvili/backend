@@ -435,59 +435,102 @@ async def create_query_engine(
     Returns:
         tuple: Motor de consulta configurado y debug handler
     """
-    # El tenant_id ya está disponible en el contexto gracias al decorador
-    tenant_id = get_current_tenant_id()
-    
-    # Configurar callback para depuración
-    debug_handler = LlamaDebugHandler()
-    callback_manager = CallbackManager([debug_handler])
-    
-    # Obtener información de la colección para logs
-    collection_name = None
     try:
-        supabase = get_supabase_client()
-        collection_result = await supabase.table("ai.collections").select("name").eq("collection_id", collection_id).execute()
-        if collection_result.data and len(collection_result.data) > 0:
-            collection_name = collection_result.data[0].get("name")
+        tenant_id = tenant_info.tenant_id
+        
+        # Obtener configuraciones específicas para esta colección
+        if settings.load_config_from_supabase:
+            try:
+                collection_configs = get_effective_configurations(
+                    tenant_id=tenant_id,
+                    service_name="query",
+                    collection_id=collection_id,
+                    environment=settings.environment
+                )
+                
+                # Aplicar configuraciones de colección si existen
+                if collection_configs:
+                    logger.debug(f"Usando configuraciones específicas para colección {collection_id}")
+                    # Usar configuraciones de colección si no se especificaron en la solicitud
+                    if similarity_top_k == 4 and "default_similarity_top_k" in collection_configs:
+                        similarity_top_k = int(collection_configs["default_similarity_top_k"])
+                        
+                    if response_mode == "compact" and "default_response_mode" in collection_configs:
+                        response_mode = collection_configs["default_response_mode"]
+                        
+                    # Umbral de similitud específico para la colección
+                    similarity_threshold = float(collection_configs.get(
+                        "similarity_threshold", 
+                        settings.similarity_threshold
+                    ))
+            except Exception as e:
+                logger.warning(f"Error obteniendo configuraciones para colección {collection_id}: {e}")
+                # Continuar con valores por defecto
+        
+        # Obtener LLM para el tenant (podría estar condicionado por su nivel)
+        llm = get_llm_for_tenant(tenant_info, llm_model)
+        
+        # Crear manejador de debug para capturar pasos
+        debug_handler = LlamaDebugHandler()
+        callback_manager = CallbackManager([debug_handler])
+        
+        # Obtener Vector Store para la colección
+        vector_store = get_tenant_vector_store(
+            tenant_id=tenant_id,
+            collection_id=collection_id
+        )
+        
+        if not vector_store:
+            logger.error(f"No se encontró vector store para tenant {tenant_id} y colección {collection_id}")
+            raise ServiceError(
+                message=f"No se encontró la colección especificada o está vacía",
+                status_code=404,
+                error_code="COLLECTION_NOT_FOUND"
+            )
+        
+        # Crear el índice de vector store
+        index = VectorStoreIndex.from_vector_store(vector_store)
+        
+        # Crear el recuperador de vectores
+        retriever = VectorIndexRetriever(
+            index=index,
+            similarity_top_k=similarity_top_k,
+        )
+        
+        # Crear el postprocesador de similitud
+        similarity_postprocessor = SimilarityPostprocessor(
+            similarity_cutoff=similarity_threshold
+        )
+        
+        # Obtener el sintetizador apropiado
+        response_synthesizer = get_response_synthesizer(
+            response_mode=response_mode,
+            llm=llm,
+            callback_manager=callback_manager
+        )
+        
+        # Crear el motor de consulta
+        query_engine = RetrieverQueryEngine(
+            retriever=retriever,
+            response_synthesizer=response_synthesizer,
+            node_postprocessors=[similarity_postprocessor],
+            callback_manager=callback_manager,
+        )
+        
+        return query_engine, debug_handler
+        
+    except ServiceError as se:
+        # Re-lanzar errores específicos del servicio
+        raise se
     except Exception as e:
-        logger.warning(f"Error al obtener información de colección para ID {collection_id}: {str(e)}")
-    
-    # Obtener vector store para el tenant
-    vector_store = get_tenant_vector_store(tenant_id=tenant_id, collection_id=collection_id)
-    
-    # Crear índice sobre el vector store
-    index = VectorStoreIndex.from_vector_store(vector_store)
-    
-    # Configurar recuperador
-    retriever = VectorIndexRetriever(
-        index=index,
-        similarity_top_k=similarity_top_k
-    )
-    
-    # Configurar postprocesador de similitud
-    node_postprocessor = SimilarityPostprocessor(
-        similarity_cutoff=settings.similarity_cutoff
-    )
-    
-    # Obtener LLM adecuado para el tenant
-    llm = get_llm_for_tenant(tenant_info, llm_model)
-    
-    # Crear sintetizador de respuesta usando la función actualizada
-    response_synthesizer = get_response_synthesizer(
-        response_mode=response_mode,
-        llm=llm,
-        callback_manager=callback_manager
-    )
-    
-    # Crear motor de consulta
-    query_engine = RetrieverQueryEngine(
-        retriever=retriever,
-        response_synthesizer=response_synthesizer,
-        node_postprocessors=[node_postprocessor],
-        callback_manager=callback_manager
-    )
-    
-    return query_engine, debug_handler
+        logger.error(f"Error al crear motor de consulta: {str(e)}")
+        raise ServiceError(
+            message="Error al procesar la consulta",
+            status_code=500,
+            error_code="QUERY_ENGINE_ERROR",
+            details={"error": str(e)}
+        )
+
 
 async def list_documents(
     collection_id: Optional[UUID] = None, 
@@ -527,7 +570,7 @@ async def list_documents(
             if collection_result.data and len(collection_result.data) > 0:
                 collection_name = collection_result.data[0].get("name")
         except Exception as e:
-            logger.warning(f"Error al obtener nombre de colección para ID {collection_id}: {str(e)}")
+            logger.warning(f"Error al obtener información de colección para ID {collection_id}: {str(e)}")
     
     # Construir respuesta según el modelo DocumentsListResponse
     return DocumentsListResponse(
@@ -1053,6 +1096,47 @@ async def delete_collection(collection_id: str, tenant_info: TenantInfo) -> Dele
             error_code="delete_collection_error",
             status_code=500
         )
+
+# Contexto de ciclo de vida para inicializar el servicio
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Gestiona el ciclo de vida de la aplicación, inicializando configuraciones y conexiones.
+    """
+    try:
+        logger.info(f"Inicializando servicio de consultas con URL Supabase: {settings.supabase_url}")
+        
+        # Cargar configuraciones específicas del servicio de consultas
+        if settings.load_config_from_supabase:
+            try:
+                # Cargar configuraciones a nivel servicio
+                service_settings = get_effective_configurations(
+                    tenant_id=settings.default_tenant_id,
+                    service_name="query",
+                    environment=settings.environment
+                )
+                logger.info(f"Configuraciones cargadas para servicio de consultas: {len(service_settings)} parámetros")
+                
+                # Si no hay configuraciones y está habilitado mock, usar configuraciones de desarrollo
+                if not service_settings and settings.use_mock_config:
+                    logger.warning("No se encontraron configuraciones en Supabase. Usando configuración mock.")
+                    settings.use_mock_if_empty(service_name="query")
+            except Exception as config_err:
+                logger.error(f"Error cargando configuraciones: {config_err}")
+                # Continuar con valores por defecto
+        
+        logger.info("Servicio de consultas inicializado correctamente")
+        yield
+    except Exception as e:
+        logger.error(f"Error al inicializar el servicio de consultas: {str(e)}")
+        # Permitir que el servicio se inicie con funcionalidad limitada
+        yield
+    finally:
+        # Limpiar recursos al cerrar
+        logger.info("Servicio de consultas detenido correctamente")
+
+# Agregar contexto de ciclo de vida a la aplicación
+app.lifespan_context = lifespan
 
 if __name__ == "__main__":
     import uvicorn
