@@ -86,52 +86,38 @@ app = FastAPI(
     openapi_url="/openapi.json",
     openapi_tags=[
         {
-            "name": "ingest",
-            "description": "Operaciones de ingestión de documentos"
+            "name": "Health",
+            "description": "Verificación de estado y salud del servicio"
         },
         {
-            "name": "health",
-            "description": "Verificación de estado del servicio"
+            "name": "Collections",
+            "description": "Gestión de colecciones de documentos"
         },
         {
-            "name": "collections",
-            "description": "Operaciones de gestión de colecciones"
+            "name": "Documents",
+            "description": "Gestión de documentos y fragmentos"
         }
     ]
 )
 
-# Configurar Swagger UI con opciones estandarizadas
+# Configuración de Swagger con tags estandarizados
 configure_swagger_ui(
     app=app,
-    service_name="Ingestion Service",
-    service_description="""
-    API para gestionar la ingesta, procesamiento e indexación de documentos en el sistema RAG.
-    
-    Este servicio permite cargar documentos, procesarlos en fragmentos adecuados para RAG,
-    extraer metadatos relevantes, y vectorizarlos para su posterior consulta a través
-    del Query Service.
-    """,
+    service_name="Servicio de Ingestión",
+    service_description="API para gestión de documentos y colecciones",
     version="1.2.0",
     tags=[
         {
-            "name": "documents",
-            "description": "Operaciones de ingesta y gestión de documentos"
+            "name": "Health",
+            "description": "Verificación de estado y salud del servicio"
         },
         {
-            "name": "ingestion",
-            "description": "Control de procesos de ingesta"
+            "name": "Collections",
+            "description": "Gestión de colecciones de documentos"
         },
         {
-            "name": "jobs",
-            "description": "Gestión de trabajos de procesamiento"
-        },
-        {
-            "name": "health",
-            "description": "Verificación de estado del servicio"
-        },
-        {
-            "name": "collections",
-            "description": "Operaciones de gestión de colecciones"
+            "name": "Documents",
+            "description": "Gestión de documentos y fragmentos"
         }
     ]
 )
@@ -139,7 +125,25 @@ configure_swagger_ui(
 # Agregar ejemplos para los endpoints principales
 add_example_to_endpoint(
     app=app,
-    path="/ingest",
+    path="/collections",
+    method="post",
+    request_example={
+        "name": "documentos_legales",
+        "description": "Colección de documentos legales y contratos"
+    },
+    response_example={
+        "success": True,
+        "message": "Colección creada correctamente",
+        "collection_id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "documentos_legales",
+        "description": "Colección de documentos legales y contratos"
+    },
+    request_schema_description="Solicitud para crear una nueva colección"
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/collections/{collection_id}/documents",
     method="post",
     request_example={
         "documents": [
@@ -156,11 +160,7 @@ add_example_to_endpoint(
                     }
                 }
             }
-        ],
-        "collection_id": "550e8400-e29b-41d4-a716-446655440000",
-        "collection_name": "default",
-        "chunk_size": 500,
-        "chunk_overlap": 100
+        ]
     },
     response_example={
         "success": True,
@@ -168,17 +168,15 @@ add_example_to_endpoint(
         "document_ids": ["doc_123456"],
         "node_count": 10
     },
-    request_schema_description="Solicitud para procesar e indexar documentos en la base de datos vectorial"
+    request_schema_description="Solicitud para procesar e indexar documentos en una colección"
 )
 
 add_example_to_endpoint(
     app=app,
-    path="/ingest-file",
+    path="/collections/{collection_id}/upload",
     method="post",
     request_example={
         "file": "<archivo_binario>",
-        "collection_id": "550e8400-e29b-41d4-a716-446655440000",
-        "collection_name": "default",
         "document_type": "manual",
         "author": "Equipo de Desarrollo"
     },
@@ -188,7 +186,7 @@ add_example_to_endpoint(
         "document_ids": ["doc_123456"],
         "node_count": 10
     },
-    request_schema_description="Solicitud para ingerir y procesar un archivo"
+    request_schema_description="Solicitud para ingerir y procesar un archivo en una colección"
 )
 
 add_example_to_endpoint(
@@ -223,7 +221,7 @@ add_example_to_endpoint(
 
 add_example_to_endpoint(
     app=app,
-    path="/status",
+    path="/health",
     method="get",
     response_example={
         "success": True,
@@ -234,23 +232,6 @@ add_example_to_endpoint(
             "embedding_service": "available"
         },
         "version": "1.2.0"
-    }
-)
-
-add_example_to_endpoint(
-    app=app,
-    path="/collections",
-    method="post",
-    request_example={
-        "name": "documentos_legales",
-        "description": "Colección de documentos legales y contratos"
-    },
-    response_example={
-        "success": True,
-        "message": "Colección creada correctamente",
-        "collection_id": "550e8400-e29b-41d4-a716-446655440000",
-        "name": "documentos_legales",
-        "description": "Colección de documentos legales y contratos"
     }
 )
 
@@ -438,16 +419,222 @@ async def index_documents_task(node_data_list: List[Dict[str, Any]], collection_
     except Exception as e:
         logger.error(f"Error en la tarea de indexación: {str(e)}", exc_info=True)
 
-@app.post("/ingest", response_model=IngestionResponse, tags=["ingest"])
+@app.post(
+    "/collections",
+    response_model=CollectionCreationResponse,
+    tags=["Collections"],
+    summary="Crear nueva colección",
+    status_code=201
+)
 @handle_service_error_simple
-@with_full_context
-async def ingest_documents(
+@with_tenant_context
+async def create_collection(
+    name: str,
+    description: Optional[str] = None,
+    tenant_info: TenantInfo = Depends(verify_tenant)
+):
+    """
+    Crea una nueva colección para organizar documentos.
+    
+    Este endpoint permite crear una colección con un nombre amigable y descripción
+    para organizar documentos relacionados. Cada colección recibe un identificador
+    único (UUID) que se utiliza en operaciones posteriores.
+    
+    ## Flujo de procesamiento
+    1. Validación de permisos del tenant
+    2. Verificación de límites de colecciones según plan
+    3. Generación de UUID para la colección
+    4. Registro en base de datos
+    
+    Args:
+        name: Nombre amigable para la colección
+        description: Descripción detallada (opcional)
+        tenant_info: Información del tenant (inyectada)
+        
+    Returns:
+        CollectionCreationResponse: Detalles de la colección creada
+            - collection_id: UUID único asignado a la colección
+            - name: Nombre amigable
+            - description: Descripción proporcionada
+    
+    Raises:
+        ServiceError: Si ocurre un error durante la creación o hay duplicados
+    """
+    try:
+        tenant_id = tenant_info.tenant_id
+        
+        # Generar UUID para la colección
+        collection_id = str(uuid.uuid4())
+        
+        # Conectar a Supabase
+        supabase = get_supabase_client()
+        if not supabase:
+            raise ServiceError("Error conectando a Supabase", "DATABASE_ERROR")
+        
+        # Verificar si ya existe una colección con el mismo nombre
+        result = supabase.table("ai.collections").select("id") \
+            .eq("tenant_id", tenant_id) \
+            .eq("name", name) \
+            .execute()
+        
+        if len(result.data) > 0:
+            raise ServiceError(f"Ya existe una colección con el nombre '{name}'", "DUPLICATE_COLLECTION")
+        
+        # Insertar en la tabla de colecciones
+        created_at = datetime.now().isoformat()
+        result = supabase.table("ai.collections").insert({
+            "collection_id": collection_id,
+            "name": name,
+            "description": description,
+            "tenant_id": tenant_id,
+            "created_at": created_at,
+            "updated_at": created_at,
+            "is_active": True
+        }).execute()
+        
+        if not result.data:
+            raise ServiceError("Error al crear la colección", "CREATION_FAILED")
+        
+        logger.info(f"Colección creada: {collection_id} - {name} para tenant {tenant_id}")
+        
+        return CollectionCreationResponse(
+            success=True,
+            collection_id=collection_id,
+            name=name,
+            description=description,
+            tenant_id=tenant_id,
+            created_at=created_at,
+            updated_at=created_at
+        )
+        
+    except ServiceError as e:
+        return handle_service_error_simple(
+            e,
+            status_code=400,
+            error_code=e.error_code
+        )
+    except Exception as e:
+        logger.error(f"Error creando colección: {str(e)}")
+        return handle_service_error_simple(
+            ServiceError(f"Error al crear la colección: {str(e)}", "INTERNAL_ERROR"),
+            status_code=500,
+            error_code="CREATION_FAILED"
+        )
+
+@app.delete(
+    "/collections/{collection_id}",
+    response_model=DeleteCollectionResponse,
+    tags=["Collections"],
+    summary="Eliminar colección",
+    description="Elimina una colección completa y todos sus documentos"
+)
+async def delete_collection(
+    collection_id: str,
+    tenant_info: TenantInfo = Depends(verify_tenant)
+):
+    """
+    Elimina una colección completa de documentos.
+    
+    Este endpoint elimina todos los documentos y fragmentos asociados a una colección
+    específica identificada por su UUID único. Esta operación es irreversible
+    y debe usarse con precaución.
+    
+    ## Flujo de procesamiento
+    1. Validación de permisos del tenant
+    2. Verificación de existencia de la colección
+    3. Eliminación de todos los documentos asociados
+    4. Eliminación de todos los fragmentos de texto (chunks) asociados
+    5. Actualización de metadatos y registros de uso
+    
+    Args:
+        collection_id: ID único (UUID) de la colección a eliminar
+        tenant_info: Información del tenant (inyectada mediante verify_tenant)
+        
+    Returns:
+        DeleteCollectionResponse: Resultado de la operación
+            - success: True si la operación fue exitosa
+            - collection_id: ID de la colección eliminada
+            - collection_name: Nombre de la colección (para referencia)
+            - deleted: True si se eliminó correctamente
+            - documents_deleted: Cantidad de documentos/fragmentos eliminados
+    
+    Raises:
+        ServiceError: Si la colección no existe o hay error en la eliminación
+    """
+    try:
+        tenant_id = tenant_info.tenant_id
+        
+        # Conectar a Supabase
+        supabase = get_supabase_client()
+        if not supabase:
+            raise ServiceError("Error conectando a Supabase", "DATABASE_ERROR")
+        
+        # Verificar existencia de la colección
+        result = supabase.table("ai.collections").select("name") \
+            .eq("tenant_id", tenant_id) \
+            .eq("collection_id", collection_id) \
+            .execute()
+        
+        if not result.data:
+            raise ServiceError(f"Colección no encontrada: {collection_id}", "COLLECTION_NOT_FOUND")
+        
+        collection_name = result.data[0]["name"]
+        
+        # Eliminar chunks de la colección
+        delete_result = supabase.table("ai.document_chunks") \
+            .delete() \
+            .eq("tenant_id", tenant_id) \
+            .eq("collection_id", collection_id) \
+            .execute()
+        
+        chunks_deleted = len(delete_result.data) if delete_result.data else 0
+        
+        # Eliminar la colección
+        supabase.table("ai.collections") \
+            .delete() \
+            .eq("tenant_id", tenant_id) \
+            .eq("collection_id", collection_id) \
+            .execute()
+        
+        logger.info(f"Colección eliminada: {collection_id} - {collection_name} para tenant {tenant_id}")
+        
+        return DeleteCollectionResponse(
+            success=True,
+            collection_id=collection_id,
+            collection_name=collection_name,
+            deleted=True,
+            documents_deleted=chunks_deleted
+        )
+        
+    except ServiceError as e:
+        return handle_service_error_simple(
+            e, 
+            status_code=404 if e.error_code == "COLLECTION_NOT_FOUND" else 400,
+            error_code=e.error_code
+        )
+    except Exception as e:
+        logger.error(f"Error eliminando colección: {str(e)}")
+        return handle_service_error_simple(
+            ServiceError(f"Error al eliminar la colección: {str(e)}", "INTERNAL_ERROR"),
+            status_code=500,
+            error_code="DELETE_FAILED"
+        )
+
+@app.post(
+    "/collections/{collection_id}/documents",
+    response_model=IngestionResponse,
+    tags=["Documents"],
+    summary="Ingerir documentos",
+    description="Ingiere documentos en una colección específica"
+)
+async def ingest_documents_to_collection(
+    collection_id: str,
     request: DocumentIngestionRequest,
     background_tasks: BackgroundTasks,
     tenant_info: TenantInfo = Depends(verify_tenant)
-) -> IngestionResponse:
+):
     """
-    Procesa e indexa documentos en la base de datos vectorial.
+    Procesa e indexa documentos en una colección específica.
     
     Este endpoint permite ingerir documentos de texto con sus metadatos asociados, 
     segmentarlos en nodos más pequeños, y almacenarlos en la colección especificada
@@ -455,36 +642,29 @@ async def ingest_documents(
     
     ## Flujo de procesamiento
     1. Validación de cuotas y permisos del tenant
-    2. Chunking de documentos en nodos más pequeños según configuración
-    3. Generación de embeddings para cada nodo (vía Embedding Service)
-    4. Almacenamiento en Supabase (metadatos y vectores)
-    5. Registro de uso para facturación y análisis
-    
-    ## Dependencias
-    - Embedding Service: Para vectorización de los fragmentos de texto
-    - Supabase: Para almacenamiento persistente de documentos y vectores
+    2. Verificación de existencia de la colección
+    3. Chunking de documentos en nodos más pequeños según configuración
+    4. Generación de embeddings para cada nodo (vía Embedding Service)
+    5. Almacenamiento en Supabase (metadatos y vectores)
     
     Args:
-        request: Solicitud con documentos a ingerir (DocumentIngestionRequest)
+        collection_id: ID único de la colección (UUID) donde ingerir los documentos
+        request: Solicitud con documentos a ingerir
             - documents: Lista de documentos con texto y metadatos
-            - collection_id: ID único de la colección (opcional)
-            - collection_name: Nombre amigable de la colección (opcional, default: "default")
-            - chunk_size: Tamaño máximo de cada fragmento de texto (opcional)
-            - chunk_overlap: Cantidad de solapamiento entre fragmentos (opcional)
         background_tasks: Tareas en segundo plano (inyectado por FastAPI)
         tenant_info: Información del tenant (inyectado mediante autenticación)
         
     Returns:
         IngestionResponse: Confirmación de la ingestión con detalles
-            - success: True si la operación fue exitosa (cumpliendo BaseResponse)
             - document_ids: Lista de IDs únicos asignados a los documentos procesados
             - node_count: Número total de nodos/fragmentos generados
-            - metadata: Información adicional sobre el procesamiento
     
     Raises:
         ServiceError: En caso de errores durante el procesamiento o almacenamiento
-        HTTPException: Para errores de validación o autorización
     """
+    # Forzar el collection_id de la ruta en la solicitud
+    request.collection_id = collection_id
+    
     # Los IDs de contexto ya están disponibles gracias al decorador
     tenant_id = tenant_info.tenant_id
     agent_id = get_current_agent_id()
@@ -492,30 +672,6 @@ async def ingest_documents(
     
     # Validar cuota y límites del tenant
     await check_tenant_quotas(tenant_id)
-    
-    # Usar collection_id si está disponible, sino usar collection_name
-    collection_id = request.collection_id
-    collection_name = request.collection_name or "default"
-    
-    # Si tenemos collection_id pero no collection_name, intentar obtener el nombre
-    if collection_id and not collection_name or collection_name == "default":
-        try:
-            supabase = get_supabase_client()
-            collection_result = await supabase.table("collections").select("name").eq("collection_id", collection_id).execute()
-            if collection_result.data and len(collection_result.data) > 0:
-                collection_name = collection_result.data[0].get("name", "default")
-        except Exception as e:
-            logger.warning(f"Error al obtener nombre de colección para ID {collection_id}: {str(e)}")
-    
-    # Si no tenemos collection_id pero sí collection_name, intentar obtener el ID
-    if not collection_id and collection_name and collection_name != "default":
-        try:
-            supabase = get_supabase_client()
-            collection_result = await supabase.table("collections").select("collection_id").eq("name", collection_name).eq("tenant_id", tenant_id).execute()
-            if collection_result.data and len(collection_result.data) > 0:
-                collection_id = collection_result.data[0].get("collection_id")
-        except Exception as e:
-            logger.warning(f"Error al obtener ID de colección para nombre {collection_name}: {str(e)}")
     
     # Verificar que hay documentos para procesar
     if not request.documents or len(request.documents) == 0:
@@ -556,7 +712,7 @@ async def ingest_documents(
                 document_text, 
                 metadata,
                 collection_id,
-                collection_name
+                collection_name=None  # No necesitamos collection_name cuando tenemos collection_id
             )
             
             all_nodes.extend(nodes)
@@ -566,7 +722,7 @@ async def ingest_documents(
             index_documents_task,
             all_nodes,
             collection_id,
-            collection_name
+            None  # No necesitamos collection_name cuando tenemos collection_id
         )
         
         return IngestionResponse(
@@ -584,44 +740,45 @@ async def ingest_documents(
             error_code="processing_error"
         )
 
-@app.post("/ingest-file", response_model=IngestionResponse, tags=["documents"])
-@handle_service_error_simple
-@with_full_context
-async def ingest_file(
+@app.post(
+    "/collections/{collection_id}/upload",
+    response_model=IngestionResponse,
+    tags=["Documents"],
+    summary="Subir archivo",
+    description="Sube e ingiere un archivo a una colección específica"
+)
+async def upload_file_to_collection(
+    collection_id: str,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    collection_id: Optional[str] = Form(None),
-    collection_name: str = Form("default"),
     document_type: str = Form(...),
     author: Optional[str] = Form(None),
     tenant_info: TenantInfo = Depends(verify_tenant)
-) -> IngestionResponse:
+):
     """
-    Ingiere un archivo subido y lo procesa para búsqueda vectorial.
+    Sube un archivo a una colección específica para procesamiento e indexación.
     
     Este endpoint permite subir archivos (PDF, TXT, DOCX, etc.) para ser
-    procesados, segmentados e indexados en la colección especificada.
+    procesados, segmentados e indexados en la colección especificada por ID.
     
     ## Flujo de procesamiento
     1. Validación de permisos y cuotas del tenant
-    2. Extracción de texto del archivo según su formato
-    3. Segmentación en fragmentos más pequeños según configuración
-    4. Generación de embeddings para cada fragmento
-    5. Almacenamiento en la colección especificada
+    2. Verificación de existencia de la colección
+    3. Extracción de texto del archivo según su formato
+    4. Segmentación en fragmentos más pequeños
+    5. Generación de embeddings para cada fragmento
+    6. Almacenamiento en la colección especificada
     
     Args:
+        collection_id: ID único de la colección (UUID) donde ingerir el archivo
         background_tasks: Tareas en segundo plano (inyectado por FastAPI)
         file: Archivo a ingerir (multipart/form-data)
-        collection_id: ID único de la colección (UUID)
-        collection_name: Nombre amigable de la colección (para compatibilidad)
         document_type: Tipo de documento (ej: "legal", "manual", "reporte")
         author: Autor del documento (opcional)
         tenant_info: Información del tenant (inyectada)
         
     Returns:
         IngestionResponse: Respuesta con ID de documento y contador de nodos
-            - document_ids: Lista con el ID único asignado al documento
-            - nodes_count: Cantidad de fragmentos generados
     
     Raises:
         ServiceError: Si hay error en la extracción o procesamiento
@@ -633,26 +790,6 @@ async def ingest_file(
     
     # Verificar cuotas del tenant
     await check_tenant_quotas(tenant_id)
-    
-    # Si tenemos collection_id pero no collection_name, intentar obtener el nombre
-    if collection_id and (not collection_name or collection_name == "default"):
-        try:
-            supabase = get_supabase_client()
-            collection_result = await supabase.table("collections").select("name").eq("collection_id", collection_id).execute()
-            if collection_result.data and len(collection_result.data) > 0:
-                collection_name = collection_result.data[0].get("name", "default")
-        except Exception as e:
-            logger.warning(f"Error al obtener nombre de colección para ID {collection_id}: {str(e)}")
-    
-    # Si no tenemos collection_id pero sí collection_name, intentar obtener el ID
-    if not collection_id and collection_name and collection_name != "default":
-        try:
-            supabase = get_supabase_client()
-            collection_result = await supabase.table("collections").select("collection_id").eq("name", collection_name).eq("tenant_id", tenant_id).execute()
-            if collection_result.data and len(collection_result.data) > 0:
-                collection_id = collection_result.data[0].get("collection_id")
-        except Exception as e:
-            logger.warning(f"Error al obtener ID de colección para nombre {collection_name}: {str(e)}")
     
     # Leer contenido del archivo
     content = await file.read()
@@ -680,7 +817,7 @@ async def ingest_file(
         doc_text=file_text,
         metadata=metadata,
         collection_id=collection_id,
-        collection_name=collection_name
+        collection_name=None  # No necesitamos collection_name cuando tenemos collection_id
     )
     
     # Programar indexación en segundo plano
@@ -688,7 +825,7 @@ async def ingest_file(
         index_documents_task,
         node_data,
         collection_id,
-        collection_name
+        None  # No necesitamos collection_name cuando tenemos collection_id
     )
     
     logger.info(f"Archivo {file.filename} procesado con {len(node_data)} fragmentos")
@@ -700,13 +837,17 @@ async def ingest_file(
         nodes_count=len(node_data)
     )
 
-@app.delete("/documents/{document_id}", response_model=DeleteDocumentResponse, tags=["documents"])
-@handle_service_error_simple
-@with_full_context
-async def delete_document(
+@app.delete(
+    "/documents/{document_id}",
+    response_model=DeleteDocumentResponse,
+    tags=["Documents"],
+    summary="Eliminar documento",
+    description="Elimina un documento específico y todos sus fragmentos"
+)
+async def delete_document_endpoint(
     document_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
-) -> DeleteDocumentResponse:
+):
     """
     Elimina un documento específico y todos sus fragmentos asociados.
     
@@ -714,24 +855,16 @@ async def delete_document(
     los fragmentos de texto (chunks) asociados a él. Esta operación es 
     irreversible y debe usarse con precaución.
     
-    ## Flujo de procesamiento
-    1. Validación de permisos del tenant
-    2. Verificación de existencia del documento
-    3. Eliminación de todos los fragmentos asociados al documento
-    4. Actualización de metadatos y contadores
-    
     Args:
         document_id: ID único del documento a eliminar
         tenant_info: Información del tenant (inyectada)
         
     Returns:
         DeleteDocumentResponse: Resultado de la operación
-            - success: True si la operación fue exitosa
             - document_id: ID del documento eliminado
-            - collection_id: ID de la colección a la que pertenecía (si está disponible)
+            - collection_id: ID de la colección a la que pertenecía
             - collection_name: Nombre de la colección (para referencia)
             - deleted: True si se eliminó correctamente
-            - deleted_chunks: Cantidad de fragmentos eliminados
     
     Raises:
         ServiceError: Si el documento no existe o hay error en la eliminación
@@ -807,243 +940,25 @@ async def delete_document(
             error_code="delete_document_error"
         )
 
-@app.delete("/collections/{collection_id}", response_model=DeleteCollectionResponse, tags=["collections"])
-@handle_service_error_simple
-@with_tenant_context
-async def delete_collection(
-    collection_id: str,
-    tenant_info: TenantInfo = Depends(verify_tenant)
-) -> DeleteCollectionResponse:
-    """
-    Elimina una colección completa de documentos.
-    
-    Este endpoint elimina todos los documentos y fragmentos asociados a una colección
-    específica identificada por su UUID único. Esta operación es irreversible
-    y debe usarse con precaución.
-    
-    ## Flujo de procesamiento
-    1. Validación de permisos del tenant
-    2. Verificación de existencia de la colección
-    3. Eliminación de todos los documentos asociados
-    4. Eliminación de todos los fragmentos de texto (chunks) asociados
-    5. Actualización de metadatos y registros de uso
-    
-    Args:
-        collection_id: ID único (UUID) de la colección a eliminar
-        tenant_info: Información del tenant (inyectada mediante verify_tenant)
-        
-    Returns:
-        DeleteCollectionResponse: Resultado de la operación
-            - success: True si la operación fue exitosa
-            - collection_id: ID de la colección eliminada
-            - collection_name: Nombre de la colección (para referencia)
-            - deleted: True si se eliminó correctamente
-            - documents_deleted: Cantidad de documentos/fragmentos eliminados
-    
-    Raises:
-        ServiceError: Si la colección no existe o hay error en la eliminación
-    """
-    tenant_id = tenant_info.tenant_id
-    
-    supabase = get_supabase_client()
-    collection_name = None
-    
-    try:
-        # Verificar que la colección existe y obtener su nombre
-        collection_result = await supabase.table("collections").select("*").eq("tenant_id", tenant_id).eq("collection_id", collection_id).execute()
-        
-        if not collection_result.data or len(collection_result.data) == 0:
-            raise ServiceError(
-                message=f"Colección con ID {collection_id} no encontrada",
-                status_code=404,
-                error_code="collection_not_found"
-            )
-        
-        collection_name = collection_result.data[0].get("name", "")
-        
-        # Eliminar todos los chunks de la colección
-        delete_result = await supabase.table("document_chunks").delete() \
-            .eq("tenant_id", tenant_id) \
-            .eq("metadata->>collection_id", collection_id) \
-            .execute()
-        
-        if delete_result.error:
-            logger.error(f"Error eliminando colección {collection_id} ({collection_name}): {delete_result.error}")
-            raise ServiceError(
-                message=f"Error al eliminar la colección: {delete_result.error}",
-                status_code=500,
-                error_code="delete_error"
-            )
-        
-        # También eliminar registros que usan el campo collection viejo (para compatibilidad)
-        delete_legacy_result = await supabase.table("document_chunks").delete() \
-            .eq("tenant_id", tenant_id) \
-            .eq("metadata->>collection", collection_name) \
-            .execute()
-        
-        # Para compatibilidad, también eliminar la colección de la tabla de colecciones
-        await supabase.table("collections").delete().eq("collection_id", collection_id).execute()
-        
-        # Calcular total de documentos eliminados
-        deleted_count = len(delete_result.data) + (len(delete_legacy_result.data) if hasattr(delete_legacy_result, 'data') else 0)
-        
-        logger.info(f"Colección {collection_id} ({collection_name}) eliminada con {deleted_count} chunks")
-        
-        return DeleteCollectionResponse(
-            success=True,
-            message=f"Colección {collection_name} eliminada exitosamente",
-            collection_id=collection_id,
-            collection_name=collection_name,
-            deleted=True,
-            documents_deleted=deleted_count
-        )
-        
-    except ServiceError:
-        raise
-    except Exception as e:
-        logger.error(f"Error al eliminar colección {collection_id}: {str(e)}")
-        raise ServiceError(
-            message=f"Error al eliminar la colección: {str(e)}",
-            status_code=500,
-            error_code="delete_collection_error"
-        )
-
-@app.post("/collections", response_model=CollectionCreationResponse, tags=["collections"])
-@handle_service_error_simple
-@with_tenant_context
-async def create_collection(
-    name: str,
-    description: Optional[str] = None,
-    tenant_info: TenantInfo = Depends(verify_tenant)
-) -> CollectionCreationResponse:
-    """
-    Crea una nueva colección para organizar documentos.
-    
-    Este endpoint permite crear una colección con un nombre amigable y descripción
-    para organizar documentos relacionados. Cada colección recibe un identificador
-    único (UUID) que se utiliza en operaciones posteriores.
-    
-    ## Flujo de procesamiento
-    1. Validación de permisos del tenant
-    2. Verificación de límites de colecciones según plan
-    3. Generación de UUID para la colección
-    4. Registro en base de datos
-    
-    Args:
-        name: Nombre amigable para la colección
-        description: Descripción detallada (opcional)
-        tenant_info: Información del tenant (inyectada)
-        
-    Returns:
-        CollectionCreationResponse: Detalles de la colección creada
-            - collection_id: UUID único asignado a la colección
-            - name: Nombre amigable
-            - description: Descripción proporcionada
-    
-    Raises:
-        ServiceError: Si ocurre un error durante la creación o hay duplicados
-    """
-    tenant_id = tenant_info.tenant_id
-    
-    # Generar UUID para la colección
-    collection_id = str(uuid.uuid4())
-    
-    # Preparar metadatos para la colección
-    now = datetime.now().isoformat()
-    
-    # Registro de la colección en Supabase (tabla de colecciones)
-    supabase = get_supabase_client()
-    try:
-        # Verificar si ya existe una colección con el mismo nombre
-        existing = await supabase.table("collections").select("*").eq("tenant_id", tenant_id).eq("name", name).execute()
-        
-        if existing.data and len(existing.data) > 0:
-            raise ServiceError(
-                message=f"Ya existe una colección con el nombre '{name}'",
-                status_code=409,
-                error_code="collection_exists"
-            )
-        
-        # Insertar nueva colección
-        collection_data = {
-            "collection_id": collection_id,
-            "tenant_id": tenant_id,
-            "name": name,
-            "description": description,
-            "created_at": now,
-            "updated_at": now,
-            "is_active": True
-        }
-        
-        await supabase.table("collections").insert(collection_data).execute()
-        
-        logger.info(f"Colección '{name}' (ID: {collection_id}) creada para tenant {tenant_id}")
-        
-        return CollectionCreationResponse(
-            success=True,
-            message=f"Colección '{name}' creada correctamente",
-            collection_id=collection_id,
-            name=name,
-            description=description,
-            tenant_id=tenant_id,
-            created_at=now,
-            updated_at=now
-        )
-        
-    except ServiceError:
-        raise
-    except Exception as e:
-        logger.error(f"Error al crear colección '{name}': {str(e)}")
-        raise ServiceError(
-            message=f"Error al crear la colección: {str(e)}",
-            status_code=500,
-            error_code="collection_creation_error"
-        )
-
-@app.get("/status", response_model=HealthResponse, tags=["health"])
-@app.get("/health", response_model=HealthResponse, tags=["health"])
-@handle_service_error_simple
-async def get_service_status() -> HealthResponse:
+@app.get(
+    "/health",
+    response_model=HealthResponse,
+    tags=["Health"],
+    summary="Estado del servicio",
+    description="Verifica el estado del servicio y sus componentes"
+)
+async def health_check():
     """
     Verifica el estado del servicio de ingestión y sus dependencias críticas.
     
     Este endpoint proporciona información detallada sobre el estado operativo 
-    del servicio de ingestión y sus componentes dependientes. Es utilizado por 
-    sistemas de monitoreo, Kubernetes y scripts de health check para verificar
-    la disponibilidad del servicio.
-    
-    ## Componentes verificados
-    - Supabase: Para almacenamiento de documentos y vectores
-    - Embedding Service: Para generación de embeddings de documentos
-    
-    ## Posibles estados
-    - healthy: Todos los componentes funcionan correctamente
-    - degraded: Algunos componentes no están disponibles pero el servicio funciona
-    - unhealthy: Componentes críticos no están disponibles
+    del servicio de ingestión y sus componentes dependientes.
     
     Returns:
         HealthResponse: Estado detallado del servicio y sus componentes
-            - success: True (cumpliendo con BaseResponse)
             - status: Estado general ("healthy", "degraded", "unhealthy")
-            - components: Estado de cada dependencia ("available", "unavailable")
+            - components: Estado de cada dependencia
             - version: Versión del servicio
-    
-    Ejemplo:
-    ```json
-    {
-        "success": true,
-        "message": "Servicio de ingestión operativo",
-        "error": null,
-        "data": null,
-        "metadata": {},
-        "status": "healthy",
-        "components": {
-            "supabase": "available",
-            "embedding_service": "available"
-        },
-        "version": "1.0.0"
-    }
-    ```
     """
     # Check if Supabase is available
     supabase_status = "available"

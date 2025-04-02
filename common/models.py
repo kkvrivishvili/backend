@@ -5,6 +5,7 @@ Modelos de datos compartidos entre los servicios de LlamaIndex.
 
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
+from uuid import UUID
 
 
 class TenantInfo(BaseModel):
@@ -78,12 +79,17 @@ class DocumentMetadata(BaseModel):
 
 
 class DocumentIngestionRequest(BaseModel):
-    """Solicitud para ingerir documentos."""
+    """
+    Solicitud para ingerir documentos en una colección.
+    
+    Permite cargar uno o más documentos a una colección identificada por collection_id o collection_name.
+    Si se proporciona collection_id, este tendrá prioridad sobre collection_name.
+    """
     tenant_id: str
     documents: List[str]  # Contenido de texto de los documentos
     document_metadatas: List[DocumentMetadata]  # Metadatos para cada documento
-    collection_id: Optional[str] = None  # ID único de la colección
-    collection_name: Optional[str] = "default"  # Nombre amigable de la colección (para compatibilidad)
+    collection_id: Optional[UUID] = None  # ID único de la colección (UUID)
+    collection_name: str = "default"  # Nombre amigable de la colección (para compatibilidad)
     agent_id: Optional[str] = None  # ID del agente (contexto específico)
     conversation_id: Optional[str] = None  # ID de la conversación (contexto específico)
 
@@ -102,11 +108,16 @@ class QueryContextItem(BaseModel):
 
 
 class QueryRequest(BaseModel):
-    """Solicitud para realizar una consulta RAG."""
+    """
+    Solicitud para realizar una consulta RAG.
+    
+    Permite buscar información en una colección identificada por collection_id o collection_name.
+    Si se proporciona collection_id, este tendrá prioridad sobre collection_name.
+    """
     tenant_id: str
     query: str
-    collection_id: Optional[str] = None  # ID único de la colección
-    collection_name: Optional[str] = "default"  # Nombre amigable de la colección (para compatibilidad)
+    collection_id: Optional[UUID] = None  # ID único de la colección (UUID)
+    collection_name: str = "default"  # Nombre amigable de la colección (para compatibilidad)
     llm_model: Optional[str] = None
     similarity_top_k: Optional[int] = 4
     additional_metadata_filter: Optional[Dict[str, Any]] = None
@@ -117,35 +128,68 @@ class QueryRequest(BaseModel):
 
 
 class QueryResponse(BaseResponse):
-    """Respuesta a una consulta RAG."""
+    """
+    Respuesta a una consulta RAG.
+    
+    Incluye la respuesta generada y las fuentes utilizadas para la generación.
+    """
     query: str
     response: str
     sources: List[QueryContextItem]
     processing_time: float
+    collection_id: Optional[UUID] = None  # ID único de la colección (UUID)
+    collection_name: Optional[str] = None  # Nombre amigable de la colección
     llm_model: Optional[str] = None
-    collection_name: Optional[str] = None
     tenant_id: Optional[str] = None
     agent_id: Optional[str] = None
     conversation_id: Optional[str] = None
 
 
 class DocumentsListResponse(BaseResponse):
-    """Lista de documentos para un tenant."""
+    """
+    Lista de documentos para un tenant.
+    
+    Incluye información paginada sobre los documentos en una colección específica.
+    """
     tenant_id: str
     documents: List[Dict[str, Any]]
     total: int
     limit: int
     offset: int
-    collection_name: Optional[str]
+    collection_id: Optional[UUID] = None  # ID único de la colección (UUID)
+    collection_name: Optional[str] = None  # Nombre amigable de la colección
 
 
 class AgentTool(BaseModel):
-    """Herramienta disponible para un agente."""
+    """
+    Herramienta disponible para un agente.
+    
+    Una herramienta define una capacidad que puede utilizar un agente,
+    como buscar en una colección de documentos o realizar cálculos.
+    """
     name: str
     description: str
-    collection_id: Optional[str] = None
-    tool_type: str = "rag_search"  # rag_search, web_search, calculator, etc.
-    parameters: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    type: str  # rag_search, web_search, calculator, etc.
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    is_active: bool = True
+    
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "name": "consultar_documentos",
+                    "description": "Buscar información en documentos técnicos",
+                    "type": "rag",
+                    "metadata": {
+                        "collection_id": "550e8400-e29b-41d4-a716-446655440000",
+                        "collection_name": "documentacion_tecnica",
+                        "similarity_top_k": 3
+                    },
+                    "is_active": True
+                }
+            ]
+        }
+    }
 
 
 class AgentConfig(BaseModel):
@@ -303,9 +347,14 @@ class ToolsListResponse(BaseResponse):
 
 
 class RAGConfig(BaseModel):
-    """Configuración para consultas RAG."""
-    collection_id: Optional[str] = None  # ID único de la colección
-    collection_name: str = "default"  # Nombre amigable de la colección
+    """
+    Configuración para consultas RAG.
+    
+    Define los parámetros para realizar búsquedas en colecciones de documentos.
+    Si se proporciona collection_id, este tendrá prioridad sobre collection_name.
+    """
+    collection_id: Optional[UUID] = None  # ID único de la colección (UUID)
+    collection_name: str = "default"  # Nombre amigable de la colección (para compatibilidad)
     similarity_top_k: int = 4
     llm_model: Optional[str] = None
     response_mode: str = "compact"
@@ -385,9 +434,14 @@ class PublicChatRequest(BaseModel):
 
 
 class CollectionInfo(BaseModel):
-    """Información sobre una colección de documentos."""
-    collection_id: str
-    name: str
+    """
+    Información sobre una colección de documentos.
+    
+    Proporciona detalles sobre una colección, incluyendo su identificador único,
+    nombre amigable y estadísticas básicas.
+    """
+    collection_id: UUID  # ID único de la colección (UUID)
+    name: str  # Nombre amigable de la colección
     description: Optional[str] = None
     document_count: int = 0
     created_at: Optional[str] = None
@@ -455,7 +509,7 @@ class TenantStatsResponse(BaseResponse):
 
 class CollectionToolResponse(BaseResponse):
     """Respuesta con información de la colección para integración con herramientas."""
-    collection_id: str
+    collection_id: UUID  # ID único de la colección (UUID)
     collection_name: str
     tenant_id: str
     tool: Optional[AgentTool] = None
@@ -463,7 +517,7 @@ class CollectionToolResponse(BaseResponse):
 
 class CollectionCreationResponse(BaseResponse):
     """Respuesta para creación de colecciones."""
-    collection_id: str
+    collection_id: UUID  # ID único de la colección (UUID)
     name: str
     description: Optional[str] = None
     tenant_id: str
@@ -474,7 +528,7 @@ class CollectionCreationResponse(BaseResponse):
 
 class CollectionUpdateResponse(BaseResponse):
     """Respuesta para actualización de colecciones."""
-    collection_id: str
+    collection_id: UUID  # ID único de la colección (UUID)
     name: str
     description: Optional[str] = None
     tenant_id: str
@@ -485,7 +539,7 @@ class CollectionUpdateResponse(BaseResponse):
 class CollectionStatsResponse(BaseResponse):
     """Respuesta con estadísticas de una colección."""
     tenant_id: str
-    collection_id: str
+    collection_id: UUID  # ID único de la colección (UUID)
     collection_name: str  # Nombre amigable para mostrar
     chunks_count: int = 0
     unique_documents_count: int = 0
@@ -494,17 +548,27 @@ class CollectionStatsResponse(BaseResponse):
 
 
 class DeleteDocumentResponse(BaseResponse):
-    """Respuesta para operación de eliminación de documento."""
+    """
+    Respuesta para operación de eliminación de documento.
+    
+    Confirma si el documento fue eliminado satisfactoriamente y proporciona 
+    información sobre la colección a la que pertenecía.
+    """
     document_id: str
     deleted: bool
-    collection_id: Optional[str] = None
-    collection_name: Optional[str] = None  # Para compatibilidad
+    collection_id: Optional[UUID] = None  # ID único de la colección (UUID)
+    collection_name: Optional[str] = None  # Nombre amigable de la colección
 
 
 class DeleteCollectionResponse(BaseResponse):
-    """Respuesta para operación de eliminación de colección."""
-    collection_id: str
-    collection_name: Optional[str] = None  # Para compatibilidad
+    """
+    Respuesta para operación de eliminación de colección.
+    
+    Confirma si la colección fue eliminada satisfactoriamente y proporciona
+    información sobre los documentos afectados.
+    """
+    collection_id: UUID  # ID único de la colección (UUID)
+    collection_name: Optional[str] = None  # Nombre amigable de la colección
     deleted: bool
     documents_deleted: int = 0
 

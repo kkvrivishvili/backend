@@ -121,7 +121,7 @@ setup_rate_limiting(app)
 # Agregar ejemplos para los endpoints principales
 add_example_to_endpoint(
     app=app,
-    path="/embed",
+    path="/embeddings",
     method="post",
     request_example={
         "texts": ["Este es un texto de ejemplo para generar un embedding vectorial", "Este es otro texto para el mismo proceso"],
@@ -146,7 +146,7 @@ add_example_to_endpoint(
 
 add_example_to_endpoint(
     app=app,
-    path="/embed-batch",
+    path="/embeddings/batch",
     method="post",
     request_example={
         "items": [
@@ -233,7 +233,7 @@ add_example_to_endpoint(
 
 add_example_to_endpoint(
     app=app,
-    path="/cache/stats",
+    path="/cache",
     method="get",
     response_example={
         "success": True,
@@ -250,7 +250,7 @@ add_example_to_endpoint(
 
 add_example_to_endpoint(
     app=app,
-    path="/cache/clear",
+    path="/cache",
     method="delete",
     response_example={
         "success": True,
@@ -261,7 +261,7 @@ add_example_to_endpoint(
 
 add_example_to_endpoint(
     app=app,
-    path="/status",
+    path="/health",
     method="get",
     response_example={
         "success": True,
@@ -442,7 +442,7 @@ class CachedEmbeddingProvider:
         return result
 
 
-@app.post("/embed", response_model=EmbeddingResponse)
+@app.post("/embeddings", response_model=EmbeddingResponse, tags=["Embeddings"])
 @handle_service_error_simple
 @with_full_context
 async def generate_embeddings(
@@ -556,7 +556,7 @@ async def generate_embeddings(
         )
 
 
-@app.post("/embed-batch", response_model=EmbeddingResponse)
+@app.post("/embeddings/batch", response_model=EmbeddingResponse, tags=["Embeddings"])
 @handle_service_error_simple
 @with_full_context
 async def batch_generate_embeddings(
@@ -698,7 +698,7 @@ async def batch_generate_embeddings(
         )
 
 
-@app.get("/models", response_model=ModelListResponse, tags=["models"])
+@app.get("/models", response_model=ModelListResponse, tags=["Models"])
 @handle_service_error_simple
 @with_tenant_context
 async def list_available_models(
@@ -781,8 +781,7 @@ async def list_available_models(
     )
 
 
-@app.get("/status", response_model=HealthResponse)
-@app.get("/health", response_model=HealthResponse)
+@app.get("/health", response_model=HealthResponse, tags=["Health"])
 @handle_service_error_simple
 async def get_service_status() -> HealthResponse:
     """
@@ -881,7 +880,7 @@ async def get_service_status() -> HealthResponse:
     )
 
 
-@app.get("/cache/stats", response_model=CacheStatsResponse, tags=["cache"])
+@app.get("/cache", response_model=CacheStatsResponse, tags=["Cache"])
 @handle_service_error_simple
 @with_full_context
 async def get_cache_stats(
@@ -959,7 +958,7 @@ async def get_cache_stats(
     )
 
 
-@app.delete("/cache/clear", response_model=CacheClearResponse, tags=["cache"])
+@app.delete("/cache", response_model=CacheClearResponse, tags=["Cache"])
 @handle_service_error_simple
 @with_tenant_context
 async def clear_cache(

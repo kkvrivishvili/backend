@@ -30,8 +30,40 @@ LICENSE_INFO = {
 COMMON_TAGS = [
     {
         "name": "health",
-        "description": "Endpoints para verificar estado y salud del servicio"
+        "description": "Verificación de estado y salud del servicio"
     },
+    {
+        "name": "collections",
+        "description": "Gestión de colecciones de documentos"
+    },
+    {
+        "name": "documents",
+        "description": "Gestión de documentos y fragmentos"
+    },
+    {
+        "name": "query",
+        "description": "Operaciones de consulta y recuperación de información"
+    },
+    {
+        "name": "embeddings",
+        "description": "Operaciones de generación de embeddings vectoriales"
+    },
+    {
+        "name": "agents",
+        "description": "Gestión de agentes inteligentes"
+    },
+    {
+        "name": "conversations",
+        "description": "Gestión de conversaciones y mensajes"
+    },
+    {
+        "name": "models",
+        "description": "Información sobre modelos disponibles"
+    },
+    {
+        "name": "tools",
+        "description": "Herramientas y utilidades para agentes"
+    }
 ]
 
 # Ejemplos de respuestas comunes para reutilizar
@@ -356,3 +388,72 @@ def add_example_to_endpoint(
             schema_name = schema_ref.split('/')[-1]
             # Añadir comentario descriptivo
             endpoint["responses"][status_code]["content"]["application/json"]["schema"]["description"] = f"Modelo: {schema_name}. Ver esquema detallado más abajo."
+
+def generate_docstring_template(
+    endpoint_description: str,
+    detailed_description: str = None,
+    process_steps: List[str] = None,
+    dependencies: List[str] = None,
+    parameters_desc: Dict[str, str] = None,
+    returns_desc: Dict[str, str] = None,
+    raises_desc: Dict[str, str] = None,
+    example_desc: str = None
+) -> str:
+    """
+    Genera un docstring estandarizado para los endpoints de la API.
+    
+    Esta función ayuda a mantener un formato consistente en toda la documentación
+    de la API, asegurando que los desarrolladores reciban información completa.
+    
+    Args:
+        endpoint_description: Descripción corta del endpoint (1 línea)
+        detailed_description: Descripción detallada del propósito y funcionamiento
+        process_steps: Lista de pasos del proceso que realiza el endpoint
+        dependencies: Lista de servicios o componentes de los que depende
+        parameters_desc: Diccionario con descripciones de parámetros clave
+        returns_desc: Diccionario con descripciones de elementos de respuesta
+        raises_desc: Diccionario con descripciones de errores que puede lanzar
+        example_desc: Ejemplo de código o explicación adicional
+        
+    Returns:
+        str: Docstring formateado según estándar de la plataforma
+    """
+    docstring = f"{endpoint_description}\n\n"
+    
+    if detailed_description:
+        docstring += f"{detailed_description}\n\n"
+    
+    if process_steps:
+        docstring += "## Flujo de procesamiento\n"
+        for i, step in enumerate(process_steps, 1):
+            docstring += f"{i}. {step}\n"
+        docstring += "\n"
+    
+    if dependencies:
+        docstring += "## Dependencias\n"
+        for dep in dependencies:
+            docstring += f"- {dep}\n"
+        docstring += "\n"
+    
+    if parameters_desc:
+        docstring += "Args:\n"
+        for param, desc in parameters_desc.items():
+            docstring += f"    {param}: {desc}\n"
+        docstring += "\n"
+    
+    if returns_desc:
+        docstring += "Returns:\n"
+        for ret, desc in returns_desc.items():
+            docstring += f"    {ret}: {desc}\n"
+        docstring += "\n"
+    
+    if raises_desc:
+        docstring += "Raises:\n"
+        for exc, desc in raises_desc.items():
+            docstring += f"    {exc}: {desc}\n"
+        docstring += "\n"
+    
+    if example_desc:
+        docstring += f"Ejemplo:\n{example_desc}\n"
+    
+    return docstring

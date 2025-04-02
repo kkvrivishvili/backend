@@ -120,19 +120,19 @@ configure_swagger_ui(
     version="1.2.0",
     tags=[
         {
-            "name": "agents",
+            "name": "Agents",
             "description": "Operaciones de gestión de agentes"
         },
         {
-            "name": "conversations",
+            "name": "Conversations",
             "description": "Operaciones de gestión de conversaciones"
         },
         {
-            "name": "chat",
+            "name": "Chat",
             "description": "Endpoints de interacción conversacional"
         },
         {
-            "name": "tools",
+            "name": "Tools",
             "description": "Gestión de herramientas para agentes"
         }
     ]
@@ -903,8 +903,8 @@ async def execute_agent(
 
 
 # Endpoint para verificar el estado
-@app.get("/status", response_model=HealthResponse, tags=["health"])
-@app.get("/health", response_model=HealthResponse, tags=["health"])
+@app.get("/status", response_model=HealthResponse, tags=["Health"])
+@app.get("/health", response_model=HealthResponse, tags=["Health"])
 @handle_service_error_simple
 async def get_service_status() -> HealthResponse:
     """
@@ -980,7 +980,7 @@ async def get_service_status() -> HealthResponse:
 
 
 # Endpoint para crear un agente
-@app.post("/agents", response_model=AgentResponse, tags=["agents"])
+@app.post("/agents", response_model=AgentResponse, tags=["Agents"])
 @handle_service_error_simple
 @with_tenant_context
 async def create_agent(request: AgentRequest, tenant_info: TenantInfo = Depends(verify_tenant)) -> AgentResponse:
@@ -1049,7 +1049,7 @@ async def create_agent(request: AgentRequest, tenant_info: TenantInfo = Depends(
 
 
 # Endpoint para obtener un agente
-@app.get("/agents/{agent_id}", response_model=AgentResponse, tags=["agents"])
+@app.get("/agents/{agent_id}", response_model=AgentResponse, tags=["Agents"])
 @handle_service_error_simple
 @with_agent_context
 async def get_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tenant)) -> AgentResponse:
@@ -1107,7 +1107,7 @@ async def get_agent(agent_id: str, tenant_info: TenantInfo = Depends(verify_tena
 
 
 # Endpoint para listar agentes
-@app.get("/agents", response_model=AgentsListResponse, tags=["agents"])
+@app.get("/agents", response_model=AgentsListResponse, tags=["Agents"])
 @handle_service_error_simple
 @with_tenant_context
 async def list_agents(tenant_info: TenantInfo = Depends(verify_tenant)) -> AgentsListResponse:
@@ -1156,7 +1156,7 @@ async def list_agents(tenant_info: TenantInfo = Depends(verify_tenant)) -> Agent
 
 
 # Endpoint para actualizar un agente
-@app.put("/agents/{agent_id}", response_model=AgentResponse, tags=["agents"])
+@app.put("/agents/{agent_id}", response_model=AgentResponse, tags=["Agents"])
 @handle_service_error_simple
 @with_agent_context
 async def update_agent(
@@ -1249,7 +1249,7 @@ async def update_agent(
 
 
 # Endpoint para eliminar un agente
-@app.delete("/agents/{agent_id}", response_model=DeleteAgentResponse, tags=["agents"])
+@app.delete("/agents/{agent_id}", response_model=DeleteAgentResponse, tags=["Agents"])
 @handle_service_error_simple
 @with_agent_context
 async def delete_agent(
@@ -1322,7 +1322,7 @@ async def delete_agent(
 
 
 # Endpoint para chatear con un agente
-@app.post("/agents/{agent_id}/chat", response_model=ChatResponse, tags=["chat"])
+@app.post("/agents/{agent_id}/chat", response_model=ChatResponse, tags=["Chat"])
 @handle_service_error_simple
 @with_full_context
 async def chat_with_agent(
@@ -1532,7 +1532,7 @@ async def chat_with_agent(
 
 
 # Endpoint para chatear con un agente
-@app.post("/chat", response_model=ChatResponse, tags=["chat"])
+@app.post("/chat", response_model=ChatResponse, tags=["Chat"])
 @handle_service_error_simple(on_error_response={"success": False, "message": "Error procesando la consulta", "error": "CHAT_PROCESSING_ERROR"})
 @with_tenant_context
 async def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
@@ -1632,7 +1632,7 @@ async def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
 
 
 # Endpoint para streaming de chat con el agente
-@app.post("/chat/stream", tags=["chat"])
+@app.post("/chat/stream", tags=["Chat"])
 @handle_service_error_simple
 @with_tenant_context
 async def chat_stream(chat_request: ChatRequest, request: Request):
@@ -1849,7 +1849,7 @@ def estimate_token_count(text: str) -> int:
 
 
 
-@app.post("/public/chat/{agent_id}", response_model=ChatResponse, tags=["chat"])
+@app.post("/public/chat/{agent_id}", response_model=ChatResponse, tags=["Chat"])
 @handle_service_error_simple
 @with_full_context
 async def public_chat_with_agent(
@@ -1962,7 +1962,7 @@ async def public_chat_with_agent(
     )
 
 # Endpoint para eliminar una conversación
-@app.delete("/conversations/{conversation_id}", response_model=DeleteConversationResponse, tags=["conversations"])
+@app.delete("/conversations/{conversation_id}", response_model=DeleteConversationResponse, tags=["Conversations"])
 @handle_service_error_simple
 @with_full_context
 async def delete_conversation(
@@ -2033,7 +2033,7 @@ async def delete_conversation(
         )
 
 # Endpoint para obtener mensajes de una conversación
-@app.get("/conversations/{conversation_id}/messages", response_model=MessageListResponse, tags=["conversations"])
+@app.get("/conversations/{conversation_id}/messages", response_model=MessageListResponse, tags=["Conversations"])
 @handle_service_error_simple
 @with_full_context
 async def get_conversation_messages(
@@ -2109,7 +2109,7 @@ async def get_conversation_messages(
         )
 
 # Endpoint para listar conversaciones
-@app.get("/conversations", response_model=ConversationsListResponse, tags=["conversations"])
+@app.get("/conversations", response_model=ConversationsListResponse, tags=["Conversations"])
 @handle_service_error_simple
 @with_tenant_context
 async def list_conversations(
