@@ -19,7 +19,7 @@ COPY common/ ./common/
 RUN apt-get update && apt-get install -y curl && apt-get clean
 
 # Hacer que el script de inicialización sea ejecutable
-RUN chmod +x /app/agent-service/init_ollama.sh
+RUN chmod +x /app/common/init_ollama.sh
 
 # Variables mínimas de identificación del servicio
 ENV PYTHONPATH=/app
@@ -45,4 +45,4 @@ WORKDIR /app/agent-service
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD curl -f http://localhost:8003/status || exit 1
 
 # Comando para ejecutar el servicio
-CMD ./init_ollama.sh && uvicorn agent_service:app --host 0.0.0.0 --port 8003
+CMD /app/common/init_ollama.sh && uvicorn agent_service:app --host 0.0.0.0 --port 8003

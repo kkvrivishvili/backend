@@ -42,7 +42,7 @@ spec:
               key: redis-url
         - name: EMBEDDING_SERVICE_URL
           value: "http://embedding-service:8001"
-        - name: SKIP_SUPABASE
+        - name: LOAD_CONFIG_FROM_SUPABASE
           value: "true"
         - name: TESTING_MODE
           value: "true"

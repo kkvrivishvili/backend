@@ -10,6 +10,7 @@ import time
 import httpx
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
+from uuid import UUID
 
 from fastapi import FastAPI, Depends, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -141,7 +142,6 @@ add_example_to_endpoint(
     request_example={
         "query": "¿Cuáles son los principales beneficios de nuestro producto?",
         "collection_id": "550e8400-e29b-41d4-a716-446655440000",
-        "collection_name": "documentacion_producto",
         "similarity_top_k": 4,
         "llm_model": "gpt-3.5-turbo",
         "response_mode": "compact"
@@ -162,8 +162,7 @@ add_example_to_endpoint(
         ],
         "processing_time": 0.85,
         "llm_model": "gpt-3.5-turbo",
-        "collection_id": "550e8400-e29b-41d4-a716-446655440000",
-        "collection_name": "documentacion_producto"
+        "collection_id": "550e8400-e29b-41d4-a716-446655440000"
     },
     request_schema_description="Consulta RAG (Retrieval Augmented Generation)"
 )
@@ -410,8 +409,7 @@ def get_llm_for_tenant(tenant_info: TenantInfo, requested_model: Optional[str] =
 @with_full_context
 async def create_query_engine(
     tenant_info: TenantInfo,
-    collection_id: Optional[str] = None,
-    collection_name: str = "default",
+    collection_id: str,
     llm_model: Optional[str] = None,
     similarity_top_k: int = 4,
     response_mode: str = "compact"
@@ -422,7 +420,6 @@ async def create_query_engine(
     Args:
         tenant_info: Información del tenant
         collection_id: ID único de la colección (UUID)
-        collection_name: Nombre amigable de la colección (para compatibilidad)
         llm_model: Modelo LLM solicitado
         similarity_top_k: Número de resultados a recuperar
         response_mode: Modo de síntesis de respuesta
@@ -437,28 +434,18 @@ async def create_query_engine(
     debug_handler = LlamaDebugHandler()
     callback_manager = CallbackManager([debug_handler])
     
-    # Si tenemos collection_id pero no collection_name, intentar obtener el nombre
-    if collection_id and (not collection_name or collection_name == "default"):
-        try:
-            supabase = get_supabase_client()
-            collection_result = await supabase.table("collections").select("name").eq("collection_id", collection_id).execute()
-            if collection_result.data and len(collection_result.data) > 0:
-                collection_name = collection_result.data[0].get("name", "default")
-        except Exception as e:
-            logger.warning(f"Error al obtener nombre de colección para ID {collection_id}: {str(e)}")
+    # Obtener información de la colección para logs
+    collection_name = None
+    try:
+        supabase = get_supabase_client()
+        collection_result = await supabase.table("collections").select("name").eq("collection_id", collection_id).execute()
+        if collection_result.data and len(collection_result.data) > 0:
+            collection_name = collection_result.data[0].get("name")
+    except Exception as e:
+        logger.warning(f"Error al obtener información de colección para ID {collection_id}: {str(e)}")
     
-    # Si no tenemos collection_id pero sí collection_name, intentar obtener el ID
-    if not collection_id and collection_name and collection_name != "default":
-        try:
-            supabase = get_supabase_client()
-            collection_result = await supabase.table("collections").select("collection_id").eq("name", collection_name).eq("tenant_id", tenant_id).execute()
-            if collection_result.data and len(collection_result.data) > 0:
-                collection_id = collection_result.data[0].get("collection_id")
-        except Exception as e:
-            logger.warning(f"Error al obtener ID de colección para nombre {collection_name}: {str(e)}")
-            
     # Obtener vector store para el tenant
-    vector_store = get_tenant_vector_store(tenant_id, collection_name, collection_id)
+    vector_store = get_tenant_vector_store(tenant_id=tenant_id, collection_id=collection_id)
     
     # Crear índice sobre el vector store
     index = VectorStoreIndex.from_vector_store(vector_store)
@@ -493,6 +480,58 @@ async def create_query_engine(
     )
     
     return query_engine, debug_handler
+
+async def list_documents(
+    collection_id: Optional[UUID] = None, 
+    limit: int = 50, 
+    offset: int = 0, 
+    tenant_info: TenantInfo = None
+) -> DocumentsListResponse:
+    """
+    Lista los documentos para el tenant actual con filtrado opcional por collection_id.
+    
+    Args:
+        collection_id: ID único de la colección (UUID)
+        limit: Límite de resultados para paginación
+        offset: Desplazamiento para paginación
+        tenant_info: Información del tenant
+        
+    Returns:
+        DocumentsListResponse: Lista paginada de documentos
+    """
+    # Obtener el tenant_id del contexto o del objeto tenant_info
+    tenant_id = get_current_tenant_id() if tenant_info is None else tenant_info.tenant_id
+    
+    # Obtener documentos usando la función de common/supabase.py
+    result = get_tenant_documents(
+        tenant_id=tenant_id,
+        collection_id=str(collection_id) if collection_id else None,
+        limit=limit,
+        offset=offset
+    )
+    
+    # Obtener nombre de la colección para UI si existe collection_id
+    collection_name = None
+    if collection_id:
+        try:
+            supabase = get_supabase_client()
+            collection_result = supabase.table("collections").select("name").eq("collection_id", str(collection_id)).execute()
+            if collection_result.data and len(collection_result.data) > 0:
+                collection_name = collection_result.data[0].get("name")
+        except Exception as e:
+            logger.warning(f"Error al obtener nombre de colección para ID {collection_id}: {str(e)}")
+    
+    # Construir respuesta según el modelo DocumentsListResponse
+    return DocumentsListResponse(
+        success=True,
+        tenant_id=tenant_id,
+        documents=result["documents"],
+        total=result["total"],
+        limit=result["limit"],
+        offset=result["offset"],
+        collection_id=collection_id,
+        name=collection_name  # Solo para UI
+    )
 
 @app.post(
     "/collections/{collection_id}/query",
@@ -569,13 +608,14 @@ async def query_endpoint(
         request: Solicitud de consulta
             - query: Texto de la consulta a procesar
             - collection_id: ID único de la colección (UUID)
-            - collection_name: Nombre amigable de la colección (para compatibilidad)
         tenant_info: Información del tenant (inyectada)
         
     Returns:
         QueryResponse: Respuesta generada con fuentes y metadatos
     """
-    return await process_query(request, tenant_info)
+    # Redirigir a la ruta RESTful moderna
+    logger.info(f"Redirigiendo consulta a ruta RESTful /collections/{request.collection_id}/query")
+    return await query_collection(str(request.collection_id), request, tenant_info)
 
 @app.get(
     "/collections",
@@ -821,7 +861,7 @@ async def get_stats(
 @handle_service_error_simple
 @with_full_context
 async def get_documents(
-    collection_name: Optional[str] = None,
+    collection_id: Optional[UUID] = None,
     limit: int = 50,
     offset: int = 0,
     tenant_info: TenantInfo = Depends(verify_tenant)
@@ -833,7 +873,7 @@ async def get_documents(
     para el tenant, con la opción de filtrar por colección específica.
     
     Args:
-        collection_name: Filtrar por colección (opcional)
+        collection_id: ID único de la colección para filtrar (opcional)
         limit: Límite de resultados para paginación
         offset: Desplazamiento para paginación
         tenant_info: Información del tenant (inyectada)
@@ -841,7 +881,7 @@ async def get_documents(
     Returns:
         DocumentsListResponse: Lista paginada de documentos
     """
-    return await list_documents(collection_name, limit, offset, tenant_info)
+    return await list_documents(collection_id, limit, offset, tenant_info)
 
 if __name__ == "__main__":
     import uvicorn

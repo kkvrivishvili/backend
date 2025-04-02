@@ -40,7 +40,7 @@ spec:
             configMapKeyRef:
               name: backend-config
               key: redis-url
-        - name: SKIP_SUPABASE
+        - name: LOAD_CONFIG_FROM_SUPABASE
           value: "true"
         - name: TESTING_MODE
           value: "true"

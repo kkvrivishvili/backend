@@ -196,10 +196,10 @@ add_example_to_endpoint(
     response_example={
         "success": True,
         "message": "Documento eliminado exitosamente",
-        "document_id": "doc_123456",
-        "collection_id": "550e8400-e29b-41d4-a716-446655440000",
-        "collection_name": "documentos_legales",
+        "document_id": "doc123",
         "deleted": True,
+        "collection_id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "documentos_legales",
         "deleted_chunks": 10
     },
     request_schema_description="Eliminar un documento específico y todos sus fragmentos"
@@ -213,7 +213,7 @@ add_example_to_endpoint(
         "success": True,
         "message": "Colección eliminada exitosamente",
         "collection_id": "550e8400-e29b-41d4-a716-446655440000",
-        "collection_name": "documentos_legales",
+        "name": "documentos_legales",
         "deleted": True,
         "documents_deleted": 50
     }
@@ -296,8 +296,7 @@ async def generate_embeddings(texts: List[str]) -> List[List[float]]:
 async def process_document(
     doc_text: str, 
     metadata: DocumentMetadata,
-    collection_id: Optional[str] = None,
-    collection_name: str = "default"
+    collection_id: str,
 ) -> List[Dict[str, Any]]:
     """
     Procesa un documento, lo divide en nodos y prepara metadatos.
@@ -306,11 +305,20 @@ async def process_document(
         doc_text: Texto del documento
         metadata: Metadatos del documento
         collection_id: ID único de la colección (UUID)
-        collection_name: Nombre de la colección
         
     Returns:
         List[Dict[str, Any]]: Lista de nodos procesados
     """
+    # Obtener el nombre de la colección para visualización (sólo para logs y UI)
+    collection_name = "unknown"
+    try:
+        supabase = get_supabase_client()
+        result = await supabase.table("collections").select("name").eq("collection_id", collection_id).execute()
+        if result.data and len(result.data) > 0:
+            collection_name = result.data[0].get("name", "unknown")
+    except Exception as e:
+        logger.warning(f"Error al obtener nombre de colección: {str(e)}")
+
     # Crear documento LlamaIndex
     document = Document(
         text=doc_text,
@@ -321,8 +329,8 @@ async def process_document(
             "author": metadata.author,
             "created_at": metadata.created_at or datetime.now().isoformat(),
             "document_type": metadata.document_type,
-            "collection_id": collection_id,  # Nueva propiedad para identificación única
-            "collection": collection_name,  # Mantener para compatibilidad
+            "collection_id": collection_id,  # ID único para identificación en backend
+            "collection_name": collection_name,  # Nombre sólo para visualización en frontend
             "custom_metadata": metadata.custom_metadata or {}
         }
     )
@@ -357,14 +365,13 @@ async def process_document(
     return node_data_list
 
 # Background task para indexar documentos
-async def index_documents_task(node_data_list: List[Dict[str, Any]], collection_id: Optional[str] = None, collection_name: str = "default"):
+async def index_documents_task(node_data_list: List[Dict[str, Any]], collection_id: str):
     """
     Tarea en segundo plano para indexar documentos.
     
     Args:
         node_data_list: Lista de nodos a indexar
         collection_id: ID único de la colección (UUID)
-        collection_name: Nombre de la colección
     """
     try:
         if not node_data_list:
@@ -375,9 +382,12 @@ async def index_documents_task(node_data_list: List[Dict[str, Any]], collection_
         tenant_id = node_data_list[0]["metadata"]["tenant_id"]
         
         # Obtener store para la combinación tenant/colección
-        vector_store = get_tenant_vector_store(tenant_id, collection_name, collection_id)
+        vector_store = get_tenant_vector_store(
+            tenant_id=tenant_id, 
+            collection_id=collection_id
+        )
         
-        logger.info(f"Indexando {len(node_data_list)} nodos en colección {collection_name} (ID: {collection_id})")
+        logger.info(f"Indexando {len(node_data_list)} nodos en colección {collection_id}")
         
         # Generar embeddings para los textos
         texts = [node["text"] for node in node_data_list]
@@ -414,7 +424,7 @@ async def index_documents_task(node_data_list: List[Dict[str, Any]], collection_
                 {"p_tenant_id": tenant_id, "p_count": len(doc_ids)}
             ).execute()
             
-        logger.info(f"Indexación completada para {len(node_data_list)} nodos en colección {collection_name} (ID: {collection_id})")
+        logger.info(f"Indexación completada para {len(node_data_list)} nodos en colección {collection_id}")
         
     except Exception as e:
         logger.error(f"Error en la tarea de indexación: {str(e)}", exc_info=True)
@@ -547,14 +557,13 @@ async def delete_collection(
     5. Actualización de metadatos y registros de uso
     
     Args:
-        collection_id: ID único (UUID) de la colección a eliminar
-        tenant_info: Información del tenant (inyectada mediante verify_tenant)
+        collection_id: ID único de la colección a eliminar
+        tenant_info: Información del tenant (inyectada)
         
     Returns:
         DeleteCollectionResponse: Resultado de la operación
-            - success: True si la operación fue exitosa
             - collection_id: ID de la colección eliminada
-            - collection_name: Nombre de la colección (para referencia)
+            - name: Nombre de la colección (para referencia)
             - deleted: True si se eliminó correctamente
             - documents_deleted: Cantidad de documentos/fragmentos eliminados
     
@@ -601,7 +610,7 @@ async def delete_collection(
         return DeleteCollectionResponse(
             success=True,
             collection_id=collection_id,
-            collection_name=collection_name,
+            name=collection_name,
             deleted=True,
             documents_deleted=chunks_deleted
         )
@@ -711,8 +720,7 @@ async def ingest_documents_to_collection(
             nodes = await process_document(
                 document_text, 
                 metadata,
-                collection_id,
-                collection_name=None  # No necesitamos collection_name cuando tenemos collection_id
+                collection_id
             )
             
             all_nodes.extend(nodes)
@@ -721,8 +729,7 @@ async def ingest_documents_to_collection(
         background_tasks.add_task(
             index_documents_task,
             all_nodes,
-            collection_id,
-            None  # No necesitamos collection_name cuando tenemos collection_id
+            collection_id
         )
         
         return IngestionResponse(
@@ -816,16 +823,14 @@ async def upload_file_to_collection(
     node_data = await process_document(
         doc_text=file_text,
         metadata=metadata,
-        collection_id=collection_id,
-        collection_name=None  # No necesitamos collection_name cuando tenemos collection_id
+        collection_id=collection_id
     )
     
     # Programar indexación en segundo plano
     background_tasks.add_task(
         index_documents_task,
         node_data,
-        collection_id,
-        None  # No necesitamos collection_name cuando tenemos collection_id
+        collection_id
     )
     
     logger.info(f"Archivo {file.filename} procesado con {len(node_data)} fragmentos")
@@ -863,7 +868,7 @@ async def delete_document_endpoint(
         DeleteDocumentResponse: Resultado de la operación
             - document_id: ID del documento eliminado
             - collection_id: ID de la colección a la que pertenecía
-            - collection_name: Nombre de la colección (para referencia)
+            - name: Nombre de la colección (para referencia)
             - deleted: True si se eliminó correctamente
     
     Raises:
@@ -925,7 +930,7 @@ async def delete_document_endpoint(
             message=f"Documento {document_id} eliminado exitosamente",
             document_id=document_id,
             collection_id=collection_id,
-            collection_name=collection_name,
+            name=collection_name,
             deleted=True,
             deleted_chunks=deleted_count
         )

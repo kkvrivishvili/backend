@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     
     # Servicios URLs
     embedding_service_url: str = Field("http://embedding-service:8001", env="EMBEDDING_SERVICE_URL")
-    ingestion_service_url: str = Field("http://ingestion-service:8000", env="INGESTION_SERVICE_URL")
+    ingestion_service_url: str = Field("http://ingestion-service:8004", env="INGESTION_SERVICE_URL")
     query_service_url: str = Field("http://query-service:8002", env="QUERY_SERVICE_URL")
     agent_service_url: str = Field("http://agent-service:8003", env="AGENT_SERVICE_URL")
     
@@ -88,7 +88,7 @@ class Settings(BaseSettings):
     
     # Configuración de puertos de servicios
     embedding_service_port: int = Field(8001, env="EMBEDDING_SERVICE_PORT")
-    ingestion_service_port: int = Field(8000, env="INGESTION_SERVICE_PORT")
+    ingestion_service_port: int = Field(8004, env="INGESTION_SERVICE_PORT")
     query_service_port: int = Field(8002, env="QUERY_SERVICE_PORT")
     agent_service_port: int = Field(8003, env="AGENT_SERVICE_PORT")
     

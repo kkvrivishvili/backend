@@ -33,8 +33,8 @@ La implementación multi-tenant actual está basada en un enfoque simple pero fu
 ## Mejoras Realizadas
 
 1. **Resolución de inconsistencias en flags de configuración**:
-   - Se documentó que `SKIP_SUPABASE` está obsoleto y se recomienda usar `LOAD_CONFIG_FROM_SUPABASE=false`
-   - Se mejoró la lógica en `get_settings()` para manejar correctamente la combinación de ambos flags
+   - Se estandarizó el uso de `LOAD_CONFIG_FROM_SUPABASE` como la única variable para controlar la carga de configuraciones desde Supabase
+   - Se mejoró la lógica en `get_settings()` para manejar correctamente esta configuración
 
 2. **Implementación de contexto de ejecución**:
    - Se creó `context.py` con funciones para gestionar el tenant_id en el contexto de ejecución

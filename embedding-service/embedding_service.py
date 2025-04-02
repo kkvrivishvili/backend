@@ -127,7 +127,6 @@ add_example_to_endpoint(
         "texts": ["Este es un texto de ejemplo para generar un embedding vectorial", "Este es otro texto para el mismo proceso"],
         "model": "text-embedding-ada-002",
         "collection_id": "550e8400-e29b-41d4-a716-446655440000",
-        "collection_name": "documentos_tecnicos",
         "cache_enabled": True
     },
     response_example={
@@ -139,7 +138,7 @@ add_example_to_endpoint(
         ],
         "model": "text-embedding-ada-002",
         "collection_id": "550e8400-e29b-41d4-a716-446655440000", 
-        "collection_name": "documentos_tecnicos"
+        "total_tokens": 42
     },
     request_schema_description="Solicitud para generar embeddings vectoriales de múltiples textos"
 )
@@ -169,7 +168,6 @@ add_example_to_endpoint(
         ],
         "model": "text-embedding-ada-002",
         "collection_id": "550e8400-e29b-41d4-a716-446655440000",
-        "collection_name": "documentos_tecnicos",
         "cache_enabled": True
     },
     response_example={
@@ -199,7 +197,6 @@ add_example_to_endpoint(
         ],
         "model": "text-embedding-ada-002",
         "collection_id": "550e8400-e29b-41d4-a716-446655440000",
-        "collection_name": "documentos_tecnicos",
         "processing_time": 0.85,
         "total_tokens": 42
     },
@@ -471,7 +468,6 @@ async def generate_embeddings(
             - texts: Lista de textos para vectorizar
             - model: Modelo a utilizar (opcional, se usa el predeterminado si no se especifica)
             - collection_id: ID único de la colección (UUID)
-            - collection_name: Nombre amigable de la colección (para compatibilidad)
             - cache_enabled: Si se debe utilizar/actualizar caché (predeterminado: True)
         tenant_info: Información del tenant (inyectada mediante token de autenticación)
         
@@ -480,8 +476,7 @@ async def generate_embeddings(
             - success: True si la operación fue exitosa
             - embeddings: Lista de vectores de embeddings en formato de lista de flotantes
             - model: Modelo utilizado para generar los embeddings
-            - collection_id: ID único de la colección (si está disponible)
-            - collection_name: Nombre de la colección (para referencia)
+            - collection_id: ID único de la colección (UUID)
             - total_tokens: Cantidad de tokens procesados
     
     Raises:
@@ -511,7 +506,6 @@ async def generate_embeddings(
     model_name = request.model or settings.default_embedding_model
     cache_enabled = request.cache_enabled
     collection_id = request.collection_id
-    collection_name = request.collection_name or None
     
     # Validar acceso al modelo solicitado
     validate_model_access(tenant_info, model_name)
@@ -542,7 +536,6 @@ async def generate_embeddings(
             embeddings=embeddings,
             model=model_name,
             collection_id=collection_id,
-            collection_name=collection_name,
             processing_time=processing_time,
             total_tokens=int(tokens_estimate)
         )
@@ -590,7 +583,6 @@ async def batch_generate_embeddings(
                 - metadata: Diccionario con metadatos asociados al texto
             - model: Modelo a utilizar (opcional, se usa el predeterminado si no se especifica)
             - collection_id: ID único de la colección (UUID)
-            - collection_name: Nombre amigable de la colección (para compatibilidad)
             - cache_enabled: Si se debe utilizar/actualizar caché (predeterminado: True)
         tenant_info: Información del tenant (inyectada mediante token de autenticación)
         
@@ -601,7 +593,6 @@ async def batch_generate_embeddings(
             - items: Lista de objetos procesados con sus metadatos originales
             - model: Modelo utilizado para generar los embeddings
             - collection_id: ID único de la colección (si está disponible)
-            - collection_name: Nombre de la colección (para referencia)
             - total_tokens: Cantidad de tokens procesados
     
     Raises:
@@ -630,7 +621,6 @@ async def batch_generate_embeddings(
     model_name = request.model or settings.default_embedding_model
     cache_enabled = request.cache_enabled
     collection_id = request.collection_id
-    collection_name = request.collection_name or None
     
     # Validar acceso al modelo solicitado
     validate_model_access(tenant_info, model_name)
@@ -649,11 +639,9 @@ async def batch_generate_embeddings(
         # Asegurarse que la metadata tenga campos requeridos
         item.metadata["tenant_id"] = tenant_id
         
-        # Agregar collection_id y collection_name a metadata si están disponibles
+        # Agregar collection_id a metadata si está disponible
         if collection_id:
             item.metadata["collection_id"] = collection_id
-        if collection_name:
-            item.metadata["collection"] = collection_name
             
         texts.append(item.text)
     
@@ -684,7 +672,6 @@ async def batch_generate_embeddings(
             items=request.items,
             model=model_name,
             collection_id=collection_id,
-            collection_name=collection_name,
             processing_time=processing_time,
             total_tokens=int(tokens_estimate)
         )

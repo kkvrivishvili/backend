@@ -44,7 +44,7 @@ spec:
           value: "http://embedding-service:8001"
         - name: QUERY_SERVICE_URL
           value: "http://query-service:8002"
-        - name: SKIP_SUPABASE
+        - name: LOAD_CONFIG_FROM_SUPABASE
           value: "true"
         - name: TESTING_MODE
           value: "true"

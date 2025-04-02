@@ -43,7 +43,7 @@ def init_supabase():
         raise
 
 
-def get_tenant_vector_store(tenant_id: Optional[str] = None, collection_name: Optional[str] = None) -> Any:
+def get_tenant_vector_store(tenant_id: Optional[str] = None, collection_id: Optional[str] = None) -> Any:
     """
     Obtiene un vector store para un tenant específico.
     
@@ -53,7 +53,7 @@ def get_tenant_vector_store(tenant_id: Optional[str] = None, collection_name: Op
     
     Args:
         tenant_id: ID del tenant (opcional, usa el contexto actual si no se especifica)
-        collection_name: Nombre de la colección (opcional)
+        collection_id: ID único de la colección (UUID)
         
     Returns:
         Any: Vector store para el tenant especificado
@@ -68,8 +68,10 @@ def get_tenant_vector_store(tenant_id: Optional[str] = None, collection_name: Op
     
     # Configurar filtros de metadatos
     metadata_filters = {"tenant_id": tenant_id}
-    if collection_name:
-        metadata_filters["collection"] = collection_name
+    
+    # Filtrar por collection_id si se proporciona
+    if collection_id:
+        metadata_filters["collection_id"] = str(collection_id)
     
     # Crear vector store
     vector_store = SupabaseVectorStore(
@@ -86,7 +88,7 @@ def get_tenant_vector_store(tenant_id: Optional[str] = None, collection_name: Op
 
 def get_tenant_documents(
     tenant_id: Optional[str] = None, 
-    collection_name: Optional[str] = None,
+    collection_id: Optional[str] = None,
     limit: int = 50,
     offset: int = 0
 ) -> Dict[str, Any]:
@@ -95,7 +97,7 @@ def get_tenant_documents(
     
     Args:
         tenant_id: ID del tenant (opcional, usa el contexto actual si no se especifica)
-        collection_name: Filtrar por colección
+        collection_id: Filtrar por ID único de colección (UUID)
         limit: Límite de resultados
         offset: Desplazamiento para paginación
         
@@ -113,8 +115,10 @@ def get_tenant_documents(
     
     # Añadir filtros
     query = query.eq("tenant_id", tenant_id)
-    if collection_name:
-        query = query.filter("metadata->collection", "eq", collection_name)
+    
+    # Filtrar por collection_id si se proporciona
+    if collection_id:
+        query = query.filter("metadata->collection_id", "eq", str(collection_id))
     
     # Ejecutar query
     result = query.execute()
@@ -170,28 +174,24 @@ def get_tenant_collections(tenant_id: str) -> List[Dict[str, Any]]:
     """
     supabase = get_supabase_client()
     
-    # Query para obtener colecciones
-    query = supabase.table("document_chunks").select("metadata->collection")
-    query = query.eq("tenant_id", tenant_id)
-    result = query.execute()
+    # Query para obtener colecciones desde la tabla collections
+    collections_query = supabase.table("collections").select("collection_id", "name", "description", "created_at", "updated_at")
+    collections_query = collections_query.eq("tenant_id", tenant_id)
+    collections_result = collections_query.execute()
     
-    if not result.data:
+    if not collections_result.data:
         return []
     
-    # Extraer nombres de colección únicos
-    collections = set()
-    for row in result.data:
-        collection = row.get("collection")
-        if collection:
-            collections.add(collection)
-    
-    # Obtener estadísticas para cada colección
+    # Preparar estadísticas para cada colección
     collection_stats = []
-    for collection in collections:
-        # Contar documentos en esta colección
+    for collection in collections_result.data:
+        collection_id = collection.get("collection_id")
+        
+        # Contar documentos en esta colección usando collection_id
         count_query = supabase.table("document_chunks").select("metadata->document_id", "count")
         count_query = count_query.eq("tenant_id", tenant_id)
-        count_query = count_query.filter("metadata->collection", "eq", collection)
+        count_query = count_query.filter("metadata->collection_id", "eq", str(collection_id))
+            
         count_result = count_query.execute()
         
         document_count = 0
@@ -199,8 +199,12 @@ def get_tenant_collections(tenant_id: str) -> List[Dict[str, Any]]:
             document_count = count_result.data[0]["count"]
         
         collection_stats.append({
-            "name": collection,
-            "document_count": document_count
+            "collection_id": collection_id,
+            "name": collection.get("name"),
+            "description": collection.get("description"),
+            "document_count": document_count,
+            "created_at": collection.get("created_at"),
+            "updated_at": collection.get("updated_at")
         })
     
     return collection_stats
