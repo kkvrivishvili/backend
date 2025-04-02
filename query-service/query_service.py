@@ -28,7 +28,7 @@ from llama_index.core.callbacks import CallbackManager, LlamaDebugHandler
 from common.ollama import get_llm_model
 
 # Importamos la configuración centralizada
-from common.config import get_settings
+from common.config import get_settings, invalidate_settings_cache
 from common.logging import init_logging
 from common.context import (
     TenantContext, AgentContext, FullContext,
@@ -104,6 +104,10 @@ app = FastAPI(
         {
             "name": "Models",
             "description": "Información sobre modelos disponibles"
+        },
+        {
+            "name": "Admin",
+            "description": "Operaciones de administración"
         }
     ]
 )
@@ -130,6 +134,10 @@ configure_swagger_ui(
         {
             "name": "Models",
             "description": "Información sobre modelos disponibles"
+        },
+        {
+            "name": "Admin",
+            "description": "Operaciones de administración"
         }
     ]
 )
@@ -678,14 +686,19 @@ async def create_collection_endpoint(
             - name: Nombre amigable
             - description: Descripción proporcionada
     """
-    return await create_collection(name, description, tenant_info)
+    result = await create_collection(name, description, tenant_info)
+    
+    # Invalidar caché de configuraciones para este tenant
+    invalidate_settings_cache(tenant_info.tenant_id)
+    
+    return result
 
 @app.put(
     "/collections/{collection_id}",
     response_model=CollectionUpdateResponse,
     tags=["Collections"],
     summary="Actualizar colección",
-    description="Actualiza una colección existente"
+    description="Modifica una colección existente"
 )
 @handle_service_error_simple
 @with_full_context
@@ -712,7 +725,12 @@ async def update_collection_endpoint(
     Returns:
         CollectionUpdateResponse: Datos actualizados de la colección
     """
-    return await update_collection(collection_id, name, description, is_active, tenant_info)
+    result = await update_collection(collection_id, name, description, is_active, tenant_info)
+    
+    # Invalidar caché de configuraciones para este tenant
+    invalidate_settings_cache(tenant_info.tenant_id)
+    
+    return result
 
 @app.get(
     "/collections/{collection_id}/stats",
@@ -882,6 +900,38 @@ async def get_documents(
         DocumentsListResponse: Lista paginada de documentos
     """
     return await list_documents(collection_id, limit, offset, tenant_info)
+
+@app.post(
+    "/admin/clear-config-cache",
+    tags=["Admin"],
+    summary="Limpiar caché de configuraciones",
+    description="Invalida el caché de configuraciones para un tenant específico o todos"
+)
+@handle_service_error_simple
+async def clear_config_cache(tenant_id: Optional[str] = None):
+    """
+    Invalida el caché de configuraciones para un tenant específico o todos.
+    
+    Este endpoint permite forzar la recarga de configuraciones desde las fuentes
+    originales (variables de entorno y/o Supabase), lo que es útil después de
+    realizar cambios en la configuración que deban aplicarse inmediatamente.
+    
+    Args:
+        tenant_id: ID del tenant (opcional, si no se proporciona se invalidan todos)
+        
+    Returns:
+        Dict: Resultado de la operación
+    """
+    from common.config import invalidate_settings_cache
+    
+    if tenant_id:
+        # Invalidar para un tenant específico
+        invalidate_settings_cache(tenant_id)
+        return {"success": True, "message": f"Caché de configuraciones invalidado para tenant {tenant_id}"}
+    else:
+        # Invalidar para todos los tenants
+        invalidate_settings_cache()
+        return {"success": True, "message": "Caché de configuraciones invalidado para todos los tenants"}
 
 if __name__ == "__main__":
     import uvicorn

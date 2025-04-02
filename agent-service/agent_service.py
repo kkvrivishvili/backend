@@ -37,7 +37,7 @@ from common.models import (
 )
 from common.auth import verify_tenant, check_tenant_quotas, validate_model_access
 from common.supabase import get_supabase_client, init_supabase
-from common.config import Settings, get_settings
+from common.config import Settings, get_settings, invalidate_settings_cache
 from common.utils import track_usage, sanitize_content, prepare_service_request
 from common.errors import handle_service_error_simple, ServiceError, create_error_response
 from common.logging import init_logging
@@ -1030,7 +1030,7 @@ async def create_agent(request: AgentRequest, tenant_info: TenantInfo = Depends(
     created_agent = result.data
     
     # Crear respuesta
-    return AgentResponse(
+    response = AgentResponse(
         agent_id=created_agent["agent_id"],
         tenant_id=created_agent["tenant_id"],
         name=created_agent["name"],
@@ -1046,6 +1046,11 @@ async def create_agent(request: AgentRequest, tenant_info: TenantInfo = Depends(
         created_at=created_agent["created_at"],
         updated_at=created_agent["updated_at"]
     )
+    
+    # Invalidar caché de configuraciones para este tenant
+    invalidate_settings_cache(tenant_info.tenant_id)
+    
+    return response
 
 
 # Endpoint para obtener un agente
@@ -1592,12 +1597,16 @@ async def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
     # Validar acceso al modelo
     validate_model_access(tenant_info.subscription_tier, agent_config.llm_model)
     
+    # Si no hay ID de conversación, crear una nueva conversación
+    if not conversation_id:
+        conversation_id = str(uuid.uuid4())
+    
     # Ejecutar el agente con o sin streaming según la solicitud
     result = await execute_agent(
         tenant_info=tenant_info,
         agent_config=agent_config,
         query=chat_request.message,
-        session_id=chat_request.session_id,
+        session_id=conversation_id,
         streaming=False
     )
     
@@ -1618,7 +1627,7 @@ async def chat(chat_request: ChatRequest, request: Request) -> ChatResponse:
     
     # Devolver resultado
     return ChatResponse(
-        conversation_id=chat_request.session_id,
+        conversation_id=conversation_id,
         message=ChatMessage(
             role="assistant",
             content=result["answer"]
@@ -1689,12 +1698,16 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
     # Validar acceso al modelo
     validate_model_access(tenant_info.subscription_tier, agent_config.llm_model)
     
+    # Si no hay ID de conversación, crear una nueva conversación
+    if not conversation_id:
+        conversation_id = str(uuid.uuid4())
+    
     # Ejecutar el agente con o sin streaming según la solicitud
     result = await execute_agent(
         tenant_info=tenant_info,
         agent_config=agent_config,
         query=chat_request.message,
-        session_id=chat_request.session_id,
+        session_id=conversation_id,
         streaming=False
     )
     
@@ -1715,7 +1728,7 @@ async def chat_stream(chat_request: ChatRequest, request: Request):
     
     # Devolver resultado
     return ChatResponse(
-        conversation_id=chat_request.session_id,
+        conversation_id=conversation_id,
         message=ChatMessage(
             role="assistant",
             content=result["answer"]
@@ -2224,3 +2237,33 @@ async def create_agent_tools(agent_config: AgentConfig) -> List[Tool]:
             tools.append(rag_tool)
     
     return tools
+
+@app.post(
+    "/admin/clear-config-cache",
+    tags=["Admin"],
+    summary="Limpiar caché de configuraciones",
+    description="Invalida el caché de configuraciones para un tenant específico o todos"
+)
+@handle_service_error_simple
+async def clear_config_cache(tenant_id: Optional[str] = None):
+    """
+    Invalida el caché de configuraciones para un tenant específico o todos.
+    
+    Este endpoint permite forzar la recarga de configuraciones desde las fuentes
+    originales (variables de entorno y/o Supabase), lo que es útil después de
+    realizar cambios en la configuración que deban aplicarse inmediatamente.
+    
+    Args:
+        tenant_id: ID del tenant (opcional, si no se proporciona se invalidan todos)
+        
+    Returns:
+        Dict: Resultado de la operación
+    """
+    if tenant_id:
+        # Invalidar para un tenant específico
+        invalidate_settings_cache(tenant_id)
+        return {"success": True, "message": f"Caché de configuraciones invalidado para tenant {tenant_id}"}
+    else:
+        # Invalidar para todos los tenants
+        invalidate_settings_cache()
+        return {"success": True, "message": "Caché de configuraciones invalidado para todos los tenants"}

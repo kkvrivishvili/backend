@@ -26,7 +26,7 @@ from common.models import (
     CollectionCreationResponse, CollectionInfo
 )
 from common.auth import verify_tenant, check_tenant_quotas
-from common.config import get_settings
+from common.config import get_settings, invalidate_settings_cache
 from common.errors import setup_error_handling, handle_service_error_simple, ServiceError
 from common.supabase import get_supabase_client, get_tenant_vector_store
 from common.rate_limiting import setup_rate_limiting
@@ -96,6 +96,10 @@ app = FastAPI(
         {
             "name": "Documents",
             "description": "Gestión de documentos y fragmentos"
+        },
+        {
+            "name": "Admin",
+            "description": "Operaciones de administración"
         }
     ]
 )
@@ -118,6 +122,10 @@ configure_swagger_ui(
         {
             "name": "Documents",
             "description": "Gestión de documentos y fragmentos"
+        },
+        {
+            "name": "Admin",
+            "description": "Operaciones de administración"
         }
     ]
 )
@@ -232,6 +240,16 @@ add_example_to_endpoint(
             "embedding_service": "available"
         },
         "version": "1.2.0"
+    }
+)
+
+add_example_to_endpoint(
+    app=app,
+    path="/admin/clear-config-cache",
+    method="post",
+    response_example={
+        "success": True,
+        "message": "Caché de configuraciones invalidado para todos los tenants"
     }
 )
 
@@ -507,6 +525,9 @@ async def create_collection(
         
         logger.info(f"Colección creada: {collection_id} - {name} para tenant {tenant_id}")
         
+        # Invalidar caché de configuraciones para este tenant
+        invalidate_settings_cache(tenant_id)
+        
         return CollectionCreationResponse(
             success=True,
             collection_id=collection_id,
@@ -606,6 +627,9 @@ async def delete_collection(
             .execute()
         
         logger.info(f"Colección eliminada: {collection_id} - {collection_name} para tenant {tenant_id}")
+        
+        # Invalidar caché de configuraciones para este tenant
+        invalidate_settings_cache(tenant_id)
         
         return DeleteCollectionResponse(
             success=True,
@@ -732,6 +756,9 @@ async def ingest_documents_to_collection(
             collection_id
         )
         
+        # Invalidar caché de configuraciones para este tenant
+        invalidate_settings_cache(tenant_id)
+        
         return IngestionResponse(
             success=True,
             message=f"{len(document_ids)} documentos procesados exitosamente con {len(all_nodes)} nodos",
@@ -835,6 +862,9 @@ async def upload_file_to_collection(
     
     logger.info(f"Archivo {file.filename} procesado con {len(node_data)} fragmentos")
     
+    # Invalidar caché de configuraciones para este tenant
+    invalidate_settings_cache(tenant_id)
+    
     return IngestionResponse(
         success=True,
         message=f"Archivo {file.filename} procesado exitosamente",
@@ -856,9 +886,8 @@ async def delete_document_endpoint(
     """
     Elimina un documento específico y todos sus fragmentos asociados.
     
-    Este endpoint permite eliminar permanentemente un documento y todos
-    los fragmentos de texto (chunks) asociados a él. Esta operación es 
-    irreversible y debe usarse con precaución.
+    Este endpoint elimina un documento y todos los fragmentos de texto (chunks) 
+    asociados a él. Esta operación es irreversible y debe usarse con precaución.
     
     Args:
         document_id: ID único del documento a eliminar
@@ -924,6 +953,9 @@ async def delete_document_endpoint(
         
         deleted_count = len(delete_result.data) if delete_result.data else 0
         logger.info(f"Documento {document_id} eliminado con {deleted_count} chunks")
+        
+        # Invalidar caché de configuraciones para este tenant
+        invalidate_settings_cache(tenant_id)
         
         return DeleteDocumentResponse(
             success=True,
@@ -997,6 +1029,38 @@ async def health_check():
         version=settings.service_version,
         message="Servicio de ingestión operativo" if is_healthy else "Servicio de ingestión con funcionalidad limitada"
     )
+
+@app.post(
+    "/admin/clear-config-cache",
+    tags=["Admin"],
+    summary="Limpiar caché de configuraciones",
+    description="Invalida el caché de configuraciones para un tenant específico o todos"
+)
+@handle_service_error_simple
+async def clear_config_cache(tenant_id: Optional[str] = None):
+    """
+    Invalida el caché de configuraciones para un tenant específico o todos.
+    
+    Este endpoint permite forzar la recarga de configuraciones desde las fuentes
+    originales (variables de entorno y/o Supabase), lo que es útil después de
+    realizar cambios en la configuración que deban aplicarse inmediatamente.
+    
+    Args:
+        tenant_id: ID del tenant (opcional, si no se proporciona se invalidan todos)
+        
+    Returns:
+        Dict: Resultado de la operación
+    """
+    from common.config import invalidate_settings_cache
+    
+    if tenant_id:
+        # Invalidar para un tenant específico
+        invalidate_settings_cache(tenant_id)
+        return {"success": True, "message": f"Caché de configuraciones invalidado para tenant {tenant_id}"}
+    else:
+        # Invalidar para todos los tenants
+        invalidate_settings_cache()
+        return {"success": True, "message": "Caché de configuraciones invalidado para todos los tenants"}
 
 if __name__ == "__main__":
     import uvicorn

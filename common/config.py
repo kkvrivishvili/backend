@@ -6,6 +6,7 @@ Configuración centralizada para todos los servicios de la plataforma.
 import os
 import json
 import logging
+import time
 from typing import Dict, Any, Optional, List
 from functools import lru_cache
 from pydantic_settings import BaseSettings
@@ -13,18 +14,34 @@ from pydantic import Field, validator
 
 logger = logging.getLogger(__name__)
 
-# Variable global para controlar invalidación de caché
+# Variables globales para control de caché
 _force_settings_reload = False
+_settings_last_refresh = {}  # {tenant_id: timestamp}
+_settings_ttl = 3600  # 1 hora por defecto
 
-def invalidate_settings_cache():
+def invalidate_settings_cache(tenant_id: Optional[str] = None):
     """
     Fuerza la recarga de configuraciones en la próxima llamada a get_settings().
+    
     Esta función puede ser llamada cuando se sabe que las configuraciones
-    han cambiado en Supabase.
+    han cambiado en Supabase o cuando se desea forzar una recarga.
+    
+    Args:
+        tenant_id: ID del tenant específico o None para todos
     """
-    global _force_settings_reload
+    global _force_settings_reload, _settings_last_refresh
+    
     _force_settings_reload = True
-    logger.info("Caché de configuraciones invalidada, se recargará en la próxima solicitud")
+    
+    if tenant_id:
+        # Eliminar timestamp de tenant específico
+        if tenant_id in _settings_last_refresh:
+            del _settings_last_refresh[tenant_id]
+        logger.info(f"Caché de configuraciones invalidado para tenant {tenant_id}")
+    else:
+        # Limpiar todos los timestamps
+        _settings_last_refresh.clear()
+        logger.info("Caché de configuraciones invalidado para todos los tenants")
 
 
 class Settings(BaseSettings):
@@ -183,15 +200,40 @@ class Settings(BaseSettings):
         return values.get('default_openai_embedding_model', v)
 
 
-@lru_cache()
+@lru_cache(maxsize=100)  # Limitar tamaño del caché
 def get_settings() -> Settings:
     """
     Obtiene la configuración con caché para el servicio.
     
+    El sistema de caché incluye:
+    - TTL automático de 5 minutos
+    - Invalidación manual mediante invalidate_settings_cache()
+    - Límite de 100 configuraciones en caché
+    - Soporte para actualización por tenant específico
+    
     Returns:
         Settings: Objeto de configuración.
     """
-    global _force_settings_reload
+    global _force_settings_reload, _settings_last_refresh
+    
+    # Determinar el tenant_id antes de todo
+    tenant_id = "default"
+    try:
+        from .context import get_current_tenant_id
+        context_tenant_id = get_current_tenant_id()
+        if context_tenant_id and context_tenant_id != "default":
+            tenant_id = context_tenant_id
+    except Exception:
+        # Si falla la obtención del tenant_id del contexto, usar default
+        pass
+    
+    # Verificar si necesitamos recargar por TTL
+    current_time = time.time()
+    if tenant_id in _settings_last_refresh:
+        time_since_refresh = current_time - _settings_last_refresh[tenant_id]
+        if time_since_refresh > _settings_ttl:
+            logger.debug(f"TTL excedido para tenant {tenant_id}, forzando recarga de configuraciones")
+            _force_settings_reload = True
     
     # Si se ha solicitado recargar, invalidar la función cacheada
     if _force_settings_reload:
@@ -229,6 +271,9 @@ def get_settings() -> Settings:
             logger.info(f"Configuración para tenant {tenant_id_to_use} cargada desde Supabase")
         except Exception as e:
             logger.error(f"Error al cargar configuraciones desde Supabase: {str(e)}")
+    
+    # Actualizar timestamp de última recarga
+    _settings_last_refresh[tenant_id] = current_time
     
     return settings
 

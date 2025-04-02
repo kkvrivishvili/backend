@@ -867,6 +867,39 @@ async def get_service_status() -> HealthResponse:
     )
 
 
+@app.post(
+    "/admin/clear-config-cache",
+    tags=["Admin"],
+    summary="Limpiar caché de configuraciones",
+    description="Invalida el caché de configuraciones para un tenant específico o todos"
+)
+@handle_service_error_simple
+async def clear_config_cache(tenant_id: Optional[str] = None):
+    """
+    Invalida el caché de configuraciones para un tenant específico o todos.
+    
+    Este endpoint permite forzar la recarga de configuraciones desde las fuentes
+    originales (variables de entorno y/o Supabase), lo que es útil después de
+    realizar cambios en la configuración que deban aplicarse inmediatamente.
+    
+    Args:
+        tenant_id: ID del tenant (opcional, si no se proporciona se invalidan todos)
+        
+    Returns:
+        Dict: Resultado de la operación
+    """
+    from common.config import invalidate_settings_cache
+    
+    if tenant_id:
+        # Invalidar para un tenant específico
+        invalidate_settings_cache(tenant_id)
+        return {"success": True, "message": f"Caché de configuraciones invalidado para tenant {tenant_id}"}
+    else:
+        # Invalidar para todos los tenants
+        invalidate_settings_cache()
+        return {"success": True, "message": "Caché de configuraciones invalidado para todos los tenants"}
+
+
 @app.get("/cache", response_model=CacheStatsResponse, tags=["Cache"])
 @handle_service_error_simple
 @with_full_context
