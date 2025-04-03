@@ -689,7 +689,7 @@ async def list_documents(
     description="Realiza una consulta RAG sobre una colección específica"
 )
 @handle_service_error_simple
-@with_tenant_context
+@with_full_context
 async def query_collection(
     collection_id: str,
     request: QueryRequest,
@@ -727,6 +727,15 @@ async def query_collection(
     # Forzar el collection_id de la ruta en la solicitud
     request.collection_id = collection_id
     
+    # Establecer ID de colección en el contexto
+    set_current_collection_id(str(collection_id))
+    
+    # Establecer IDs de agente y conversación si están disponibles en la solicitud
+    if request.agent_id:
+        set_current_agent_id(request.agent_id)
+    if request.conversation_id:
+        set_current_conversation_id(request.conversation_id)
+    
     # Procesar la consulta usando la implementación existente
     return await process_query(request, tenant_info)
 
@@ -739,7 +748,7 @@ async def query_collection(
     deprecated=True
 )
 @handle_service_error_simple
-@with_tenant_context
+@with_full_context
 async def query_endpoint(
     request: QueryRequest,
     tenant_info: TenantInfo = Depends(verify_tenant)
@@ -761,6 +770,15 @@ async def query_endpoint(
     Returns:
         QueryResponse: Respuesta generada con fuentes y metadatos
     """
+    # Establecer ID de colección en el contexto
+    set_current_collection_id(str(request.collection_id))
+    
+    # Establecer IDs de agente y conversación si están disponibles en la solicitud
+    if request.agent_id:
+        set_current_agent_id(request.agent_id)
+    if request.conversation_id:
+        set_current_conversation_id(request.conversation_id)
+    
     # Redirigir a la ruta RESTful moderna
     logger.info(f"Redirigiendo consulta a ruta RESTful /collections/{request.collection_id}/query")
     return await query_collection(str(request.collection_id), request, tenant_info)
@@ -841,7 +859,7 @@ async def create_collection_endpoint(
     description="Modifica una colección existente"
 )
 @handle_service_error_simple
-@with_tenant_context
+@with_full_context
 async def update_collection_endpoint(
     collection_id: str,
     name: str,
@@ -865,6 +883,9 @@ async def update_collection_endpoint(
     Returns:
         CollectionUpdateResponse: Datos actualizados de la colección
     """
+    # Establecer ID de colección en el contexto
+    set_current_collection_id(str(collection_id))
+    
     result = await update_collection(collection_id, name, description, is_active, tenant_info)
     
     # Invalidar caché de configuraciones para este tenant
@@ -880,7 +901,7 @@ async def update_collection_endpoint(
     description="Obtiene estadísticas detalladas de una colección específica"
 )
 @handle_service_error_simple
-@with_tenant_context
+@with_full_context
 async def get_collection_stats_endpoint(
     collection_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
@@ -899,6 +920,9 @@ async def get_collection_stats_endpoint(
     Returns:
         CollectionStatsResponse: Estadísticas detalladas de la colección
     """
+    # Establecer ID de colección en el contexto
+    set_current_collection_id(str(collection_id))
+    
     return await get_collection_stats(collection_id, tenant_info)
 
 @app.get(
@@ -909,7 +933,7 @@ async def get_collection_stats_endpoint(
     description="Obtiene configuración para usar la colección como herramienta de agente"
 )
 @handle_service_error_simple
-@with_tenant_context
+@with_full_context
 async def get_collection_tool_endpoint(
     collection_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
@@ -928,6 +952,9 @@ async def get_collection_tool_endpoint(
     Returns:
         CollectionToolResponse: Configuración de herramienta para la colección
     """
+    # Establecer ID de colección en el contexto
+    set_current_collection_id(str(collection_id))
+    
     return await get_collection_tool(collection_id, tenant_info)
 
 @app.get(
@@ -1115,7 +1142,7 @@ async def clear_config_cache(
             error_code="CACHE_ERROR"
         )
 
-@with_tenant_context
+@with_full_context
 @app.delete("/api/collections/{collection_id}", response_model=DeleteCollectionResponse)
 async def delete_collection(
     collection_id: UUID,
@@ -1136,6 +1163,9 @@ async def delete_collection(
     Raises:
         HTTPException: Si la colección no existe o pertenece a otro tenant
     """
+    # Establecer ID de colección en el contexto
+    set_current_collection_id(str(collection_id))
+    
     # Usar AISchemaAccess para acceder a las tablas con la autenticación adecuada
     # Las tablas del esquema "ai" usarán el token JWT para autenticación y contabilización correcta
     db = AISchemaAccess(request)

@@ -611,6 +611,10 @@ async def create_rag_tool(tool_config: AgentTool, tenant_id: str, agent_id: Opti
     similarity_top_k = tool_config.metadata.get("similarity_top_k", 4)
     response_mode = tool_config.metadata.get("response_mode", "compact")
     
+    # Establecer ID de colección en el contexto si está disponible
+    if collection_id:
+        set_current_collection_id(str(collection_id))
+    
     async def query_tool(query: str) -> str:
         """Herramienta para consultar documentos usando RAG."""
         start_time = time.time()

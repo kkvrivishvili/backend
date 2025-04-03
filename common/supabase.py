@@ -213,7 +213,10 @@ def get_tenant_documents(
 
 def get_tenant_collections(tenant_id: str) -> List[Dict[str, Any]]:
     """
-    Obtiene las colecciones para un tenant específico.
+    Obtiene las colecciones para un tenant específico con recuento de documentos.
+    
+    Utiliza la función RPC get_collection_document_counts para obtener el recuento
+    de documentos de forma eficiente, siguiendo el estándar de acceso a datos.
     
     Args:
         tenant_id: ID del tenant
@@ -231,27 +234,36 @@ def get_tenant_collections(tenant_id: str) -> List[Dict[str, Any]]:
     if not collections_result.data:
         return []
     
+    # Extraer IDs de colecciones para uso en mapeo
+    collection_ids = [collection.get("collection_id") for collection in collections_result.data]
+    collection_map = {collection.get("collection_id"): collection for collection in collections_result.data}
+    
+    # Obtener recuentos de documentos usando la función RPC centralizada
+    document_counts_result = supabase.rpc(
+        "get_collection_document_counts",
+        {
+            "p_tenant_id": tenant_id,
+            "p_collection_ids": collection_ids
+        }
+    ).execute()
+    
+    # Mapear recuentos de documentos por collection_id
+    document_counts = {}
+    if document_counts_result.data:
+        for count_record in document_counts_result.data:
+            collection_id = count_record.get("collection_id")
+            count = count_record.get("document_count")
+            document_counts[collection_id] = count or 0
+    
     # Preparar estadísticas para cada colección
     collection_stats = []
-    for collection in collections_result.data:
-        collection_id = collection.get("collection_id")
-        
-        # Contar documentos en esta colección usando collection_id
-        count_query = supabase.table(get_table_name("document_chunks")).select("metadata->document_id", "count")
-        count_query = count_query.eq("tenant_id", tenant_id)
-        count_query = count_query.filter("metadata->collection_id", "eq", str(collection_id))
-            
-        count_result = count_query.execute()
-        
-        document_count = 0
-        if count_result.data and count_result.data[0].get("count"):
-            document_count = count_result.data[0]["count"]
-        
+    for collection_id in collection_ids:
+        collection = collection_map.get(collection_id)
         collection_stats.append({
             "collection_id": collection_id,
             "name": collection.get("name"),
             "description": collection.get("description"),
-            "document_count": document_count,
+            "document_count": document_counts.get(collection_id, 0),
             "created_at": collection.get("created_at"),
             "updated_at": collection.get("updated_at")
         })

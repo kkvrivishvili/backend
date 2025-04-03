@@ -18,9 +18,10 @@ AsyncFunc = Callable[..., Awaitable[T]]
 # Contexto para el ID del tenant actual
 current_tenant_id = contextvars.ContextVar("current_tenant_id", default="default")
 
-# Nuevos contextos para agente y conversación
+# Nuevos contextos para agente, conversación y colección
 current_agent_id = contextvars.ContextVar("current_agent_id", default=None)
 current_conversation_id = contextvars.ContextVar("current_conversation_id", default=None)
+current_collection_id = contextvars.ContextVar("current_collection_id", default=None)
 
 def get_current_tenant_id() -> str:
     """
@@ -99,6 +100,15 @@ def get_current_conversation_id() -> Optional[str]:
     """
     return current_conversation_id.get()
 
+def get_current_collection_id() -> Optional[str]:
+    """
+    Obtiene el ID de la colección del contexto de ejecución actual.
+    
+    Returns:
+        Optional[str]: ID de la colección o None si no está definido
+    """
+    return current_collection_id.get()
+
 def get_full_context() -> Dict[str, Any]:
     """
     Obtiene el contexto completo actual con todos los niveles.
@@ -109,7 +119,8 @@ def get_full_context() -> Dict[str, Any]:
     return {
         "tenant_id": get_current_tenant_id(),
         "agent_id": get_current_agent_id(),
-        "conversation_id": get_current_conversation_id()
+        "conversation_id": get_current_conversation_id(),
+        "collection_id": get_current_collection_id()
     }
 
 def debug_context() -> str:
@@ -169,6 +180,19 @@ def set_current_conversation_id(conversation_id: Optional[str]) -> contextvars.T
     logger.debug(f"Estableciendo conversation_id en contexto: {conversation_id}")
     return current_conversation_id.set(conversation_id)
 
+def set_current_collection_id(collection_id: Optional[str]) -> contextvars.Token:
+    """
+    Establece el ID de la colección en el contexto de ejecución actual.
+    
+    Args:
+        collection_id: ID de la colección a establecer
+        
+    Returns:
+        Token: Token para restaurar el contexto anterior
+    """
+    logger.debug(f"Estableciendo collection_id en contexto: {collection_id}")
+    return current_collection_id.set(collection_id)
+
 def reset_tenant_context(token: contextvars.Token) -> None:
     """
     Restaura el ID del tenant al valor anterior.
@@ -196,6 +220,15 @@ def reset_conversation_context(token: contextvars.Token) -> None:
     """
     current_conversation_id.reset(token)
 
+def reset_collection_context(token: contextvars.Token) -> None:
+    """
+    Restaura el ID de la colección al valor anterior.
+    
+    Args:
+        token: Token devuelto por set_current_collection_id
+    """
+    current_collection_id.reset(token)
+
 class ContextTokens(NamedTuple):
     """
     Tokens para restaurar el contexto completo.
@@ -204,10 +237,12 @@ class ContextTokens(NamedTuple):
         tenant_token: Token para restaurar el tenant_id
         agent_token: Token para restaurar el agent_id
         conversation_token: Token para restaurar el conversation_id
+        collection_token: Token para restaurar el collection_id
     """
     tenant_token: Optional[contextvars.Token] = None
     agent_token: Optional[contextvars.Token] = None
     conversation_token: Optional[contextvars.Token] = None
+    collection_token: Optional[contextvars.Token] = None
 
 class TenantContext:
     """
@@ -241,7 +276,7 @@ class FullContext:
     
     Ejemplo:
         ```python
-        with FullContext(tenant_id="tenant123", agent_id="agent456", conversation_id="conv789"):
+        with FullContext(tenant_id="tenant123", agent_id="agent456", conversation_id="conv789", collection_id="coll012"):
             # Código que ejecutará con el contexto completo
             result = await async_function()
         ```
@@ -251,11 +286,13 @@ class FullContext:
         self, 
         tenant_id: str, 
         agent_id: Optional[str] = None, 
-        conversation_id: Optional[str] = None
+        conversation_id: Optional[str] = None,
+        collection_id: Optional[str] = None
     ):
         self.tenant_id = tenant_id
         self.agent_id = agent_id
         self.conversation_id = conversation_id
+        self.collection_id = collection_id
         self.tokens = ContextTokens()
     
     def __enter__(self):
@@ -263,16 +300,20 @@ class FullContext:
         tenant_token = set_current_tenant_id(self.tenant_id)
         agent_token = set_current_agent_id(self.agent_id) if self.agent_id is not None else None
         conversation_token = set_current_conversation_id(self.conversation_id) if self.conversation_id is not None else None
+        collection_token = set_current_collection_id(self.collection_id) if self.collection_id is not None else None
         
         self.tokens = ContextTokens(
             tenant_token=tenant_token,
             agent_token=agent_token,
-            conversation_token=conversation_token
+            conversation_token=conversation_token,
+            collection_token=collection_token
         )
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         # Restaurar contexto previo
+        if self.tokens.collection_token:
+            reset_collection_context(self.tokens.collection_token)
         if self.tokens.conversation_token:
             reset_conversation_context(self.tokens.conversation_token)
         if self.tokens.agent_token:
@@ -297,34 +338,43 @@ async def run_with_tenant(tenant_id: str, coro: Awaitable[T]) -> T:
     finally:
         reset_tenant_context(token)
 
-async def run_with_agent_context(tenant_id: str, agent_id: Optional[str], coro: Awaitable[T]) -> T:
+async def run_with_agent_context(tenant_id: str, agent_id: Optional[str], collection_id: Optional[str] = None, coro: Awaitable[T] = None) -> T:
     """
-    Ejecuta una corrutina con un contexto de tenant y agente específicos.
+    Ejecuta una corrutina con un contexto de tenant, agente y colección específicos.
     
     Args:
         tenant_id: ID del tenant
         agent_id: ID del agente (opcional)
+        collection_id: ID de la colección (opcional)
         coro: Corrutina a ejecutar
         
     Returns:
         Any: Resultado de la corrutina
     """
+    # Si coro es None (es posible en la sobrecarga de tipos de Python), maneja el caso
+    if coro is None and collection_id is not None and isinstance(collection_id, Awaitable):
+        coro = collection_id
+        collection_id = None
+    
     # Guardar tokens para restaurar después
     tokens = ContextTokens(
         tenant_token=set_current_tenant_id(tenant_id),
-        agent_token=set_current_agent_id(agent_id) if agent_id is not None else None
+        agent_token=set_current_agent_id(agent_id) if agent_id is not None else None,
+        collection_token=set_current_collection_id(collection_id) if collection_id is not None else None
     )
     
     try:
         return await coro
     finally:
         # Restaurar contexto previo
+        if tokens.collection_token:
+            reset_collection_context(tokens.collection_token)
         if tokens.agent_token:
             reset_agent_context(tokens.agent_token)
         if tokens.tenant_token:
             reset_tenant_context(tokens.tenant_token)
 
-async def run_with_full_context(tenant_id: str, agent_id: Optional[str], conversation_id: Optional[str], coro: Awaitable[T]) -> T:
+async def run_with_full_context(tenant_id: str, agent_id: Optional[str], conversation_id: Optional[str], collection_id: Optional[str], coro: Awaitable[T]) -> T:
     """
     Ejecuta una corrutina con un contexto completo específico.
     
@@ -332,6 +382,7 @@ async def run_with_full_context(tenant_id: str, agent_id: Optional[str], convers
         tenant_id: ID del tenant
         agent_id: ID del agente (opcional)
         conversation_id: ID de la conversación (opcional)
+        collection_id: ID de la colección (opcional)
         coro: Corrutina a ejecutar
         
     Returns:
@@ -341,13 +392,16 @@ async def run_with_full_context(tenant_id: str, agent_id: Optional[str], convers
     tokens = ContextTokens(
         tenant_token=set_current_tenant_id(tenant_id),
         agent_token=set_current_agent_id(agent_id) if agent_id is not None else None,
-        conversation_token=set_current_conversation_id(conversation_id) if conversation_id is not None else None
+        conversation_token=set_current_conversation_id(conversation_id) if conversation_id is not None else None,
+        collection_token=set_current_collection_id(collection_id) if collection_id is not None else None
     )
     
     try:
         return await coro
     finally:
         # Restaurar contexto previo
+        if tokens.collection_token:
+            reset_collection_context(tokens.collection_token)
         if tokens.conversation_token:
             reset_conversation_context(tokens.conversation_token)
         if tokens.agent_token:
@@ -396,15 +450,16 @@ def with_tenant_context(func: AsyncFunc) -> AsyncFunc:
 
 def with_agent_context(func: AsyncFunc) -> AsyncFunc:
     """
-    Decorador para propagar el ID del tenant y agente a través de funciones asíncronas.
+    Decorador para propagar el ID del tenant, agente y colección a través de funciones asíncronas.
     
     Ejemplo:
         ```python
         @with_agent_context
         async def my_async_function(arg1, arg2):
-            # tenant_id y agent_id se propagan automáticamente
+            # tenant_id, agent_id y collection_id se propagan automáticamente
             tenant_id = get_current_tenant_id()
             agent_id = get_current_agent_id()
+            collection_id = get_current_collection_id()
             # Resto del código...
         ```
     
@@ -412,16 +467,17 @@ def with_agent_context(func: AsyncFunc) -> AsyncFunc:
         func: Función asíncrona a decorar
         
     Returns:
-        Función asíncrona decorada que mantiene el contexto del tenant y agente
+        Función asíncrona decorada que mantiene el contexto del tenant, agente y colección
     """
     @wraps(func)
     async def wrapper(*args, **kwargs):
         # Capturar el contexto actual
         tenant_id = get_current_tenant_id()
         agent_id = get_current_agent_id()
+        collection_id = get_current_collection_id()
         
         # Ejecutar con el mismo contexto
-        return await run_with_agent_context(tenant_id, agent_id, func(*args, **kwargs))
+        return await run_with_agent_context(tenant_id, agent_id, collection_id, func(*args, **kwargs))
     
     # Preservar explícitamente los atributos que FastAPI usa para la documentación Swagger
     if hasattr(func, "__annotations__"):
@@ -446,6 +502,7 @@ def with_full_context(func: AsyncFunc) -> AsyncFunc:
             tenant_id = get_current_tenant_id()
             agent_id = get_current_agent_id()
             conversation_id = get_current_conversation_id()
+            collection_id = get_current_collection_id()
             # Resto del código...
         ```
     
@@ -461,10 +518,11 @@ def with_full_context(func: AsyncFunc) -> AsyncFunc:
         tenant_id = get_current_tenant_id()
         agent_id = get_current_agent_id()
         conversation_id = get_current_conversation_id()
+        collection_id = get_current_collection_id()
         
         # Ejecutar con el mismo contexto
         return await run_with_full_context(
-            tenant_id, agent_id, conversation_id, 
+            tenant_id, agent_id, conversation_id, collection_id,
             func(*args, **kwargs)
         )
     

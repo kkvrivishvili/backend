@@ -572,7 +572,7 @@ async def create_collection(
     summary="Eliminar colección",
     description="Elimina una colección completa y todos sus documentos"
 )
-@with_tenant_context
+@with_full_context
 async def delete_collection(
     collection_id: str,
     tenant_info: TenantInfo = Depends(verify_tenant)
@@ -601,21 +601,10 @@ async def delete_collection(
             - name: Nombre de la colección (para referencia)
             - deleted: True si se eliminó correctamente
             - documents_deleted: Cantidad de documentos/fragmentos eliminados
-    
-    Raises:
-        ServiceError: Si la colección no existe o hay error en la eliminación
     """
+    set_current_collection_id(str(collection_id))
     try:
         tenant_id = tenant_info.tenant_id
-        
-        # Conectar a Supabase
-        supabase = get_supabase_client()
-        if not supabase:
-            raise ServiceError(
-                message="Error conectando a Supabase", 
-                error_code="DATABASE_ERROR",
-                status_code=500
-            )
         
         # Verificar existencia de la colección
         result = supabase.table(get_table_name("collections")).select("name") \
