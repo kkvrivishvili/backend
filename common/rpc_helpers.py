@@ -216,7 +216,10 @@ async def add_chat_history(
 
 async def increment_token_usage(
     tenant_id: str, 
-    tokens: int
+    tokens: int,
+    agent_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    token_type: str = "llm"
 ) -> bool:
     """
     Incrementa el contador de tokens usados por un tenant de forma atómica.
@@ -224,9 +227,18 @@ async def increment_token_usage(
     Esta operación es crítica y debe ser atómica para garantizar
     la precisión del conteo de tokens y facturación.
     
+    En caso de conversaciones públicas, detecta automáticamente si es necesario
+    contabilizar los tokens al propietario del agente basado en el agent_id proporcionado.
+    
     Args:
-        tenant_id: ID del tenant
+        tenant_id: ID del tenant que realiza la solicitud (obtenido del JWT)
         tokens: Número de tokens a incrementar
+        agent_id: ID del agente con el que se interactúa (opcional)
+                  Si se proporciona y el tenant_id no coincide con el propietario,
+                  los tokens se contabilizarán al propietario del agente.
+        conversation_id: ID de la conversación (opcional, para tracking)
+        token_type: Tipo de tokens a contabilizar ('llm' o 'embedding')
+                    Permite llevar contabilización separada por tipo de uso.
         
     Returns:
         True si se incrementó correctamente
@@ -234,29 +246,107 @@ async def increment_token_usage(
     Raises:
         ServiceError: Si hay un error al incrementar los tokens
     """
+    from .redis_helpers import increment_token_counter, get_cached_conversation, get_redis_client
+    
     supabase = get_supabase_client()
     
+    # Por defecto usar el tenant_id proporcionado
+    effective_tenant_id = tenant_id
+    owner_detected = False
+    
+    # Intentar primero obtener datos de Redis si hay conversation_id
+    if agent_id and tenant_id and conversation_id:
+        try:
+            redis = await get_redis_client()
+            if redis:
+                # Intentar obtener datos de la conversación desde Redis
+                cached_conv = await get_cached_conversation(conversation_id)
+                if cached_conv and "owner_tenant_id" in cached_conv:
+                    # Verificar si el tenant actual no es el propietario
+                    if cached_conv["owner_tenant_id"] != tenant_id:
+                        effective_tenant_id = cached_conv["owner_tenant_id"]
+                        owner_detected = True
+                        logger.debug(f"Using cached owner from Redis: attributing {tokens} tokens to owner {effective_tenant_id} instead of {tenant_id}")
+        except Exception as redis_error:
+            # Error no fatal, continuamos con Supabase
+            logger.warning(f"Error checking cached conversation owner, continuing with Supabase: {str(redis_error)}")
+    
+    # Si no pudimos obtener desde Redis, consultar Supabase
+    if agent_id and tenant_id and not owner_detected:
+        try:
+            # Consultar el propietario del agente
+            agent_result = await supabase.table(get_table_name("agent_configs")).select("tenant_id").eq("agent_id", agent_id).execute()
+            
+            if agent_result.data:
+                agent_owner_id = agent_result.data[0]["tenant_id"]
+                
+                # Si el tenant_id actual no es el propietario del agente, contabilizar al propietario
+                if agent_owner_id != tenant_id:
+                    effective_tenant_id = agent_owner_id
+                    owner_detected = True
+                    logger.debug(f"Conversation with agent {agent_id} - attributing {tokens} tokens to owner {agent_owner_id} instead of {tenant_id}")
+                    
+                    # Cachear la información en Redis si tenemos conversation_id
+                    if conversation_id:
+                        try:
+                            redis = await get_redis_client()
+                            if redis:
+                                # Cachear la relación conversation -> owner para futuras consultas
+                                await cache_conversation(
+                                    conversation_id=conversation_id,
+                                    agent_id=agent_id,
+                                    owner_tenant_id=agent_owner_id,
+                                    is_public=True
+                                )
+                        except Exception as cache_error:
+                            # Error no fatal
+                            logger.warning(f"Error caching conversation owner: {str(cache_error)}")
+                    
+        except Exception as e:
+            # En caso de error, seguir usando el tenant_id original
+            logger.warning(f"Error checking agent owner, using original tenant_id: {str(e)}")
+    
     try:
+        # 1. Incrementar contador en Supabase usando RPC
+        # Usar el procedimiento almacenado específico según el tipo de token
+        if token_type == "embedding":
+            rpc_name = "increment_embedding_token_usage"
+        else:  # Por defecto usar llm
+            rpc_name = "increment_token_usage"
+            
         result = await supabase.rpc(
-            "increment_token_usage",
+            rpc_name,
             {
-                "p_tenant_id": tenant_id,
+                "p_tenant_id": effective_tenant_id,
                 "p_tokens": tokens
             }
         ).execute()
         
         if result.error:
             raise ServiceError(
-                message=f"Error incrementing token usage: {result.error.message}",
+                message=f"Error incrementing {token_type} token usage: {result.error.message}",
                 error_code="TOKEN_TRACKING_ERROR"
             )
         
+        # 2. Incrementar también en Redis para consultas rápidas
+        try:
+            await increment_token_counter(
+                tenant_id=effective_tenant_id,
+                tokens=tokens,
+                token_type=token_type,
+                agent_id=agent_id,
+                conversation_id=conversation_id
+            )
+        except Exception as redis_error:
+            # Error no fatal en Redis
+            logger.warning(f"Error incrementing token counter in Redis (non-fatal): {str(redis_error)}")
+            
         return True
     except Exception as e:
         if not isinstance(e, ServiceError):
-            logger.error(f"Unexpected error incrementing token usage: {str(e)}")
+            logger.error(f"Unexpected error incrementing {token_type} token usage: {str(e)}")
             raise ServiceError(
-                message=f"Unexpected error incrementing token usage: {str(e)}",
+                message=f"Unexpected error incrementing {token_type} token usage: {str(e)}",
                 error_code="TOKEN_TRACKING_ERROR"
             )
         raise

@@ -482,6 +482,28 @@ class PublicChatRequest(BaseModel):
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 
+class PublicChatMessage(BaseModel):
+    """Modelo para mensajes en conversaciones públicas."""
+    content: str
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class PublicConversationCreate(BaseModel):
+    """Modelo para crear nuevas conversaciones públicas."""
+    title: str = "Nueva conversación"
+    metadata: Optional[Dict[str, Any]] = None
+    
+
+class PublicConversationResponse(BaseModel):
+    """Respuesta para conversaciones públicas."""
+    conversation_id: str
+    agent_id: str
+    title: str
+    is_public: bool = True
+    session_id: Optional[str] = None
+    created_at: Optional[str] = None
+
+
 class CollectionInfo(BaseModel):
     """
     Información sobre una colección de documentos.

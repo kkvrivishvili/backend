@@ -43,6 +43,38 @@ def get_supabase_client(use_service_role: bool = True) -> Client:
     return supabase
 
 
+def get_supabase_client_with_token(token: Optional[str] = None, use_service_role: bool = True) -> Client:
+    """
+    Obtiene un cliente Supabase, opcionalmente con un token JWT de usuario.
+    
+    Args:
+        token: Token JWT opcional del usuario. Si se proporciona, se usa para autenticación
+              y prevalece sobre use_service_role.
+        use_service_role: Si es True y no hay token, usa la clave de servicio cuando está disponible.
+        
+    Returns:
+        Client: Cliente Supabase configurado
+    """
+    # Importar get_settings aquí para evitar importación circular
+    from .config import get_settings
+    settings = get_settings()
+    
+    if token:
+        # Si hay token, usar para autenticación de usuario
+        # Usar la clave pública (anon) ya que el token maneja la autenticación
+        api_key = settings.supabase_key
+        
+        logger.debug("Creando cliente Supabase con token JWT de usuario")
+        return create_client(
+            settings.supabase_url,
+            api_key,
+            options={"headers": {"Authorization": f"Bearer {token}"}}
+        )
+    else:
+        # Sin token, usar cliente normal (potencialmente con service key)
+        return get_supabase_client(use_service_role=use_service_role)
+
+
 def init_supabase():
     """
     Inicializa el cliente Supabase.

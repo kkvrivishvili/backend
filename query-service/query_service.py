@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 import time
 
-from fastapi import FastAPI, Request, Depends, HTTPException, Body, Query, Path, Response, BackgroundTasks
+from fastapi import FastAPI, Request, Depends, HTTPException, Body, Query, Path, Response, BackgroundTasks, Cookie
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -51,15 +51,26 @@ from common.models import (
     CollectionsListResponse, CollectionInfo, LlmModelInfo, LlmModelsListResponse,
     TenantStatsResponse, UsageByModel, TokensUsage, DailyUsage, CollectionDocCount,
     CollectionToolResponse, CollectionCreationResponse, CollectionUpdateResponse, CollectionStatsResponse,
-    CacheClearResponse, ErrorResponse, DeleteCollectionResponse, ServiceStatusResponse
+    CacheClearResponse, ErrorResponse, DeleteCollectionResponse, ServiceStatusResponse,
+    # Modelos para conversaciones públicas
+    PublicChatMessage, PublicConversationCreate, PublicConversationResponse
 )
+
 from common.auth import (
-    verify_tenant, check_tenant_quotas, validate_model_access, 
-    get_allowed_models_for_tier, get_tier_limits, get_auth_info
-)
+    verify_tenant, check_tenant_quotas, validate_model_access,
+    get_allowed_models_for_tier, get_tier_limits, get_auth_info,
+    with_auth_client, get_auth_supabase_client, AISchemaAccess)
 from common.supabase import get_supabase_client, get_tenant_vector_store, get_tenant_documents, get_tenant_collections, init_supabase, get_table_name
 from common.cache import get_redis_client
 from common.tracking import track_query, track_token_usage
+from common.redis_helpers import (
+    get_redis_client,
+    cache_conversation,
+    cache_message,
+    get_cached_conversation,
+    get_cached_messages
+)
+from common.token_helpers import count_tokens, count_message_tokens
 from common.rate_limiting import setup_rate_limiting
 from common.utils import prepare_service_request
 from common.errors import setup_error_handling, handle_service_error_simple, ServiceError
@@ -1104,66 +1115,66 @@ async def clear_config_cache(
             error_code="CACHE_ERROR"
         )
 
-@app.delete("/collections/{collection_id}", response_model=DeleteCollectionResponse)
 @with_tenant_context
+@app.delete("/api/collections/{collection_id}", response_model=DeleteCollectionResponse)
 async def delete_collection(
-    collection_id: UUID, 
+    collection_id: UUID,
+    request: Request,
     tenant_info: TenantInfo = Depends(verify_tenant)
-) -> DeleteCollectionResponse:
+):
     """
-    Elimina una colección y sus documentos asociados.
+    Elimina una colección completa y todos sus documentos asociados.
     
     Args:
-        collection_id: ID de la colección
+        collection_id: ID único de la colección a eliminar
+        request: Request de FastAPI para obtener el token JWT
         tenant_info: Información del tenant (inyectada)
         
     Returns:
-        DeleteCollectionResponse: Respuesta de la operación
+        DeleteCollectionResponse: Información sobre la eliminación
+        
+    Raises:
+        HTTPException: Si la colección no existe o pertenece a otro tenant
     """
+    # Usar AISchemaAccess para acceder a las tablas con la autenticación adecuada
+    # Las tablas del esquema "ai" usarán el token JWT para autenticación y contabilización correcta
+    db = AISchemaAccess(request)
+    
     try:
-        supabase = get_supabase_client()
+        # Verificar que la colección exista y pertenezca al tenant
+        # Como "collections" está en el esquema "ai", se usará el cliente autenticado con JWT
+        collection_result = await (await db.table("collections")).select("name").eq("collection_id", str(collection_id)).eq("tenant_id", tenant_info.tenant_id).execute()
         
-        # 1. Verificar que la colección existe y pertenece al tenant
-        collection_result = await supabase.table(get_table_name("collections")).select("name").eq("collection_id", str(collection_id)).eq("tenant_id", tenant_info.tenant_id).execute()
+        if not collection_result.data:
+            raise HTTPException(status_code=404, detail=f"Collection not found with ID: {collection_id}")
         
-        if not collection_result.data or len(collection_result.data) == 0:
-            raise ServiceError(
-                message=f"Colección {collection_id} no encontrada o no pertenece al tenant {tenant_info.tenant_id}",
-                error_code="collection_not_found",
-                status_code=404
-            )
+        collection_name = collection_result.data[0]["name"]
         
-        collection_name = collection_result.data[0].get("name", "")
+        # Contar documentos a eliminar para el response
+        # Como "document_chunks" está en el esquema "ai", se usará el cliente autenticado con JWT
+        chunks_result = await (await db.table("document_chunks")).select("count", count="exact").eq("tenant_id", tenant_info.tenant_id).filter("metadata->collection_id", "eq", str(collection_id)).execute()
         
-        # 2. Contar documentos para reportar en la respuesta
-        chunks_result = await supabase.table(get_table_name("document_chunks")).select("count", count="exact").eq("tenant_id", tenant_info.tenant_id).filter("metadata->collection_id", "eq", str(collection_id)).execute()
-        chunks_count = chunks_result.count if hasattr(chunks_result, 'count') else 0
+        # Eliminar todos los chunks de la colección
+        delete_chunks = await (await db.table("document_chunks")).delete().eq("tenant_id", tenant_info.tenant_id).filter("metadata->collection_id", "eq", str(collection_id)).execute()
         
-        # 3. Eliminar documentos de la colección
-        delete_chunks = await supabase.table(get_table_name("document_chunks")).delete().eq("tenant_id", tenant_info.tenant_id).filter("metadata->collection_id", "eq", str(collection_id)).execute()
+        # Eliminar la colección
+        delete_collection = await (await db.table("collections")).delete().eq("collection_id", str(collection_id)).eq("tenant_id", tenant_info.tenant_id).execute()
         
-        # 4. Eliminar la colección
-        delete_collection = await supabase.table(get_table_name("collections")).delete().eq("collection_id", str(collection_id)).eq("tenant_id", tenant_info.tenant_id).execute()
+        document_count = chunks_result.count if hasattr(chunks_result, "count") else 0
         
-        logger.info(f"Colección {collection_id} eliminada con {chunks_count} documentos")
+        # Si este endpoint necesitara acceder a tablas del esquema "public", usaría el mismo db:
+        # tenant_info = await (await db.table("tenants")).select("*").eq("tenant_id", tenant_id).execute()
+        # En este caso, se usaría el cliente estándar sin JWT
         
         return DeleteCollectionResponse(
-            collection_id=collection_id,
-            name=collection_name,
-            deleted=True,
-            documents_deleted=chunks_count
+            message=f"Collection '{collection_name}' deleted successfully",
+            deleted_documents=document_count,
+            success=True
         )
         
-    except ServiceError as e:
-        logger.error(f"Error al eliminar colección: {e.message}")
-        raise e
     except Exception as e:
-        logger.error(f"Error inesperado al eliminar colección: {str(e)}")
-        raise ServiceError(
-            message=f"Error al eliminar colección: {str(e)}",
-            error_code="delete_collection_error",
-            status_code=500
-        )
+        logger.exception(f"Error deleting collection {collection_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error deleting collection: {str(e)}")
 
 async def get_collection_name(collection_id: str, tenant_id: str) -> Optional[str]:
     """
@@ -1247,6 +1258,729 @@ async def get_collection_config(tenant_id: str, collection_id: str) -> Dict[str,
     except Exception as e:
         logger.warning(f"Error obteniendo configuraciones para colección {collection_id}: {str(e)}")
         return {}
+
+# Contexto de ciclo de vida para inicializar el servicio
+@with_tenant_context
+@app.get("/api/user/profile", response_model=Dict[str, Any])
+async def get_user_profile(
+    request: Request,
+    supabase_client: Client = Depends(get_auth_supabase_client)
+):
+    """
+    Obtiene el perfil del usuario actual usando el token JWT proporcionado.
+    
+    Este endpoint es un ejemplo de cómo usar el cliente Supabase autenticado con un token.
+    Requiere que el cliente envíe un token JWT válido en el header Authorization.
+    
+    Args:
+        request: Objeto Request de FastAPI
+        supabase_client: Cliente Supabase autenticado con el token JWT del usuario
+        
+    Returns:
+        Dict[str, Any]: Información del perfil del usuario
+    """
+    # Obtener información de autenticación que ya incluye datos del token
+    auth_info = await get_auth_info(request)
+    
+    # Verificar si hay token de usuario
+    if "token" not in auth_info:
+        raise HTTPException(
+            status_code=401,
+            detail="Se requiere un token de autenticación para acceder a este recurso"
+        )
+    
+    # Obtener información del usuario usando el cliente autenticado
+    try:
+        # Usar el cliente que ya tiene el token configurado
+        user_response = await supabase_client.auth.get_user()
+        
+        # Si hay errores en la respuesta
+        if hasattr(user_response, 'error') and user_response.error:
+            logger.error(f"Error obteniendo información del usuario: {user_response.error}")
+            raise HTTPException(status_code=401, detail="Token inválido o expirado")
+        
+        # Extraer datos del usuario
+        user_data = user_response.user
+        
+        # Devolver información relevante del usuario
+        return {
+            "id": user_data.id,
+            "email": user_data.email,
+            "last_sign_in": user_data.last_sign_in_at,
+            "app_metadata": user_data.app_metadata,
+            "user_metadata": user_data.user_metadata,
+            "tenant_id": auth_info.get("tenant_id")
+        }
+        
+    except Exception as e:
+        logger.exception(f"Error al obtener perfil de usuario: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+
+# Endpoint alternativo usando el decorador with_auth_client
+@with_tenant_context
+@app.get("/api/user/data", response_model=Dict[str, Any])
+@with_auth_client
+async def get_user_data(supabase_client: Client, request: Request):
+    """
+    Obtiene datos específicos del usuario usando el decorador with_auth_client.
+    Este endpoint muestra una forma alternativa de usar la autenticación con token.
+    
+    Args:
+        supabase_client: Inyectado automáticamente por el decorador with_auth_client
+        request: Objeto Request de FastAPI
+        
+    Returns:
+        Dict[str, Any]: Datos del usuario
+    """
+    # Obtener información de autenticación
+    auth_info = await get_auth_info(request)
+    user_id = auth_info.get("user_id")
+    
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Se requiere un token de usuario válido")
+    
+    try:
+        # Usar el cliente autenticado para obtener datos del usuario
+        # Por ejemplo, obtener preferencias del usuario de una tabla
+        preferences = await supabase_client.table(get_table_name("user_preferences"))\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .execute()
+        
+        # Devolver los datos obtenidos
+        return {
+            "user_id": user_id,
+            "email": auth_info.get("email"),
+            "preferences": preferences.data if preferences.data else [],
+            "tenant_id": auth_info.get("tenant_id")
+        }
+    except Exception as e:
+        logger.exception(f"Error al obtener datos de usuario: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+
+# Endpoints para conversaciones públicas con agentes
+
+@app.post("/api/public/conversations/{agent_id}", response_model=Dict[str, Any])
+async def create_public_conversation(
+    agent_id: str,
+    request: Request,
+    data: PublicConversationCreate
+):
+    """
+    Crea una nueva conversación pública con un agente.
+    Esta endpoint permite interactuar con agentes sin necesidad de autenticación.
+    """
+    # 1. Obtener la autenticación (puede ser None en conversaciones públicas)
+    auth_info = await get_auth_info(request)
+    tenant_id = auth_info.get("tenant_id")  # Puede ser None
+    
+    # 2. Generar session_id 
+    session_id = str(uuid.uuid4())
+    
+    # 3. Obtener cliente Supabase
+    supabase = get_supabase_client()
+    
+    # 4. Verificar que el agente existe y es público
+    agent_result = await supabase.table(get_table_name("agent_configs"))\
+        .select("tenant_id, is_public")\
+        .eq("agent_id", agent_id)\
+        .execute()
+    
+    if not agent_result.data:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    # Verificar si el agente es público
+    agent_is_public = agent_result.data[0].get("is_public", False)
+    if not agent_is_public:
+        raise HTTPException(status_code=403, detail="This agent is not public")
+    
+    owner_tenant_id = agent_result.data[0]["tenant_id"]
+    
+    # 5. Preparar metadatos
+    metadata = data.metadata or {}
+    metadata.update({
+        "session_id": session_id,
+        "is_public": True,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    })
+    
+    # 6. Crear conversación en Supabase
+    conversation_id = str(uuid.uuid4())
+    
+    try:
+        # Primero, obtener configuración del agente
+        agent_config = await supabase.table(get_table_name("agent_configs"))\
+            .select("*")\
+            .eq("agent_id", agent_id)\
+            .single()\
+            .execute()
+            
+        if not agent_config.data:
+            raise HTTPException(status_code=404, detail="Agent configuration not found")
+        
+        # Crear la conversación
+        conversation_data = {
+            "conversation_id": conversation_id,
+            "tenant_id": owner_tenant_id,  # Usar el tenant del propietario
+            "agent_id": agent_id,
+            "title": data.title,
+            "context": json.dumps({}),
+            "metadata": json.dumps(metadata),
+            "is_public": True,
+            "session_id": session_id
+        }
+        
+        await supabase.table(get_table_name("conversations"))\
+            .insert(conversation_data)\
+            .execute()
+        
+        # 7. Cachear conversación en Redis
+        await cache_conversation(
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            owner_tenant_id=owner_tenant_id,
+            title=data.title,
+            is_public=True,
+            session_id=session_id
+        )
+        
+        # 8. Si el agente tiene un mensaje de bienvenida, añadirlo
+        welcome_message = agent_config.data.get("welcome_message")
+        if welcome_message:
+            system_message_id = str(uuid.uuid4())
+            
+            # Guardar mensaje de sistema en Supabase
+            await supabase.table(get_table_name("chat_history"))\
+                .insert({
+                    "message_id": system_message_id,
+                    "conversation_id": conversation_id,
+                    "role": "assistant",
+                    "content": welcome_message,
+                    "metadata": json.dumps({"is_welcome": True})
+                })\
+                .execute()
+                
+            # Cachear mensaje en Redis
+            await cache_message(
+                conversation_id=conversation_id,
+                message_id=system_message_id,
+                role="assistant",
+                content=welcome_message,
+                metadata={"is_welcome": True}
+            )
+        
+        # 9. Configurar response con cookie
+        response_data = {
+            "conversation_id": conversation_id,
+            "agent_id": agent_id,
+            "title": data.title
+        }
+        
+        # Crear respuesta con cookie
+        response = Response(content=json.dumps(response_data), media_type="application/json")
+        response.set_cookie(
+            key="session_id", 
+            value=session_id, 
+            httponly=True, 
+            max_age=86400 * 30,  # 30 días
+            path="/"
+        )
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error creating public conversation: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error creating conversation: {str(e)}")
+
+
+@app.post("/api/public/conversations/{conversation_id}/messages", response_model=Dict[str, Any])
+async def add_public_message(
+    conversation_id: str,
+    message: PublicChatMessage,
+    request: Request,
+    session_id: Optional[str] = Cookie(None)
+):
+    """
+    Añade un mensaje a una conversación pública y procesa la respuesta.
+    """
+    # 1. Verificar session_id
+    if not session_id:
+        raise HTTPException(status_code=401, detail="Session ID required")
+    
+    # 2. Obtener autenticación (puede ser None)
+    auth_info = await get_auth_info(request)
+    tenant_id = auth_info.get("tenant_id")  # Puede ser None
+    
+    # 3. Obtener información de la conversación
+    # Primero intentar desde Redis
+    conversation = None
+    agent_id = None
+    owner_tenant_id = None
+    
+    redis = await get_redis_client()
+    if redis:
+        # Intentar obtener desde caché
+        cached_conv = await get_cached_conversation(conversation_id)
+        if cached_conv:
+            agent_id = cached_conv.get("agent_id")
+            owner_tenant_id = cached_conv.get("owner_tenant_id")
+            conversation = cached_conv
+    
+    # Si no está en caché, obtener de Supabase
+    if not conversation:
+        supabase = get_supabase_client()
+        
+        result = await supabase.table(get_table_name("conversations"))\
+            .select("agent_id, tenant_id, is_public, session_id")\
+            .eq("conversation_id", conversation_id)\
+            .execute()
+            
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+            
+        conversation = result.data[0]
+        agent_id = conversation["agent_id"]
+        owner_tenant_id = conversation["tenant_id"]
+        
+        # Verificar que la conversación es pública
+        if not conversation.get("is_public", False):
+            raise HTTPException(status_code=403, detail="This is not a public conversation")
+            
+        # Verificar que el session_id coincide
+        if conversation.get("session_id") != session_id:
+            raise HTTPException(status_code=403, detail="Invalid session for this conversation")
+            
+        # Cachear conversación para futuras consultas
+        await cache_conversation(
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            owner_tenant_id=owner_tenant_id,
+            is_public=True,
+            session_id=session_id
+        )
+    
+    # 4. Procesar el mensaje
+    try:
+        supabase = get_supabase_client()
+        
+        # Generar IDs para los mensajes
+        user_message_id = str(uuid.uuid4())
+        assistant_message_id = str(uuid.uuid4())
+        
+        # Preparar metadatos
+        message_metadata = message.metadata or {}
+        message_metadata.update({
+            "session_id": session_id,
+            "timestamp": time.time()
+        })
+        
+        # 4.1 Guardar mensaje del usuario
+        await supabase.table(get_table_name("chat_history"))\
+            .insert({
+                "message_id": user_message_id,
+                "conversation_id": conversation_id,
+                "role": "user",
+                "content": message.content,
+                "metadata": json.dumps(message_metadata)
+            })\
+            .execute()
+            
+        # Cachear mensaje en Redis
+        await cache_message(
+            conversation_id=conversation_id,
+            message_id=user_message_id,
+            role="user",
+            content=message.content,
+            metadata=message_metadata
+        )
+        
+        # 4.2 Procesar con el flujo RAG completo
+        start_time = time.time()
+        
+        # Obtener configuración del agente
+        agent_config_result = await supabase.table(get_table_name("agent_configs"))\
+            .select("*")\
+            .eq("agent_id", agent_id)\
+            .single()\
+            .execute()
+            
+        if not agent_config_result.data:
+            raise HTTPException(status_code=404, detail="Agent configuration not found")
+            
+        agent_config = agent_config_result.data
+        llm_model = agent_config.get("model_id", "gpt-3.5-turbo")
+        
+        # Crear un objeto TenantInfo para el propietario del agente
+        owner_tenant_info = TenantInfo(
+            tenant_id=owner_tenant_id,
+            subscription_tier="pro",  # Asumimos tier pro para el propietario
+            subscription_status="active",
+            allowed_models=[llm_model],
+            quota_limits={"tokens": 1000000}
+        )
+        
+        # Obtener mensajes previos para contexto
+        previous_messages = []
+        cached_messages = await get_cached_messages(conversation_id, limit=10)
+        if cached_messages:
+            previous_messages = [
+                ChatMessage(role=msg["role"], content=msg["content"])
+                for msg in cached_messages
+                if msg["role"] in ["user", "assistant"]
+            ]
+        
+        # Preparar la solicitud para el procesamiento del agente
+        chat_request = ChatRequest(
+            tenant_id=owner_tenant_id,
+            agent_id=agent_id,
+            message=message.content,
+            conversation_id=conversation_id,
+            chat_history=previous_messages,
+            stream=False
+        )
+        
+        # 1. Generar embedding para la consulta
+        embedding_start = time.time()
+        embedding_request = EmbeddingRequest(
+            tenant_id=owner_tenant_id,
+            texts=[message.content],
+            agent_id=agent_id,
+            conversation_id=conversation_id
+        )
+        
+        # Generar embedding a través del servicio de embeddings
+        embedding = await generate_embedding(message.content)
+        embedding_time = time.time() - embedding_start
+        embedding_tokens = len(message.content.split()) * 0.75  # Estimación para tokens de embedding
+        
+        # Contabilizar tokens de embedding
+        embedding_tokens = count_tokens(message.content, "text-embedding-ada-002")
+        await track_token_usage(
+            tenant_id=tenant_id,  # Puede ser None, se usará el propietario del agente
+            tokens=embedding_tokens,
+            model="text-embedding-ada-002",  # O el modelo correspondiente
+            agent_id=agent_id,
+            conversation_id=conversation_id,
+            token_type="embedding"
+        )
+        
+        # 2. Obtener herramientas del agente (colecciones RAG)
+        tools = agent_config.get("tools", [])
+        rag_tools = [tool for tool in tools if tool.get("type") == "rag"]
+        
+        # 3. Recuperar documentos relevantes si hay herramientas RAG
+        sources = []
+        if rag_tools:
+            for rag_tool in rag_tools:
+                tool_metadata = rag_tool.get("metadata", {})
+                collection_id = tool_metadata.get("collection_id")
+                if collection_id:
+                    # Crear motor de consulta para la colección
+                    try:
+                        query_engine, _ = await create_query_engine(
+                            tenant_info=owner_tenant_info,
+                            collection_id=collection_id,
+                            llm_model=llm_model,
+                            similarity_top_k=tool_metadata.get("similarity_top_k", 4),
+                            response_mode="compact"
+                        )
+                        
+                        # Realizar consulta para obtener documentos relevantes
+                        query_result = await query_engine.aquery(message.content)
+                        
+                        # Agregar fuentes si existen
+                        if hasattr(query_result, "source_nodes"):
+                            for node in query_result.source_nodes:
+                                sources.append({
+                                    "text": node.text,
+                                    "metadata": node.metadata,
+                                    "score": node.score if hasattr(node, "score") else None
+                                })
+                    except Exception as e:
+                        logger.warning(f"Error al consultar colección {collection_id}: {str(e)}")
+        
+        # 4. Generar respuesta con el LLM utilizando el contexto de documentos y chat history
+        llm = get_llm_for_tenant(owner_tenant_info, llm_model)
+        
+        # Preparar prompt con contexto de documentos si existen
+        context_text = ""
+        if sources:
+            context_text = "\n\nContexto:\n" + "\n\n".join([s["text"] for s in sources])
+        
+        # Preparar historial de chat para el LLM
+        chat_history_text = ""
+        if previous_messages:
+            for msg in previous_messages[-5:]:  # Usar los últimos 5 mensajes
+                role_prefix = "Usuario: " if msg.role == "user" else "Asistente: "
+                chat_history_text += f"\n{role_prefix}{msg.content}"
+        
+        # Prompt completo
+        prompt = f"""Historial de la conversación: {chat_history_text}\n\nPregunta del usuario: {message.content}{context_text}\n\nResponde con información relevante basada en el contexto proporcionado."""
+        
+        # Generar respuesta con el LLM
+        try:
+            if hasattr(llm, "acomplete"):
+                llm_response = await llm.acomplete(prompt)
+            elif hasattr(llm, "acompletion"):
+                response = await llm.acompletion(prompt)
+                llm_response = response.text if hasattr(response, "text") else str(response)
+            elif hasattr(llm, "achat_completion"):
+                formatted_messages = [
+                    {"role": "system", "content": "Responde con información relevante basada en el contexto proporcionado."}
+                ]
+                
+                # Añadir mensajes anteriores
+                if previous_messages:
+                    for msg in previous_messages[-5:]:
+                        formatted_messages.append({"role": msg.role, "content": msg.content})
+                
+                # Añadir contexto y mensaje actual
+                if context_text:
+                    formatted_messages.append({"role": "system", "content": f"Contexto: {context_text}"})
+                
+                formatted_messages.append({"role": "user", "content": message.content})
+                
+                response = await llm.achat_completion(formatted_messages)
+                llm_response = response.text if hasattr(response, "text") else str(response)
+            else:
+                # Fallback a método genérico
+                llm_response = str(await llm.agenerate(prompt))
+        except Exception as e:
+            logger.error(f"Error al generar respuesta LLM: {str(e)}")
+            # Fallback a respuesta simple
+            llm_response = "Lo siento, no puedo procesar tu solicitud en este momento."
+            
+        # 5. Calcular tokens utilizados con nuestra utilidad especializada
+        prompt_tokens = count_tokens(prompt, llm_model)
+        response_tokens = count_tokens(llm_response, llm_model)
+        token_count = prompt_tokens + response_tokens
+        
+        # Para registros, también podemos calcular con formato de chat si es necesario
+        if previous_messages and len(previous_messages) > 0:
+            chat_messages = [{
+                "role": "system", 
+                "content": "Responde con información relevante basada en el contexto proporcionado."
+            }]
+            
+            # Añadir historial de chat
+            for msg in previous_messages[-5:]:
+                chat_messages.append({"role": msg.role, "content": msg.content})
+                
+            # Añadir mensaje actual del usuario
+            chat_messages.append({"role": "user", "content": message.content})
+            
+            # Calcular tokens para formato de chat
+            chat_tokens = count_message_tokens(chat_messages, llm_model)
+            # Si la diferencia es significativa, usar el conteo de chat en su lugar
+            if abs(chat_tokens["tokens_in"] - prompt_tokens) > prompt_tokens * 0.2:
+                prompt_tokens = chat_tokens["tokens_in"]
+                token_count = prompt_tokens + response_tokens
+            
+        processing_time = time.time() - start_time
+        
+        # 4.3 Contabilizar tokens - automáticamente se atribuyen al propietario
+        await track_token_usage(
+            tenant_id=tenant_id,  # Puede ser None, se determinará el propietario automáticamente
+            tokens=token_count,
+            model=llm_model,
+            agent_id=agent_id,  # Clave para la lógica de propietario
+            conversation_id=conversation_id,
+            token_type="llm"
+        )
+        
+        # Guardar información de fuentes si existen
+        sources_data = None
+        if sources:
+            sources_data = json.dumps(sources)
+        
+        # 4.4 Guardar respuesta del asistente
+        response_metadata = {
+            "session_id": session_id,
+            "token_count": token_count,
+            "processing_time": processing_time,
+            "timestamp": time.time(),
+            "sources": sources_data if sources else None,
+            "embedding_time": embedding_time if 'embedding_time' in locals() else None,
+            "embedding_tokens": embedding_tokens if 'embedding_tokens' in locals() else None
+        }
+        
+        await supabase.table(get_table_name("chat_history"))\
+            .insert({
+                "message_id": assistant_message_id,
+                "conversation_id": conversation_id,
+                "role": "assistant",
+                "content": llm_response,
+                "token_count": token_count,
+                "metadata": json.dumps(response_metadata)
+            })\
+            .execute()
+            
+        # Cachear respuesta en Redis
+        await cache_message(
+            conversation_id=conversation_id,
+            message_id=assistant_message_id,
+            role="assistant",
+            content=llm_response,
+            token_count=token_count,
+            metadata=response_metadata
+        )
+        
+        # 5. Devolver respuesta
+        return {
+            "message_id": assistant_message_id,
+            "content": llm_response,
+            "token_count": token_count,
+            "processing_time": processing_time
+        }
+        
+    except Exception as e:
+        logger.error(f"Error processing message: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing message: {str(e)}")
+
+
+@app.get("/api/public/conversations/{conversation_id}/history", response_model=Dict[str, Any])
+async def get_public_conversation_history(
+    conversation_id: str,
+    request: Request,
+    limit: int = 50,
+    session_id: Optional[str] = Cookie(None)
+):
+    """
+    Obtiene el historial de una conversación pública.
+    Utiliza caché en Redis para mejorar rendimiento.
+    """
+    # 1. Verificar session_id
+    if not session_id:
+        raise HTTPException(status_code=401, detail="Session ID required")
+    
+    # 2. Obtener información de la conversación
+    # Primero verificar acceso desde Redis
+    redis = await get_redis_client()
+    conversation = None
+    
+    if redis:
+        # Verificar si la conversación existe y pertenece a esta sesión
+        cached_conv = await get_cached_conversation(conversation_id)
+        if cached_conv and cached_conv.get("session_id") == session_id:
+            conversation = cached_conv
+    
+    # Si no está en caché o no coincide session_id, verificar en Supabase
+    if not conversation:
+        supabase = get_supabase_client()
+        
+        result = await supabase.table(get_table_name("conversations"))\
+            .select("is_public, session_id")\
+            .eq("conversation_id", conversation_id)\
+            .execute()
+            
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+            
+        # Verificar que es pública y session_id coincide
+        if not result.data[0].get("is_public") or result.data[0].get("session_id") != session_id:
+            raise HTTPException(status_code=403, detail="Access denied to this conversation")
+    
+    # 3. Obtener mensajes
+    # Intentar primero desde Redis
+    messages = []
+    
+    if redis:
+        cached_messages = await get_cached_messages(conversation_id, limit=limit)
+        if cached_messages:
+            messages = cached_messages
+    
+    # Si no está en caché, obtener de Supabase
+    if not messages:
+        supabase = get_supabase_client()
+        
+        # Obtener mensajes ordenados por fecha
+        result = await supabase.table(get_table_name("chat_history"))\
+            .select("message_id, role, content, token_count, metadata, created_at")\
+            .eq("conversation_id", conversation_id)\
+            .order("created_at", ascending=True)\
+            .limit(limit)\
+            .execute()
+            
+        if result.data:
+            messages = result.data
+            
+            # Cachear mensajes para futuras consultas
+            for msg in messages:
+                try:
+                    # Procesar metadata si existe como string JSON
+                    metadata = {}
+                    if isinstance(msg.get("metadata"), str):
+                        metadata = json.loads(msg["metadata"])
+                    elif isinstance(msg.get("metadata"), dict):
+                        metadata = msg["metadata"]
+                    
+                    # Cachear mensaje
+                    await cache_message(
+                        conversation_id=conversation_id,
+                        message_id=msg["message_id"],
+                        role=msg["role"],
+                        content=msg["content"],
+                        token_count=msg.get("token_count", 0),
+                        metadata=metadata
+                    )
+                except Exception as e:
+                    logger.warning(f"Error caching message: {str(e)}")
+    
+    # 4. Devolver mensajes
+    return {
+        "conversation_id": conversation_id,
+        "messages": messages
+    }
+
+
+@app.get("/api/public/agents/{agent_id}", response_model=Dict[str, Any])
+async def get_public_agent_info(
+    agent_id: str,
+    request: Request
+):
+    """
+    Obtiene información pública de un agente.
+    """
+    supabase = get_supabase_client()
+    
+    # Obtener información del agente
+    result = await supabase.table(get_table_name("agent_configs"))\
+        .select("agent_name, description, model_id, is_public, metadata")\
+        .eq("agent_id", agent_id)\
+        .eq("is_public", True)\
+        .execute()
+        
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Public agent not found")
+        
+    # Devolver información pública
+    agent_info = result.data[0]
+    
+    # Procesar metadata si es string
+    if isinstance(agent_info.get("metadata"), str):
+        try:
+            agent_info["metadata"] = json.loads(agent_info["metadata"])
+        except:
+            agent_info["metadata"] = {}
+    
+    return {
+        "agent_id": agent_id,
+        "name": agent_info["agent_name"],
+        "description": agent_info.get("description", ""),
+        "model": agent_info.get("model_id"),
+        "metadata": agent_info.get("metadata", {})
+    }
+
+
+# Agregar endpoints para el swagger
+def add_api_routes(app: FastAPI):
+    """Registra todas las rutas definidas en el servicio de consultas."""
+    # Las rutas principales se registran automáticamente con los decoradores
+    # Aquí se pueden agregar rutas adicionales si es necesario
+    pass
+
 
 # Contexto de ciclo de vida para inicializar el servicio
 @asynccontextmanager
